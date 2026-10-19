@@ -3,7 +3,8 @@
  * (subsys/bluetooth/controller/ll_sw/openisa/hal/RV32M1/radio/radio.h, 78 functions).
  * SPDX-License-Identifier: Apache-2.0
  *
- * *** UNVALIDATED, UNFINISHED: the radio register map is not public. ***
+ * *** UNVALIDATED, UNFINISHED: public generated register layouts are now known,
+ * but the required radio/sequencer behavior is not fully characterized. ***
  * Every function below is classified by what it is blocked on:
  *   software      needs no register access, simply not written yet
  *   regs-*        needs register knowledge listed in docs/radio-tables.md (T1..T9)
@@ -146,11 +147,11 @@ void radio_tx_power_max_set(void)
 	OWO_RADIO_TODO("PA registers (rfhal_pa)");
 }
 
-/* [regs] SYNTH channel programming: channel table is public, SYNTH registers are not (T4) */
+/* [regs-partial] SYNTH FREQ/CHCTRL/CHSP fields are public; BLE conversion is unvalidated (T4) */
 void radio_freq_chan_set(uint32_t chan)
 {
 	ARG_UNUSED(chan);
-	OWO_RADIO_TODO("SYNTH channel programming");
+	OWO_RADIO_TODO("SYNTH BLE channel conversion (T4)");
 }
 
 /* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
@@ -329,26 +330,26 @@ void radio_switch_complete_and_disable(void)
 	OWO_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
-/* [regs] AGC RSSI registers: unknown (T9) */
+/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; measurement policy is unknown (T9) */
 void radio_rssi_measure(void)
 {
 	OWO_RADIO_TODO("AGC RSSI registers");
 }
 
-/* [regs] AGC RSSI registers: unknown (T9) */
+/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; value conversion is unvalidated (T9) */
 uint32_t radio_rssi_get(void)
 {
 	OWO_RADIO_TODO("regs");
 	return 0;
 }
 
-/* [regs] AGC RSSI registers: unknown (T9) */
+/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; latch/reset semantics are unknown (T9) */
 void radio_rssi_status_reset(void)
 {
 	OWO_RADIO_TODO("AGC RSSI registers");
 }
 
-/* [regs] AGC RSSI registers: unknown (T9) */
+/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; readiness semantics are unknown (T9) */
 uint32_t radio_rssi_is_ready(void)
 {
 	OWO_RADIO_TODO("regs");
