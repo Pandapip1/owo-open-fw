@@ -57,28 +57,28 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define BLE_CCM_NONCE_SIZE 13U
 #define BLE_CCM_AAD_MASK 0xE3U
 
-#define EFR32_SYNTH_BASE 0xA8018000UL
+#define EFR32_SYNTH_BASE 0xB8018000UL
 #define EFR32_SYNTH_CHCTRL_OFFSET 0x040U
 #define EFR32_SYNTH_CHCTRL_CHNO_MASK 0x3FU
 
-#define EFR32_RFCRC_BASE 0xA8010000UL
+#define EFR32_RFCRC_BASE 0xB8010000UL
 #define EFR32_RFCRC_EN_OFFSET 0x004U
 #define EFR32_RFCRC_CTRL_OFFSET 0x008U
 #define EFR32_RFCRC_INIT_OFFSET 0x018U
 #define EFR32_RFCRC_POLY_OFFSET 0x020U
 #define EFR32_RFCRC_BLE_CTRL 0x00000708U
 
-#define EFR32_FRC_BASE 0xA8004000UL
-#define EFR32_AGC_BASE 0xA800C000UL
+#define EFR32_FRC_BASE 0xB8004000UL
+#define EFR32_AGC_BASE 0xB800C000UL
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
 
-#define EFR32_MODEM_BASE 0xA8014000UL
+#define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
 
-#define EFR32_RAC_BASE 0xA8020000UL
+#define EFR32_RAC_BASE 0xB8020000UL
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
@@ -294,7 +294,13 @@ static void efr32_radio_table_apply(const uint32_t *table)
 		uint32_t operation = header >> 28;
 		uint32_t block = (header >> 24) & 0xFU;
 		uint32_t count = (header >> 16) & 0xFFU;
-		uintptr_t address = 0xA8000000UL + ((uintptr_t)block << 16) +
+		/*
+		 * The public configurator encodes secure 0xA8xx_xxxx block
+		 * addresses. Zephyr's xG22 radio devicetree exposes radio RAM at
+		 * 0xB0000000, and the generated *_NS models place these blocks in
+		 * the non-secure 0xB8xx_xxxx window used by this application.
+		 */
+		uintptr_t address = 0xB8000000UL + ((uintptr_t)block << 16) +
 			(header & 0xFFFFU);
 
 		LL_ASSERT(count != 0U);
@@ -391,7 +397,7 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 void radio_setup(void)
 {
 	/*
-	 * Every address below is a rev-B2 secure EN register at +0x004, with
+	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
 	 * the sole writable field EN.EN at bit zero. This deliberately does not
 	 * claim an ordering, reset protocol, BUFC enable, or IRQ event policy.
 	 */
