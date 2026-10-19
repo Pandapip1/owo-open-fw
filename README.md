@@ -47,12 +47,19 @@ What the option actually changes: only the *hardware cycle* frequency becomes a 
 (`silabs_sleeptimer_timer.c` reads `sl_sleeptimer_get_timer_frequency()` and derives
 `cyc_per_tick = hz / CONFIG_SYS_CLOCK_TICKS_PER_SEC`). Kernel *ticks* per second stay the compile-time
 `CONFIG_SYS_CLOCK_TICKS_PER_SEC` (32768 here), which is all the Rust `time` module uses
-(`SYS_FREQUENCY`, `Duration`, `Instant`, `Timeout`); nothing in the crate converts cycles. The one hazard
-is code that does: `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` defaults to 0 under this option (this SoC's
-defconfig overrides it to 32768, but don't rely on it), so use `sys_clock_hw_cycles_per_sec()` there.
-The `bench` and `embassy` samples in zephyr-lang-rust use the Kconfig value.
+(`SYS_FREQUENCY`, `Duration`, `Instant`, `Timeout`); nothing in the crate converts cycles. The one hazard is
+code that converts cycle counts, because `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` is then not a usable
+value (0 by default; on this SoC the defconfig overrides it to 32768, which would be stale if the
+hardware frequency differs). The patch therefore makes `zephyr::kconfig::CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC`
+a compile error whenever `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME` (or
+`SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE`) is set, and adds `zephyr::time::hw_cycles_per_sec()`,
+which calls the kernel's run-time getter (or reads the Kconfig value when it is a constant). The constant
+becomes a value of a type named `HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwCyclesPerSec`, so the error
+reads e.g. ``non-primitive cast: `HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwCyclesPerSec` as `f64` ``.
+The `bench` and `embassy` samples in zephyr-lang-rust use the Kconfig value and would now stop compiling
+on such targets (they could not be built there before, since Rust was disabled).
 
-`patches/0001-*.patch` removes both guards. `scripts/apply-patches.sh` applies it to the west-managed
+`patches/0001-*.patch` removes both guards and adds that check (if you applied the earlier version of this patch, run `git -C ../modules/lang/rust checkout .` first). `scripts/apply-patches.sh` applies it to the west-managed
 checkout (idempotent; re-run after every `west update`). It is a local patch, not upstream. With it,
 `prj.conf` keeps the sleeptimer and `CONFIG_PM=y`. Without it, Kconfig reports
 `RUST ... was assigned the value 'y' but got the value 'n'`.
@@ -79,6 +86,9 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 - With the patch: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
   `TICKLESS_KERNEL=y` compiles and links (~134 KB flash / ~27 KB RAM), from a fresh `west init -l` +
   `west update` workspace plus `scripts/apply-patches.sh`; without it, Rust is disabled by Kconfig.
+  Also checked: `hw_cycles_per_sec()` builds in that configuration; using the Kconfig constant fails to
+  compile with the error above; with SysTick (option off) the constant is numeric again (78000000) and
+  both forms compile. The patch applies cleanly to the pristine pinned revision.
 - The 128-bit UUIDs are present in the linked ELF in little-endian byte order.
 
 ## Not validated

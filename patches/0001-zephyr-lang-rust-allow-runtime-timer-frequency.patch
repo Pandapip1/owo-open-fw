@@ -1,18 +1,22 @@
-From d8fd2fc5d4998a638148aaea6874d7647fd90f69 Mon Sep 17 00:00:00 2001
+From aa03abce92bd4e4f4fe415e831a1afc1eb36f352 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 05:02:34 +0000
 Subject: [PATCH] Allow Rust on targets whose timer reads its frequency at run
  time
 
-Ticks per second is still CONFIG_SYS_CLOCK_TICKS_PER_SEC; only the hardware
-cycle frequency becomes a run-time value, which this crate never uses.
+Kernel ticks per second is still CONFIG_SYS_CLOCK_TICKS_PER_SEC; only the
+hardware cycle frequency becomes a run-time value, which this crate never uses.
+
+Make CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC unusable (compile error) when that
+frequency is a run-time value, and add zephyr::time::hw_cycles_per_sec().
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
 ---
- Kconfig            |  3 +--
- zephyr/src/time.rs | 14 ++++++++------
- 2 files changed, 9 insertions(+), 8 deletions(-)
+ Kconfig                 |  3 +--
+ zephyr-build/src/lib.rs | 28 +++++++++++++++++++++++++---
+ zephyr/src/time.rs      | 38 ++++++++++++++++++++++++++++++++------
+ 3 files changed, 58 insertions(+), 11 deletions(-)
 
 diff --git a/Kconfig b/Kconfig
 index 2d3eddc..41209d9 100644
@@ -28,11 +32,50 @@ index 2d3eddc..41209d9 100644
  	help
  	  Selected for platforms that have support for Rust.
  
+diff --git a/zephyr-build/src/lib.rs b/zephyr-build/src/lib.rs
+index b36eaa2..e48d8aa 100644
+--- a/zephyr-build/src/lib.rs
++++ b/zephyr-build/src/lib.rs
+@@ -73,9 +73,31 @@ pub fn build_kconfig_mod() {
+ 
+     let mut f = File::create(&gen_path).unwrap();
+ 
+-    let file = File::open(&dotconfig).expect("Unable to open dotconfig");
+-    for line in BufReader::new(file).lines() {
+-        let line = line.expect("reading line from dotconfig");
++    let lines: Vec<String> = BufReader::new(File::open(&dotconfig).expect("Unable to open dotconfig"))
++        .lines()
++        .map(|l| l.expect("reading line from dotconfig"))
++        .collect();
++
++    // When the hardware cycle frequency is only known at run time (or can change at run time),
++    // CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC is not a usable value (it may be 0, or stale). Make any
++    // use of it a compile error, instead of a silent divide-by-zero or wrong timing.
++    let cycles_hz_is_runtime = lines.iter().any(|l| {
++        l == "CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y"
++            || l == "CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE=y"
++    });
++
++    for line in lines {
++        if cycles_hz_is_runtime && line.starts_with("CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=") {
++            writeln!(&mut f, "#[allow(dead_code)]").unwrap();
++            writeln!(&mut f, "pub struct HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwCyclesPerSec;").unwrap();
++            writeln!(&mut f, "#[allow(dead_code)]").unwrap();
++            writeln!(
++                &mut f,
++                "pub const CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC: HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwCyclesPerSec = HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwCyclesPerSec;"
++            )
++            .unwrap();
++            continue;
++        }
+         if let Some(caps) = config_hex.captures(&line) {
+             writeln!(&mut f, "#[allow(dead_code)]").unwrap();
+             writeln!(&mut f, "pub const {}: usize = {};", &caps[1], &caps[2]).unwrap();
 diff --git a/zephyr/src/time.rs b/zephyr/src/time.rs
-index a67f3b0..f79f490 100644
+index a67f3b0..909a115 100644
 --- a/zephyr/src/time.rs
 +++ b/zephyr/src/time.rs
-@@ -28,12 +28,14 @@ use zephyr_sys::{k_ticks_t, k_timeout_t, k_uptime_ticks};
+@@ -28,15 +28,41 @@ use zephyr_sys::{k_ticks_t, k_timeout_t, k_uptime_ticks};
  
  use core::fmt::Debug;
  
@@ -46,13 +89,40 @@ index a67f3b0..f79f490 100644
 +// CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME only makes the *hardware cycle* frequency
 +// (sys_clock_hw_cycles_per_sec()) a run-time value; the driver then derives its cycles-per-tick
 +// from it. Nothing here converts cycles, so that option does not affect these types.
-+// Code that does convert cycles (k_cycle_get_*) must not use CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC,
-+// which is 0 in that configuration.
++// Code that does convert cycles (k_cycle_get_*) must use `hw_cycles_per_sec()` below;
++// kconfig::CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC is made a compile error in that configuration.
 +
 +// The system time base comes from a kconfig.
  /// The system time base.  The system clock has this many ticks per second.
  pub const SYS_FREQUENCY: u32 = crate::kconfig::CONFIG_SYS_CLOCK_TICKS_PER_SEC as u32;
  
++/// Hardware timer cycles per second (what `k_cycle_get_*` counts in).
++///
++/// Use this, not `kconfig::CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC`: when the timer reads its frequency
++/// at run time (`CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME`) or it can change
++/// (`CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE`) that Kconfig value is not meaningful,
++/// and using it is a compile error in those configurations.
++#[cfg(any(
++    CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME,
++    CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE
++))]
++pub fn hw_cycles_per_sec() -> u32 {
++    // SAFETY: a plain kernel query with no arguments.
++    unsafe { zephyr_sys::sys_clock_hw_cycles_per_sec_runtime_get() as u32 }
++}
++
++/// Hardware timer cycles per second (what `k_cycle_get_*` counts in).
++#[cfg(not(any(
++    CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME,
++    CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE
++)))]
++pub fn hw_cycles_per_sec() -> u32 {
++    crate::kconfig::CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC as u32
++}
++
+ /// Zephyr can be configured for either 64-bit or 32-bit time values.  Use the appropriate type
+ /// internally to match.  This should end up the same size as `k_ticks_t`, but unsigned instead of
+ /// signed.
 -- 
 2.43.0
 
