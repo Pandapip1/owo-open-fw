@@ -11,4 +11,4 @@
 #define LL_SWI_RADIO_IRQn  SW0_IRQn
 #define LL_SWI_JOB_IRQn    SW1_IRQn
 #define LL_RTC0_IRQn       SW2_IRQn      /* pended by the counter alarm callback (hal/cntr.c) */
-#define LL_RADIO_IRQn      RAC_SEQ_IRQn  /* TODO(radio-tables): which radio interrupt ends events */
+#define LL_RADIO_IRQn      RAC_SEQ_IRQn  /* Zephyr Series-2 RAIL installer routes rac_seq here. */
