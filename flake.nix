@@ -52,6 +52,7 @@
               pykwalify
               jsonschema
               canopen
+              cryptography
               packaging
               patool
               psutil
