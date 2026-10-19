@@ -79,6 +79,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_AGC_BASE 0xB800C000UL
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
+#define EFR32_FRC_TRAILRXDATA_OFFSET 0x054U
 #define EFR32_FRC_IF_OFFSET 0x068U
 #define EFR32_FRC_IEN_OFFSET 0x06CU
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
@@ -86,6 +87,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_FRC_IF_TXDONE (1U << 0)
 #define EFR32_FRC_IF_RXDONE (1U << 4)
 #define EFR32_FRC_IF_COMPLETION (EFR32_FRC_IF_TXDONE | EFR32_FRC_IF_RXDONE)
+#define EFR32_FRC_TRAILRXDATA_CRCOK (1U << 1)
 
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
@@ -708,11 +710,11 @@ void radio_crc_configure(uint32_t polynomial, uint32_t iv)
 	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_POLY_OFFSET) = bit_reverse24(polynomial);
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] FRC.TRAILRXDATA.CRCOK records the completed RX CRC result. */
 uint32_t radio_crc_is_valid(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) &
+		 EFR32_FRC_TRAILRXDATA_CRCOK);
 }
 
 /* [software] software (no register access needed); not implemented yet */
