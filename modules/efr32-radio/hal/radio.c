@@ -93,6 +93,8 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
 
 #define EFR32_AGC_FRAMERSSI_OFFSET 0x01CU
+#define EFR32_AGC_IF_OFFSET 0x044U
+#define EFR32_AGC_IF_RSSIVALID (1U << 0)
 #define EFR32_AGC_RSSI_CODE_SHIFT 6U
 #define EFR32_AGC_RSSI_CODE_MASK 0x3FFU
 #define EFR32_AGC_RSSI_INVALID (-512)
@@ -794,17 +796,18 @@ uint32_t radio_rssi_get(void)
 	return rssi_db < 0 ? (uint32_t)-rssi_db : 0U;
 }
 
-/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; latch/reset semantics are unknown (T9) */
+/* [regs-public] AGC.IF.RSSIVALID is the public RSSI-valid status latch (T9). */
 void radio_rssi_status_reset(void)
 {
-	EFR32_RADIO_TODO("AGC RSSI registers");
+	*radio_reg32(EFR32_AGC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_AGC_IF_OFFSET) = EFR32_AGC_IF_RSSIVALID;
 }
 
-/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; readiness semantics are unknown (T9) */
+/* [regs-public] AGC.IF.RSSIVALID records availability of a live RSSI result (T9). */
 uint32_t radio_rssi_is_ready(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return !!(*radio_reg32(EFR32_AGC_BASE + EFR32_AGC_IF_OFFSET) &
+		 EFR32_AGC_IF_RSSIVALID);
 }
 
 /* [software] software (no register access needed); not implemented yet */
