@@ -74,6 +74,8 @@ matches the stock disassembly and trace exactly. At `0xA8020000`: `EN +0x004`, `
 
 `CMD` bit 0 is `TXEN`, bit 1 `FORCETX`, bit 5 `TXDIS` (`0x20`), bit 7 `RXCAL` (`0x80`), and bit 8 `RXDIS` (`0x100`). `RXENSRCEN.SWRXEN` occupies bits 0..7. `STATUS.STATE` is bits 24..27; the matching sequencer flags establish OFF=0, RXWARM=1, RXSEARCH=2, RXFRAME=3, RXPD=4, RX2RX=5, RXOVERFLOW=6, RX2TX=7, TXWARM=8, TX=9, TXPD=10, TX2RX=11, TX2TX=12, SHUTDOWN=13. `STATUS` also exposes `SEQACTIVE`, `DEMODENS`, `TXENS`, and `RXENS` in bits 28..31.
 
+The open HAL implements only the source-backed abort/idle subset: `radio_disable()` performs separate write-only `TXDIS` then `RXDIS` commands, and `radio_is_idle()` returns whether `STATUS.STATE` is OFF. The field definitions are public generated revB2 source: `RAC_S_field.py:157-164` (`STATE`), `:257-264` (`TXDIS`), and `:287-294` (`RXDIS`) in the sibling `silabs-simplicity-sdk` checkout. Separate writes intentionally avoid claiming that a combined command write is hardware-equivalent. QEMU exercises the same sequence in `tools/efr32bg22/test_radio_models.py`.
+
 This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. QEMU patch 0007 replaces patch 0006's synthetic register contract with this map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
 ## 4.2 SYNTH, FRC, and AGC fields [F]

@@ -1,0 +1,31 @@
+From bf6086927436a2f34dc4648f38e59b2177659c2e Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 15:45:31 -0400
+Subject: [PATCH] efr32: test separate RAC disable commands
+
+Assisted-By: Codex (GPT-5)
+---
+ tools/efr32bg22/test_radio_models.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/tools/efr32bg22/test_radio_models.py b/tools/efr32bg22/test_radio_models.py
+index a3f1e9e..7c792b4 100644
+--- a/tools/efr32bg22/test_radio_models.py
++++ b/tools/efr32bg22/test_radio_models.py
+@@ -106,6 +106,13 @@ def test_software_rx_enable_and_rx_disable(self):
+         dev.write(dev.CMD, dev.CMD_RXDIS)
+         self.assertEqual((dev.read(dev.STATUS) >> 24) & 0xF, dev.STATEOFF)
+ 
++    def test_separate_disable_commands_leave_rac_off(self):
++        _, dev = attach(models.RAC("RAC"))
++        dev.write(dev.CMD, dev.CMD_FORCETX)
++        dev.write(dev.CMD, dev.CMD_TXDIS)
++        dev.write(dev.CMD, dev.CMD_RXDIS)
++        self.assertEqual((dev.read(dev.STATUS) >> 24) & 0xF, dev.STATEOFF)
++
+     def test_rsm_and_seq_interrupts_are_distinct(self):
+         machine, dev = attach(models.RAC("RAC"))
+         dev.write(dev.IEN_OFF, dev.IF_STATECHANGE)
+-- 
+2.55.0
+

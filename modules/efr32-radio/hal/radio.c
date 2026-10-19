@@ -74,6 +74,15 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
 
+#define EFR32_RAC_BASE 0xA8020000UL
+#define EFR32_RAC_STATUS_OFFSET 0x00CU
+#define EFR32_RAC_CMD_OFFSET 0x010U
+#define EFR32_RAC_STATUS_STATE_SHIFT 24U
+#define EFR32_RAC_STATUS_STATE_MASK 0xFU
+#define EFR32_RAC_STATE_OFF 0U
+#define EFR32_RAC_CMD_TXDIS (1U << 5)
+#define EFR32_RAC_CMD_RXDIS (1U << 8)
+
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
 	return (volatile uint32_t *)address;
@@ -281,10 +290,12 @@ void radio_tx_enable(void)
 	EFR32_RADIO_AIR_TODO("RAC command/state and FRC/BUFC status/IF bits");
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
 void radio_disable(void)
 {
-	EFR32_RADIO_TODO("RAC command/state and FRC/BUFC status/IF bits");
+	/* Keep independent command writes: their combined hardware semantics are unverified. */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 }
 
 /* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
@@ -314,11 +325,12 @@ uint32_t radio_has_disabled(void)
 	return 0;
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] RAC.STATUS.STATE is read-only and OFF is state 0 (T2). */
 uint32_t radio_is_idle(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return ((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+		 EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
+		EFR32_RAC_STATE_OFF;
 }
 
 /* [regs-public] RFCRC values match BLE's 24-bit CRC after bit reversal (T5). */
