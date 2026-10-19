@@ -57,6 +57,15 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define BLE_CCM_NONCE_SIZE 13U
 #define BLE_CCM_AAD_MASK 0xE3U
 
+#define EFR32_SYNTH_BASE 0xA8018000UL
+#define EFR32_SYNTH_CHCTRL_OFFSET 0x040U
+#define EFR32_SYNTH_CHCTRL_CHNO_MASK 0x3FU
+
+static inline volatile uint32_t *radio_reg32(uintptr_t address)
+{
+	return (volatile uint32_t *)address;
+}
+
 static struct {
 	struct ccm config;
 	struct pdu_data *rx_in;
@@ -147,11 +156,16 @@ void radio_tx_power_max_set(void)
 	OWO_RADIO_TODO("PA registers (rfhal_pa)");
 }
 
-/* [regs-partial] SYNTH FREQ/CHCTRL/CHSP fields are public; BLE conversion is unvalidated (T4) */
+/* [regs-public] BLE base=2402 MHz, spacing=2 MHz; CHCTRL.CHNO is bits 0..5 (T4). */
 void radio_freq_chan_set(uint32_t chan)
 {
-	ARG_UNUSED(chan);
-	OWO_RADIO_TODO("SYNTH BLE channel conversion (T4)");
+	uint32_t channel_number;
+
+	/* Zephyr passes MHz relative to 2400: 2..80, always even. */
+	LL_ASSERT((chan >= 2U) && (chan <= 80U) && ((chan & 1U) == 0U));
+	channel_number = (chan - 2U) / 2U;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHCTRL_OFFSET) =
+		channel_number & EFR32_SYNTH_CHCTRL_CHNO_MASK;
 }
 
 /* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */

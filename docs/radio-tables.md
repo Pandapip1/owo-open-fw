@@ -42,7 +42,7 @@ Examples: `0x0001400C` writes one word to `FRC.DFLCTRL` (`0xA800400C`); `0x1001C
 | T1 | block enables/reset, which IRQ ends an event | **[F] RAC has separate RSM and SEQ flag/enable banks; event policy still unknown** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
 | T2 | RAC command + state/status registers | **[F] core command/state map known; sequencer behavior still abstract** | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded and blocks labeled; HAL/table import not implemented** | `radio_phy_set` |
-| T4 | SYNTH channel/frequency registers | **[F] register fields known; BLE frequency conversion not yet validated** | `radio_freq_chan_set` |
+| T4 | SYNTH channel/frequency registers | **[F] implemented from public BLE channel config and CHCTRL field** | `radio_freq_chan_set` |
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] register fields known; exact BLE descriptor setup not yet derived** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F]** known | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
 | T7 | PA power registers | unknown (RAIL PA tables are public per-board) | `radio_tx_power_*` |
@@ -65,7 +65,7 @@ matches the stock disassembly and trace exactly. At `0xA8020000`: `EN +0x004`, `
 This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. QEMU patch 0007 replaces patch 0006's synthetic register contract with this map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
 ## 4.2 SYNTH, FRC, and AGC fields [F]
-The same public revB2 model identifies the remaining core data-path fields. SYNTH has 28-bit `FREQ` at `+0x034`, 21-bit `IFFREQ` at `+0x038`, `DIVCTRL` at `+0x03C`, 6-bit `CHCTRL.CHNO` at `+0x040`, and 18-bit `CHSP` at `+0x044`. This closes the register-identification part of T4, but not the conversion from Zephyr's 2400-MHz-relative channel argument to the synthesizer values.
+The same public revB2 model identifies the remaining core data-path fields. SYNTH has 28-bit `FREQ` at `+0x034`, 21-bit `IFFREQ` at `+0x038`, `DIVCTRL` at `+0x03C`, 6-bit `CHCTRL.CHNO` at `+0x040`, and 18-bit `CHSP` at `+0x044`. The public BLE 1M channel config specifies base 2402 MHz, 2 MHz spacing, physical channels 0..39. Zephyr passes MHz relative to 2400 (`2`, `26`, `80` for advertising), so `radio_freq_chan_set` now validates that input and writes `CHNO = (chan - 2) / 2`. The PHY table remains responsible for `FREQ` and `CHSP`.
 
 FRC exposes dynamic-frame-length configuration at `DFLCTRL +0x00C`, `MAXLENGTH +0x010`, frame/length/address word-count comparators at `+0x020..+0x028`, whitening control/polynomial/init at `+0x030/+0x034/+0x038`, RX control at `+0x058`, and four frame configuration descriptors `FCD0..3` later in the block. RFCRC is a separately generated block at `0xA8010000`. The public BLE configurator also supplies concrete PHY values—for example its channel-specific entries write `FRC.WHITEINIT`—but deriving the complete advertising descriptor sequence still requires correlating stock or RAIL accesses.
 
