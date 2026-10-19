@@ -3,8 +3,7 @@
 **Unvalidated on hardware. Bench-test the output stage on a dummy load first.**
 
 * `vendor/qemu/` — pinned QEMU v9.2.0 fork adding the `efr32bg22` machine
-  (Cortex-M33, IDAU, persistent flash, MMIO bridge to an out-of-process Python peripheral
-  server in `tools/efr32bg22/`).
+  (Cortex-M33, IDAU, persistent flash, and an in-process native MMIO model).
 * `sim/bootloader/` — hand-configured build of the real Gecko Bootloader main stage
   (sources from gecko_sdk, see `Makefile`; app base moved to 0x16000 to match the suit).
   SHA-256 is a software shim and ECDSA verification is a stub: signatures are NOT checked.
@@ -23,8 +22,8 @@ ninja -C build/qemu qemu-system-arm
 ```
 
 The build directory is deliberately retained as the incremental QEMU cache. The launcher uses
-`build/qemu/qemu-system-arm` by default; set `QEMU_BIN` only to run a different binary. It keeps
-runtime logs and the bridge socket under `build/qemu-runtime/`.
+`build/qemu/qemu-system-arm` by default; set `QEMU_BIN` only to run a different binary. It writes
+QEMU's own transient runtime log under `build/qemu-runtime/`; remove that directory after inspection.
 
 ## Status
 * Stock 7.9.07 boots through the bootloader to its idle loop, feeds WDOG0 and leaves the
