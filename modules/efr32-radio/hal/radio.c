@@ -74,6 +74,9 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
 
+#define EFR32_MODEM_BASE 0xA8014000UL
+#define EFR32_MODEM_SYNC0_OFFSET 0x068U
+
 #define EFR32_RAC_BASE 0xA8020000UL
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
@@ -212,11 +215,20 @@ void radio_whiten_iv_set(uint32_t iv)
 		EFR32_FRC_BLE_WHITEINIT_MSB | iv;
 }
 
-/* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
+/* [regs-public] MODEM.SYNC0 is the 32-bit BLE synchronization word register (T3). */
 void radio_aa_set(const uint8_t *aa)
 {
-	ARG_UNUSED(aa);
-	EFR32_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
+	/*
+	 * OpenISA callers pass the Bluetooth access address in little-endian byte
+	 * order.  Assemble it explicitly rather than relying on aa being aligned
+	 * for a uint32_t load (the API only promises a byte pointer).
+	 */
+	uint32_t sync0 = (uint32_t)aa[0] |
+			 ((uint32_t)aa[1] << 8) |
+			 ((uint32_t)aa[2] << 16) |
+			 ((uint32_t)aa[3] << 24);
+
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SYNC0_OFFSET) = sync0;
 }
 
 /* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
