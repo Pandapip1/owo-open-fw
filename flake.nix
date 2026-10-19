@@ -53,6 +53,9 @@
               jsonschema
               canopen
               cryptography
+              # QEMU's configure wrapper uses distlib to provision its
+              # non-isolated Meson helper environment.
+              distlib
               packaging
               patool
               psutil
@@ -80,6 +83,16 @@
               armGcc
               pkgs.cmake
               pkgs.ninja
+              # Host dependencies for the pinned QEMU submodule.  Keeping
+              # these here makes the simulator build reproducible through
+              # `nix develop`, alongside the firmware toolchain.
+              pkgs.meson
+              pkgs.pkg-config
+              pkgs.glib
+              pkgs.pixman
+              pkgs.zlib
+              pkgs.libffi
+              pkgs.libslirp
               pkgs.dtc
               pkgs.gperf
               pkgs.git
@@ -109,6 +122,8 @@
               echo "OWO open firmware dev shell"
               echo "  first time:  west init -l . && west update && west blobs fetch hal_silabs"
               echo "  build:       west build -b bg22_ek4108a ."
+              echo "  QEMU:        mkdir -p build/qemu && (cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp)"
+              echo "               ninja -C build/qemu qemu-system-arm"
               echo "  host tests:  cargo test --manifest-path crates/owo-core/Cargo.toml"
               echo "               cargo test --manifest-path modules/owo-stim/rust/Cargo.toml"
             '';
