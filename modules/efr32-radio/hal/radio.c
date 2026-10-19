@@ -79,8 +79,12 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_AGC_BASE 0xB800C000UL
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
+#define EFR32_FRC_IF_OFFSET 0x068U
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
+#define EFR32_FRC_IF_TXDONE (1U << 0)
+#define EFR32_FRC_IF_RXDONE (1U << 4)
+#define EFR32_FRC_IF_COMPLETION (EFR32_FRC_IF_TXDONE | EFR32_FRC_IF_RXDONE)
 
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
@@ -90,6 +94,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
 #define EFR32_REGISTER_SET_OFFSET 0x1000U
+#define EFR32_REGISTER_CLEAR_OFFSET 0x2000U
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
 #define EFR32_RAC_STATUS_STATE_MASK 0xFU
 #define EFR32_RAC_STATE_OFF 0U
@@ -647,10 +652,11 @@ void radio_disable(void)
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */
 void radio_status_reset(void)
 {
-	EFR32_RADIO_TODO("RAC command/state and FRC/BUFC status/IF bits");
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 }
 
 /* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
@@ -660,11 +666,11 @@ uint32_t radio_is_ready(void)
 	return 0;
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] FRC.IF.TXDONE/RXDONE are the completion latches (T2). */
 uint32_t radio_is_done(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_IF_OFFSET) &
+		 EFR32_FRC_IF_COMPLETION);
 }
 
 /* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
