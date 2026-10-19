@@ -1,0 +1,7 @@
+mainmenu "OWO open firmware (proof of concept)"
+
+config OWO_ADV_INTERVAL_MS
+	int "Advertising interval (ms)"
+	default 100
+
+source "Kconfig.zephyr"

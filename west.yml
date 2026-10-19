@@ -1,0 +1,20 @@
+# West manifest. `west init -l .` in this directory, then `west update`.
+# Only the modules this firmware needs are imported from Zephyr's manifest.
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: a915b2f12675b48b16d56653ea145dcd8f20cbbf
+      import:
+        name-allowlist:
+          - cmsis_6
+          - hal_silabs
+          - mbedtls
+          - tf-psa-crypto
+    - name: zephyr-lang-rust
+      remote: zephyrproject-rtos
+      revision: 6823b690ed2daf636323cbb8a10447d142752e1f
+      path: modules/lang/rust

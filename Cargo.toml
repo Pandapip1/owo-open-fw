@@ -1,0 +1,29 @@
+[package]
+# Zephyr's Rust support requires this exact name.
+name = "rustapp"
+version = "0.1.0"
+edition = "2021"
+description = "Proof-of-concept open firmware for the OWO suit BLE protocol (dry-run output only)"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+zephyr = "0.1.0"
+zephyr-panic = "0.1.0"
+log = "0.4.22"
+owo-core = { path = "crates/owo-core" }
+
+[build-dependencies]
+# Same version zephyr-sys uses.
+bindgen = { version = "0.72.1", features = ["experimental"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

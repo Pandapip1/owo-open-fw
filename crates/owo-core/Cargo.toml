@@ -1,0 +1,9 @@
+[package]
+name = "owo-core"
+version = "0.1.0"
+edition = "2021"
+description = "Protocol parsing and pulse scheduling for the OWO suit BLE protocol (no_std, no allocation)"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+name = "owo_core"
