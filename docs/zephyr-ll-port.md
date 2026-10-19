@@ -69,7 +69,7 @@ The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA us
 * **[F]** Timer API: `radio_tmr_start*` (`radio.c:1101-1140`) arms a compare at an absolute 32.768 kHz tick + remainder converted to the radio timer;
   `radio_tmr_hcto_configure` (`radio.c:1164`) arms the header-complete timeout; `radio_tmr_aa_capture/end_capture/sample` (`radio.c:1176-1223`) capture timestamps.
 * **EFR32 blocks that correspond**: PROTIMER (timebase/compare/capture), RAC (RX/TX commands, state), FRC (frame: CRC, whitening, length, sync word), BUFC (RX/TX buffers),
-  MODEM/AGC/SYNTH (PHY, RSSI, channel), RFMAILBOX/sequencer. Silicon Labs' public generated xG22 configurator models expose the register and field layouts; patch 0007 now uses the source- and trace-matched RAC core map. Behavioral semantics beyond those names still need trace or hardware validation; see `docs/radio-tables.md`.
+  MODEM/AGC/SYNTH (PHY, RSSI, channel), RFMAILBOX/sequencer. Silicon Labs' public generated xG22 configurator models expose the register and field layouts; the pinned QEMU model uses the source- and trace-matched RAC core map. Behavioral semantics beyond those names still need trace or hardware validation; see `docs/radio-tables.md`.
 
 Status of every function (all in `modules/efr32-radio/hal/radio.c`, each commented with its class):
 
