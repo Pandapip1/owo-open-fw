@@ -3,7 +3,7 @@
 # UNVALIDATED ON HARDWARE and mostly stubs: see docs/zephyr-ll-port.md and docs/radio-tables.md.
 # SPDX-License-Identifier: Apache-2.0
 
-config BT_LLL_VENDOR_OWO_EFR32
+config BT_LLL_VENDOR_EFR32
 	bool "Open EFR32BG22 lower link layer for Zephyr's split controller"
 	depends on BT_LL_SW_SPLIT
 	depends on SOC_SERIES_EFR32BG22
@@ -27,13 +27,13 @@ config BT_LLL_VENDOR_OWO_EFR32
 	  hardware abstraction in this module is new. Replaces the Silicon Labs binary controller
 	  (BT_SILABS_EFR32); the two are mutually exclusive.
 
-if BT_LLL_VENDOR_OWO_EFR32
+if BT_LLL_VENDOR_EFR32
 
-config OWO_RADIO_EFR32_STUB_REGISTERS
+config EFR32_RADIO_STUB_REGISTERS
 	bool "Do not touch radio registers (all radio_* hooks are TODO stubs)"
 	default y
 	help
 	  The radio register map is not public (docs/radio-tables.md). While set, the radio HAL only
 	  keeps software state and asserts when the controller tries to put a packet on the air.
 
-endif # BT_LLL_VENDOR_OWO_EFR32
+endif # BT_LLL_VENDOR_EFR32

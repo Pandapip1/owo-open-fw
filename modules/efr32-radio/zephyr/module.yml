@@ -1,4 +1,4 @@
-name: owo_radio_efr32
+name: efr32_radio
 build:
   cmake: .
   kconfig: Kconfig

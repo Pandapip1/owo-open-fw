@@ -17,7 +17,7 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   adds the matching include directories and `add_subdirectory(ll_sw/nordic|openisa)`. No other Kconfig/CMake code
   mentions these symbols (`grep -rn BT_LLL_VENDOR` over subsys/include/drivers/soc/dts finds only those two files),
   so a third vendor does not need a Zephyr patch: define a Kconfig symbol with the same `select`s and add the include
-  directories from a module. That is what `modules/owo-radio-efr32` does.
+  directories from a module. That is what `modules/efr32-radio` does.
 * **[F]** The generic code reaches the vendor layer only through `#include "hal/<x>.h"` -> `hal/<x>_vendor_hal.h`
   (`hal/radio.h`, `hal/ticker.h`, `hal/cntr.h`, `hal/cpu.h`, `hal/swi.h`, `hal/debug.h`: 7-line forwarding headers),
   `lll/lll_vendor.h`, `lll/pdu_vendor.h` (included from `hci/hci.c:38,42`) and `hci_vendor.h` (`hci/hci.c:80`).
@@ -27,7 +27,7 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   advertising/scanning/connections, one PHY at a time, and has its LLL sources in `ll_sw/openisa/lll/*` (6453 lines).
   The EFR32 radio has no PPI; the OpenISA split is the closer fit and is what the module reuses.
 * **[F]** Consequence found while building (`tests/radio-port`): OpenISA's LLL is **bit-rotted** against current Zephyr. Two
-  places do not build outside RV32M1 and are patched in the derived copy by `modules/owo-radio-efr32/CMakeLists.txt`:
+  places do not build outside RV32M1 and are patched in the derived copy by `modules/efr32-radio/CMakeLists.txt`:
   `lll/lll_conn.c:547` writes `pdu_data.resv` (no longer a member of `struct pdu_data`, `ll_sw/pdu.h:978`), and
   `lll/lll.c:83-84` reads the LPTMR1 compare flag in the tick ISR. Everything else compiled unchanged.
 
@@ -71,7 +71,7 @@ The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA us
 * **EFR32 blocks that correspond**: PROTIMER (timebase/compare/capture), RAC (RX/TX commands, state), FRC (frame: CRC, whitening, length, sync word), BUFC (RX/TX buffers),
   MODEM/AGC/SYNTH (PHY, RSSI, channel), RFMAILBOX/sequencer. Silicon Labs' public generated xG22 configurator models expose the register and field layouts; patch 0007 now uses the source- and trace-matched RAC core map. Behavioral semantics beyond those names still need trace or hardware validation; see `docs/radio-tables.md`.
 
-Status of every function (all in `modules/owo-radio-efr32/hal/radio.c`, each commented with its class):
+Status of every function (all in `modules/efr32-radio/hal/radio.c`, each commented with its class):
 
 | Group | Functions | Class | Blocked on |
 |---|---|---|---|
@@ -86,14 +86,15 @@ Status of every function (all in `modules/owo-radio-efr32/hal/radio.c`, each com
 | Delays | `radio_*_ready_delay_get`, `radio_*_chain_delay_get` | measured constants | hardware timing capture |
 | Software | `radio_pkt_empty/scratch_get`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*` (implemented and compile-checked); `radio_filter_*`, `radio_bc_*`, `radio_ar_*` remain | software | nothing |
 
-Functions that would start air activity (`radio_rx_enable`, `radio_tx_enable`, `radio_tmr_start*`) `LL_ASSERT` while `CONFIG_OWO_RADIO_EFR32_STUB_REGISTERS=y`.
+Functions that would start air activity (`radio_rx_enable`, `radio_tx_enable`, `radio_tmr_start*`) `LL_ASSERT` while `CONFIG_EFR32_RADIO_STUB_REGISTERS=y`.
 
 ## 3. Build integration (done, compile-checked)
-* `modules/owo-radio-efr32`: `Kconfig` (symbol `BT_LLL_VENDOR_OWO_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`
+* `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
+  This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
   (derives the OpenISA LLL/hal files into the build tree with `hal/RV32M1/` -> `hal/efr32/` and the two patches above, then adds the module's own `hal/{cntr,ecb,radio}.c`).
   No Zephyr code is copied into this repository.
 * `tests/radio-port`: minimal app (`bt_enable`) + overlay. `west build -b bg22_ek4108a tests/radio-port -- -DCONFIG_BUILD_ONLY_NO_BLOBS=y`
-  builds and links the real ULL (`ll_adv_enable`, `lll_init`, ...) with the module: 136,892 B flash, 25,560 B RAM (no application on top).
+  builds and links the real ULL (`ll_adv_enable`, `lll_init`, ...) with the module: 137,280 B flash, 25 KiB RAM (no application on top).
   It cannot run: the radio hooks are stubs and nothing configures BURTC.
 
 ## 4. Known gaps/risks (not resolved)

@@ -36,7 +36,7 @@ Each entry header is `[op:4][block:4][count:8][offset:16]`, followed by `count` 
 
 Examples: `0x0001400C` writes one word to `FRC.DFLCTRL` (`0xA800400C`); `0x1001C020` ANDs one word into `AGC.CTRL0`; `0x3101...` ORs an AGC register; `0x02020098` writes two words beginning at `RAC.SYNTHREGCTRL`. This closes T3's table-format and block-label portions. Selecting/copying the required BLE 1M table into the open HAL and validating its exact SDK-version values remain implementation work.
 
-## 3. Per-function blockers (IDs used in `modules/owo-radio-efr32/hal/radio.c`)
+## 3. Per-function blockers (IDs used in `modules/efr32-radio/hal/radio.c`)
 | ID | Needs | Status | Functions |
 |---|---|---|---|
 | T1 | block enables/reset, which IRQ ends an event | **[F] RAC has separate RSM and SEQ flag/enable banks; event policy still unknown** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |

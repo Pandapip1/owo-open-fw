@@ -17,7 +17,7 @@
 
 #include "hal/cntr.h"
 #include "hal/swi.h"
-#include "hal/efr32/cntr_owo.h"
+#include "hal/efr32/cntr_efr32.h"
 #include "hal/debug.h"
 
 #define LL_CNTR_NODE DT_ALIAS(ll_counter)

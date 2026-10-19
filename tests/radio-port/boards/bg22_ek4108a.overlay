@@ -7,7 +7,7 @@
 };
 
 &radio {
-	bt_hci_owo: bt_hci_owo {
+	bt_hci_efr32: bt_hci_efr32 {
 		compatible = "zephyr,bt-hci-ll-sw-split";
 		status = "okay";
 	};
@@ -15,11 +15,11 @@
 
 / {
 	chosen {
-		zephyr,bt-hci = &bt_hci_owo;
+		zephyr,bt-hci = &bt_hci_efr32;
 	};
 
 	aliases {
-		/* 32768 Hz 32-bit tick counter for the ticker (modules/owo-radio-efr32/hal/cntr.c);
+		/* 32768 Hz 32-bit tick counter for the ticker (modules/efr32-radio/hal/cntr.c);
 		 * RTCC is taken by the sleeptimer (xg22.dtsi: silabs,sleeptimer = &rtcc0). */
 		ll-counter = &burtc0;
 	};
