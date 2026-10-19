@@ -83,6 +83,7 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
 #define EFR32_RAC_STATUS_STATE_MASK 0xFU
 #define EFR32_RAC_STATE_OFF 0U
+#define EFR32_RAC_CMD_TXEN (1U << 0)
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
 
@@ -298,10 +299,10 @@ void radio_rx_enable(void)
 	EFR32_RADIO_AIR_TODO("RAC command/state and FRC/BUFC status/IF bits");
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [regs-public] RAC.CMD.TXEN is a write-only command bit (T2). */
 void radio_tx_enable(void)
 {
-	EFR32_RADIO_AIR_TODO("RAC command/state and FRC/BUFC status/IF bits");
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
 
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
