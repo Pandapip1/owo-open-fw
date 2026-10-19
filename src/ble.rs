@@ -125,6 +125,9 @@ static U_FWPKG: bt_uuid_128 = ua(0x7764A25C); // "Firmware Package"
 static U_SERPROG: bt_uuid_128 = ua(0x77645CB2); // "Serial number programming"
 static U_TEST: bt_uuid_128 = ub(0xB1F5A059); // "Test"
 static U_EXTRA2: bt_uuid_128 = ub(0x776416CB); // "Extra 2"
+// Silicon Labs OTA service and its control point (the data point lives in the bootloader).
+static U_OTA_SVC: bt_uuid_128 = uuid128(0x1D14D6EE, 0xFD63, 0x4FA1, 0xBFA4, 0x8F47B42119F0);
+static U_OTA_CTRL: bt_uuid_128 = uuid128(0xF7BF3564, 0xFB6D, 0x4E53, 0x88A4, 0x5E37E0326063);
 
 const fn uuid16(v: u16) -> bt_uuid_16 {
     bt_uuid_16 { uuid: bt_uuid { type_: BT_UUID_TYPE_16 }, val: v }
@@ -150,6 +153,7 @@ enum Id {
     SerProg,
     Test,
     Extra2,
+    OtaControl,
 }
 
 impl Id {
@@ -167,6 +171,7 @@ impl Id {
             8 => Id::SerProg,
             9 => Id::Test,
             10 => Id::Extra2,
+            11 => Id::OtaControl,
             _ => return None,
         })
     }
@@ -213,7 +218,7 @@ unsafe extern "C" fn read_cb(
             Id::Extra1 => &s.v_extra1,
             Id::Test => &s.v_test,
             Id::Extra2 => &s.v_extra2,
-            Id::FwPkg | Id::SerProg => return -ATT_UNLIKELY,
+            Id::FwPkg | Id::SerProg | Id::OtaControl => return -ATT_UNLIKELY,
         };
         tmp[..v.len()].copy_from_slice(v);
         v.len()
@@ -284,6 +289,17 @@ unsafe extern "C" fn write_cb(
         // "Serial number programming" is a factory provisioning gate and has no
         // place in this build.
         Id::SerProg => return -ATT_WRITE_NOT_PERMITTED,
+        // Silicon Labs OTA control: 0x00 = start the upgrade (reboot into the bootloader, which
+        // then does the whole transfer). Other opcodes belong to the bootloader's own service.
+        Id::OtaControl => {
+            if len != 1 {
+                return -ATT_INVALID_ATTRIBUTE_LEN;
+            }
+            if data[0] == 0 {
+                crate::on_ota_start();
+            }
+            Ok(())
+        }
         Id::Status | Id::Extra2 => return -ATT_WRITE_NOT_PERMITTED,
     };
     match res {
@@ -346,6 +362,7 @@ chrc_decl!(C_FWPKG, U_FWPKG, CHRC_WRITE);
 chrc_decl!(C_SERPROG, U_SERPROG, CHRC_WRITE);
 chrc_decl!(C_TEST, U_TEST, CHRC_READ | CHRC_WRITE | CHRC_NOTIFY);
 chrc_decl!(C_EXTRA2, U_EXTRA2, CHRC_READ | CHRC_NOTIFY);
+chrc_decl!(C_OTA_CTRL, U_OTA_CTRL, CHRC_WRITE);
 
 /// One CCC state block per notifying characteristic.
 macro_rules! ccc_data {
@@ -470,8 +487,16 @@ fn svc2_attrs() -> [bt_gatt_attr; SVC2_LEN] {
 ]
 }
 
+const SVC3_LEN: usize = 3;
+static SVC3_ATTRS: Racy<MaybeUninit<[bt_gatt_attr; SVC3_LEN]>> = Racy::new(MaybeUninit::uninit());
+
+fn svc3_attrs() -> [bt_gatt_attr; SVC3_LEN] {
+    [primary(&U_OTA_SVC), decl(&C_OTA_CTRL), value(&U_OTA_CTRL, Id::OtaControl, false, true)]
+}
+
 static SVC1: Racy<Option<bt_gatt_service>> = Racy::new(None);
 static SVC2: Racy<Option<bt_gatt_service>> = Racy::new(None);
+static SVC3: Racy<Option<bt_gatt_service>> = Racy::new(None);
 
 // ---- notifications ------------------------------------------------------------------
 
@@ -591,6 +616,7 @@ pub(crate) fn start() -> Result<(), c_int> {
         });
         (*SVC1_ATTRS.get()).write(svc1_attrs());
         (*SVC2_ATTRS.get()).write(svc2_attrs());
+        (*SVC3_ATTRS.get()).write(svc3_attrs());
         *SVC1.get() = Some(bt_gatt_service {
             attrs: SVC1_ATTRS.get().cast(),
             attr_count: SVC1_LEN,
@@ -602,6 +628,12 @@ pub(crate) fn start() -> Result<(), c_int> {
             ..Default::default()
         });
 
+        *SVC3.get() = Some(bt_gatt_service {
+            attrs: SVC3_ATTRS.get().cast(),
+            attr_count: SVC3_LEN,
+            ..Default::default()
+        });
+
         let e = bt_conn_auth_cb_register((*AUTH_CB.get()).as_ref().unwrap());
         if e != 0 {
             return Err(e);
@@ -610,7 +642,7 @@ pub(crate) fn start() -> Result<(), c_int> {
         if e != 0 {
             return Err(e);
         }
-        for svc in [SVC1.get(), SVC2.get()] {
+        for svc in [SVC1.get(), SVC2.get(), SVC3.get()] {
             let e = bt_gatt_service_register((*svc).as_mut().unwrap());
             if e != 0 {
                 return Err(e);

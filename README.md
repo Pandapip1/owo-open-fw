@@ -20,6 +20,7 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `modules/owo-stim/` | **Reusable Zephyr module**: per-part Rust crates, a Rust DAC driver, bindings, shim. See below |
 | `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
 | `patches/zephyr/` | Two small Zephyr patches: a Counter-backed timing backend, and read-back verification for `ti,sn74hc595` |
+| `docs/ota.md`, `scripts/make-gbl.py` | Keeping the Silicon Labs OTA update working (flash map and boot-mode request in devicetree, OTA service in `src/ble.rs`) and packaging a GBL |
 | `docs/stock-stim-path.md` | What the stock firmware's output stage does, its interlocks, and the ones it lacks |
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
@@ -76,8 +77,11 @@ callback, and Zephyr's timing API needs a source (CPU cycle counter, or `zephyr,
 part has no Zephyr driver yet, write that driver (one crate, one binding) and nothing else changes.
 The only board verified to build is `bg22_ek4108a`; no second MCU family has been tried.
 
-Idle power: the ADC sampler and the timing counter run only while the supply is on; the timing counter
-holds a PM lock while running (inferred from the Silabs PM mapping, not measured).
+Idle power: the ADC sampler and the timing counter run only while the supply is on. The timing backend never
+blocks sleep: it needs a counter that keeps counting in the sleep states in use, and arms an alarm half a
+counter period ahead so a flush always happens in time. The stand-in overlay currently names TIMER0, which
+stops in EM2, so that choice is not final (open question, see the commit notes).
+
 
 - Interlocks (see `docs/stock-stim-path.md` for which the stock firmware has and which are new): hard
   level ceiling (default 40 of 126), coverage window + dead-man, soft start, per-channel duty budget,
@@ -184,6 +188,6 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
   and which string the official app hashes is unconfirmed (the passkey is logged at boot).
 
 ## Flashing a real suit
-Unknown and risky: whether the stock bootloader accepts a third-party GBL, and the OTP secure-boot
+The image is linked at 0x16000 and offers the OTA control point (see `docs/ota.md`); `scripts/make-gbl.py` packages it. Unknown and risky: whether the stock bootloader accepts a third-party GBL, and the OTP secure-boot
 and debug-lock state, are unverified. A wrong move can brick the unit. Keep the stock image backed
 up first (needs SWD access).

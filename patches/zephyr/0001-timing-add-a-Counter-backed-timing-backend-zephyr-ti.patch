@@ -1,4 +1,4 @@
-From b11ca15c59f2f77e52f1c8ca36e9f8bcc2c69197 Mon Sep 17 00:00:00 2001
+From 8bacac7378b9182d907313b880006db47f3b82b2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 06:20:09 +0000
 Subject: [PATCH 1/2] timing: add a Counter-backed timing backend
@@ -13,9 +13,9 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
 ---
  subsys/timing/CMakeLists.txt   |   1 +
- subsys/timing/Kconfig          |  31 ++++++++
- subsys/timing/timing_counter.c | 137 +++++++++++++++++++++++++++++++++
- 3 files changed, 169 insertions(+)
+ subsys/timing/Kconfig          |  23 +++++
+ subsys/timing/timing_counter.c | 155 +++++++++++++++++++++++++++++++++
+ 3 files changed, 179 insertions(+)
  create mode 100644 subsys/timing/timing_counter.c
 
 diff --git a/subsys/timing/CMakeLists.txt b/subsys/timing/CMakeLists.txt
@@ -28,10 +28,10 @@ index dae6521c2..05c15c567 100644
  zephyr_library_sources(timing.c)
 +zephyr_library_sources_ifdef(CONFIG_TIMING_COUNTER timing_counter.c)
 diff --git a/subsys/timing/Kconfig b/subsys/timing/Kconfig
-index fa359d18c..ab18caed2 100644
+index fa359d18c..87f735496 100644
 --- a/subsys/timing/Kconfig
 +++ b/subsys/timing/Kconfig
-@@ -17,3 +17,34 @@ config TIMING_FUNCTIONS_NEED_AT_BOOT
+@@ -17,3 +17,26 @@ config TIMING_FUNCTIONS_NEED_AT_BOOT
  
  	  To be selected by kernel and other subsystems which need
  	  to use timing functions.
@@ -51,27 +51,19 @@ index fa359d18c..ab18caed2 100644
 +	  timing backend of their own and where the CPU cycle counter is not suitable (it stops in
 +	  sleep, and it only exists on some cores).
 +
-+	  The value returned by timing_counter_get() is 64 bits wide: the counter's wrap-around
-+	  is counted from the counter driver's top-value interrupt, so nothing has to be read
-+	  regularly to keep the timestamp correct. Time only advances between timing_start() and
-+	  timing_stop() (reference counted); the counter is stopped while the timing API is idle.
++	  The value returned by timing_counter_get() is 64 bits wide. The hardware count is folded
++	  into it whenever the clock is read, and an alarm armed half a counter period ahead of the
++	  last fold guarantees that it is folded often enough even if nobody reads the clock.
 +
-+	  The chosen counter should be a free-running, preferably 32-bit, up-counting device.
-+
-+config TIMING_COUNTER_PM_LOCK
-+	bool "Keep the SoC out of the sleep states in which the counter stops"
-+	default y
-+	depends on TIMING_COUNTER && PM
-+	help
-+	  While timing is started, lock the suspend-to-idle, standby, suspend-to-RAM and
-+	  suspend-to-disk power states so that the chosen counter keeps counting. Disable this if the
-+	  chosen counter is known to run in every sleep state (for example an RTC).
++	  The chosen counter must be free-running, must support one alarm channel, and must keep
++	  counting in every sleep state the system enters (for example an RTC). This option does
++	  not restrict sleeping.
 diff --git a/subsys/timing/timing_counter.c b/subsys/timing/timing_counter.c
 new file mode 100644
-index 000000000..fa66b9d36
+index 000000000..3d3e48002
 --- /dev/null
 +++ b/subsys/timing/timing_counter.c
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,155 @@
 +/*
 + * Copyright (c) 2026 Contributors to the Zephyr Project
 + *
@@ -82,105 +74,123 @@ index 000000000..fa66b9d36
 + * @file
 + * @brief Timing functions backed by a Counter device ("zephyr,timing-counter" chosen node).
 + *
-+ * The 32-bit hardware count is extended to 64 bits by counting the counter's wrap-arounds from
-+ * its top-value callback, so the timestamp stays correct without anybody having to read it
-+ * regularly. A read is lock-free and may be done from any context, including interrupts.
++ * The hardware count is extended to 64 bits by accumulating the difference between successive
++ * readings ("flushing"). That is only correct if the counter is flushed at least once per
++ * wrap-around, so an absolute alarm is always armed half a counter period ahead of the last
++ * flush: whatever flushes first (a timestamp read, or the alarm) moves the alarm on. In normal
++ * operation the alarm therefore never fires while somebody reads the clock, and when the system
++ * sleeps it wakes the CPU once per half period.
++ *
++ * Nothing here keeps the SoC out of sleep states: the chosen counter must keep counting in every
++ * sleep state the system uses (for example an RTC), and its alarm must be able to wake the CPU.
++ * Time advances between timing_start() and timing_stop().
 + */
 +
 +#include <zephyr/device.h>
 +#include <zephyr/devicetree.h>
 +#include <zephyr/drivers/counter.h>
 +#include <zephyr/kernel.h>
-+#include <zephyr/pm/policy.h>
-+#include <zephyr/sys/atomic.h>
++#include <zephyr/spinlock.h>
 +#include <zephyr/sys/clock.h>
 +#include <zephyr/timing/timing.h>
 +
 +static const struct device *const tc_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_timing_counter));
 +
-+/* Number of completed wrap-arounds. Written only by the top callback (an interrupt). */
-+static volatile uint32_t wraps;
-+static uint64_t span;      /* ticks per wrap (max top value + 1) */
++static struct k_spinlock lock;
++static uint64_t total;   /* ticks accounted for up to the last flush */
++static uint32_t last;    /* hardware count at the last flush */
++static uint64_t span;    /* ticks per wrap (max top value + 1) */
 +static uint32_t freq_hz;
++static bool running;
++static bool armed;
 +
-+static void wrap_cb(const struct device *dev, void *user_data)
++static void alarm_cb(const struct device *dev, uint8_t chan, uint32_t ticks, void *user_data);
++
++/* Arm the half-period alarm relative to `last`. Caller holds `lock`. */
++static void arm_locked(void)
++{
++	struct counter_alarm_cfg cfg = {
++		.flags = COUNTER_ALARM_CFG_ABSOLUTE,
++		.ticks = (uint32_t)(((uint64_t)last + span / 2U) % span),
++		.callback = alarm_cb,
++	};
++
++	armed = counter_set_channel_alarm(tc_dev, 0, &cfg) == 0;
++}
++
++/* Fold the elapsed ticks into `total` and move the alarm on. Caller holds `lock`. */
++static uint64_t flush_locked(void)
++{
++	uint32_t now;
++
++	if (!running || counter_get_value(tc_dev, &now) != 0) {
++		return total;
++	}
++	total += (now >= last) ? (now - last) : (span - last + now);
++	last = now;
++	if (!armed) {
++		arm_locked();
++	} else {
++		/* Moving the alarm on is cheap, and it keeps the margin at half a period. */
++		(void)counter_cancel_channel_alarm(tc_dev, 0);
++		arm_locked();
++	}
++	return total;
++}
++
++static void alarm_cb(const struct device *dev, uint8_t chan, uint32_t ticks, void *user_data)
 +{
 +	ARG_UNUSED(dev);
++	ARG_UNUSED(chan);
++	ARG_UNUSED(ticks);
 +	ARG_UNUSED(user_data);
-+	wraps++;
-+}
-+
-+#if defined(CONFIG_TIMING_COUNTER_PM_LOCK)
-+static const enum pm_state locked_states[] = {
-+	PM_STATE_SUSPEND_TO_IDLE,
-+	PM_STATE_STANDBY,
-+	PM_STATE_SUSPEND_TO_RAM,
-+	PM_STATE_SUSPEND_TO_DISK,
-+};
-+
-+static void pm_lock(bool lock)
-+{
-+	for (size_t i = 0; i < ARRAY_SIZE(locked_states); i++) {
-+		if (lock) {
-+			pm_policy_state_lock_get(locked_states[i], PM_ALL_SUBSTATES);
-+		} else {
-+			pm_policy_state_lock_put(locked_states[i], PM_ALL_SUBSTATES);
-+		}
++	K_SPINLOCK(&lock) {
++		armed = false; /* it just fired */
++		(void)flush_locked();
 +	}
 +}
-+#else
-+static void pm_lock(bool lock)
-+{
-+	ARG_UNUSED(lock);
-+}
-+#endif
 +
 +void soc_timing_init(void)
 +{
-+	struct counter_top_cfg top = {
-+		.ticks = counter_get_max_top_value(tc_dev),
-+		.callback = wrap_cb,
-+		.flags = 0,
-+	};
-+
 +	__ASSERT(device_is_ready(tc_dev), "timing counter not ready");
-+	span = (uint64_t)top.ticks + 1U;
++	span = (uint64_t)counter_get_max_top_value(tc_dev) + 1U;
 +	freq_hz = counter_get_frequency(tc_dev);
 +	__ASSERT(freq_hz != 0U, "timing counter has no frequency");
-+	(void)counter_set_top_value(tc_dev, &top);
 +}
 +
 +void soc_timing_start(void)
 +{
-+	pm_lock(true);
++	uint32_t now = 0;
++
 +	(void)counter_start(tc_dev);
++	K_SPINLOCK(&lock) {
++		(void)counter_get_value(tc_dev, &now);
++		last = now;
++		running = true;
++		armed = false;
++		arm_locked();
++	}
 +}
 +
 +void soc_timing_stop(void)
 +{
++	K_SPINLOCK(&lock) {
++		(void)flush_locked();
++		running = false;
++		(void)counter_cancel_channel_alarm(tc_dev, 0);
++		armed = false;
++	}
 +	(void)counter_stop(tc_dev);
-+	pm_lock(false);
 +}
 +
 +timing_t soc_timing_counter_get(void)
 +{
-+	uint32_t w1, w2, ticks;
++	timing_t t;
 +
-+	do {
-+		w1 = wraps;
-+		(void)counter_get_value(tc_dev, &ticks);
-+		/* The hardware may have wrapped while its interrupt has not run yet (interrupts locked
-+		 * or a higher-priority interrupt): count that wrap here. A pending interrupt with a
-+		 * small count means exactly that, as the top interrupt is the only one in use.
-+		 */
-+		if (counter_get_pending_int(tc_dev) != 0U && ticks < span / 2U) {
-+			w2 = w1 + 1U;
-+			return (uint64_t)w2 * span + ticks;
-+		}
-+		w2 = wraps;
-+	} while (w1 != w2);
-+
-+	return (uint64_t)w1 * span + ticks;
++	K_SPINLOCK(&lock) {
++		t = flush_locked();
++	}
++	return t;
 +}
 +
 +uint64_t soc_timing_cycles_get(volatile timing_t *const start, volatile timing_t *const end)

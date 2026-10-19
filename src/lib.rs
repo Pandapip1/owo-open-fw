@@ -5,6 +5,7 @@
 
 mod ble;
 mod hal;
+mod ota;
 
 use log::{error, info};
 use owo_core::engine::{Engine, Next, LEVEL_CAP};
@@ -125,6 +126,14 @@ pub(crate) fn on_run(cmd: u8) -> Result<(), ()> {
     Ok(())
 }
 
+/// The OTA control point was written with "start": everything off now, then the pump reboots
+/// into the Silicon Labs bootloader (which receives the image).
+pub(crate) fn on_ota_start() {
+    stop_all();
+    ota::request();
+    WAKE.give();
+}
+
 pub(crate) fn stop_all() {
     let mut s = STATE.lock().unwrap();
     s.engine.stop();
@@ -150,6 +159,7 @@ extern "C" fn rust_main() {
     // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
     // queued, sleep until a GATT write gives the semaphore. No periodic timer.
     loop {
+        ota::reboot_if_requested();
         let (wake, poll) = {
             let mut s = STATE.lock().unwrap();
             let wake = loop {

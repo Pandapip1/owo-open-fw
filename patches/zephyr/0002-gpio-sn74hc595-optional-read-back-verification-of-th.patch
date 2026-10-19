@@ -1,4 +1,4 @@
-From 71d91afaf587c5f5ee57de7b6b2fe418199a1921 Mon Sep 17 00:00:00 2001
+From 735cd81c15bafe673d779ae99ab9d8dd11c89960 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 06:24:21 +0000
 Subject: [PATCH 2/2] gpio: sn74hc595: optional read-back verification of the

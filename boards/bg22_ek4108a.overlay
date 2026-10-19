@@ -1,0 +1,68 @@
+/*
+ * Board-level facts that make the Silicon Labs OTA update keep working with this firmware
+ * (docs/ota.md). Nothing here is code: it is the flash map the suit's bootloader expects and the
+ * RAM word the bootloader reads to decide whether to enter its OTA mode.
+ */
+
+/*
+ * Flash map. The stock images (GBL, ERASEPROG tag) are written at 0x16000, after the
+ * Silicon Labs first/second-stage bootloaders (docs: owo-suit-firmware-analysis.md section 1).
+ * The explorer kit's own map (MCUboot at 0x0, slot0 at 0xC000) is replaced by that layout.
+ */
+&flash0 {
+	partitions {
+		/delete-node/ partition@0;
+		/delete-node/ partition@c000;
+		/delete-node/ partition@44000;
+
+		/* Gecko Bootloader (first + second stage), not ours to touch. */
+		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00000000 DT_SIZE_K(88)>;
+			label = "gecko-bootloader";
+			read-only;
+		};
+
+		/* The application: where the stock GBL puts it, up to the storage partition. */
+		slot0_partition: partition@16000 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00016000 DT_SIZE_K(408)>;
+			label = "image-0";
+		};
+	};
+};
+
+/*
+ * "Reboot into the bootloader" request. The bootloader's application API
+ * (bootloader_rebootAndInstall in btl_interface.c) writes a struct {u16 reason; u16 signature;}
+ * at the very start of RAM and resets; reason 0x0202 = BOOTLOADER_RESET_REASON_BOOTLOAD,
+ * signature 0xF00F = valid (btl_reset_info.h). Zephyr's boot-mode retention writes its prefix
+ * and then one mode byte, so the prefix is those four bytes (little endian).
+ */
+&sram0 {
+	reg = <0x20000008 (DT_SIZE_K(32) - 8)>;
+};
+
+/ {
+	btl_request: retained@20000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x20000000 8>;
+		zephyr,memory-region = "RetainedMem";
+
+		retainedmem {
+			compatible = "zephyr,retained-ram";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			boot_mode0: retention@0 {
+				compatible = "zephyr,retention";
+				reg = <0x0 8>;
+				prefix = [02 02 0f f0];
+			};
+		};
+	};
+
+	chosen {
+		zephyr,boot-mode = &boot_mode0;
+	};
+};
