@@ -118,6 +118,12 @@
             };
 
             shellHook = ''
+              ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                # QEMU's macOS post-link step invokes Rez through xcrun.  The
+                # Nix xcrun wrapper otherwise points at its SDK, which does
+                # not carry that Apple-only resource compiler.
+                export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+              ''}
               # West wants the Zephyr tree; `west init -l . && west update` puts it next to this repo.
               echo "OWO open firmware dev shell"
               echo "  first time:  west init -l . && west update && west blobs fetch hal_silabs"
