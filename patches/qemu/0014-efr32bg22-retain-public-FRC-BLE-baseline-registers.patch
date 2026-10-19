@@ -1,0 +1,88 @@
+From 8ef2dc7804e3b9fb75a020502c03e6bf00debd8f Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 14:19:11 -0400
+Subject: [PATCH] efr32bg22: retain public FRC BLE baseline registers
+
+Keep the source-backed FRC configuration latches observable without assigning packet-pipeline behavior.
+
+Assisted-By: Codex (GPT-5)
+---
+ tools/efr32bg22/models.py            | 20 +++++++++++++++++++-
+ tools/efr32bg22/test_radio_models.py | 21 +++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/tools/efr32bg22/models.py b/tools/efr32bg22/models.py
+index fcc37d8..226a4f2 100644
+--- a/tools/efr32bg22/models.py
++++ b/tools/efr32bg22/models.py
+@@ -473,16 +473,34 @@ class FRC(Dev):
+     public register masks makes the source-backed BLE setup observable.
+     """
+     DFLCTRL, MAXLENGTH = 0x00C, 0x010
++    WCNTCMP0, WCNTCMP1 = 0x020, 0x024
+     WHITECTRL, WHITEPOLY, WHITEINIT = 0x030, 0x034, 0x038
+-    CTRL = 0x048
++    FECCTRL, BLOCKRAMADDR, CONVRAMADDR = 0x03C, 0x040, 0x044
++    CTRL, TRAILTXDATACTRL = 0x048, 0x050
++    CONVGENERATOR, PUNCTCTRL = 0x05C, 0x060
++    AUTOCG = 0x0A8
++    WCNTCMP3, BOICTRL, DSLCTRL, WCNTCMP4 = 0x0BC, 0x0C0, 0x0C4, 0x0C8
+     FCD0, FCD1, FCD2, FCD3 = 0x104, 0x108, 0x10C, 0x110
+     MASKS = {
+         DFLCTRL: 0x01FFFF7F,
+         MAXLENGTH: 0x0000FFFF,
++        WCNTCMP0: 0x00000FFF,
++        WCNTCMP1: 0x00000FFF,
+         WHITECTRL: 0x00001F7F,
+         WHITEPOLY: 0x0000FFFF,
+         WHITEINIT: 0x0000FFFF,
++        FECCTRL: 0x003FFFF7,
++        BLOCKRAMADDR: 0xFFFFFFFC,
++        CONVRAMADDR: 0xFFFFFFFC,
+         CTRL: 0x001F3FF7,
++        TRAILTXDATACTRL: 0x007FFFFF,
++        CONVGENERATOR: 0x00037F7F,
++        PUNCTCTRL: 0x00007F7F,
++        AUTOCG: 0x0000FFFF,
++        WCNTCMP3: 0x00000FFF,
++        BOICTRL: 0x0001FFFF,
++        DSLCTRL: 0x7FFFFF7F,
++        WCNTCMP4: 0x00000FFF,
+         FCD0: 0x0001FFFF,
+         FCD1: 0x0001FFFF,
+         FCD2: 0x0001FFFF,
+diff --git a/tools/efr32bg22/test_radio_models.py b/tools/efr32bg22/test_radio_models.py
+index f8b8337..0edd881 100644
+--- a/tools/efr32bg22/test_radio_models.py
++++ b/tools/efr32bg22/test_radio_models.py
+@@ -156,6 +156,27 @@ def test_public_ble_frame_configuration_masks(self):
+         for off in (dev.FCD0, dev.FCD1, dev.FCD2, dev.FCD3):
+             self.assertEqual(dev.read(off), 0x00014CFF)
+ 
++    def test_public_ble_baseline_configuration_masks(self):
++        _, dev = attach(models.FRC("FRC"))
++        expectations = {
++            dev.WCNTCMP0: 0x00000FFF,
++            dev.WCNTCMP1: 0x00000FFF,
++            dev.FECCTRL: 0x003FFFF7,
++            dev.BLOCKRAMADDR: 0xFFFFFFFC,
++            dev.CONVRAMADDR: 0xFFFFFFFC,
++            dev.TRAILTXDATACTRL: 0x007FFFFF,
++            dev.CONVGENERATOR: 0x00037F7F,
++            dev.PUNCTCTRL: 0x00007F7F,
++            dev.AUTOCG: 0x0000FFFF,
++            dev.WCNTCMP3: 0x00000FFF,
++            dev.BOICTRL: 0x0001FFFF,
++            dev.DSLCTRL: 0x7FFFFF7F,
++            dev.WCNTCMP4: 0x00000FFF,
++        }
++        for off, expected in expectations.items():
++            dev.write(off, 0xFFFFFFFF)
++            self.assertEqual(dev.read(off), expected)
++
+ 
+ class ModemTests(unittest.TestCase):
+     def test_public_sync0_is_a_32_bit_configuration_register(self):
+-- 
+2.55.0
+
