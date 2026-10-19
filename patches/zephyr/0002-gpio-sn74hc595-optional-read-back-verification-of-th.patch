@@ -1,18 +1,16 @@
-From 67276f5b23957f132041c89f762fe0b8ecaa8fa2 Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Mon, 19 Oct 2026 06:24:21 +0000
-Subject: [PATCH 2/2] gpio: sn74hc595: optional read-back verification of the
- chain
+From 0eb9366c3255e5116ec6e57d9343486147b2c1cd Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 15:32:54 -0400
+Subject: [PATCH 2/2] gpio: add optional SN74HC595 readback verification
 
-Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+Assisted-By: Codex (GPT-5)
 ---
  drivers/gpio/gpio_sn74hc595.c       | 34 +++++++++++++++++++++++++++--
  dts/bindings/gpio/ti,sn74hc595.yaml |  7 ++++++
  2 files changed, 39 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/gpio/gpio_sn74hc595.c b/drivers/gpio/gpio_sn74hc595.c
-index 520c94b58..c3c626de1 100644
+index 520c94b58be..c3c626de1ac 100644
 --- a/drivers/gpio/gpio_sn74hc595.c
 +++ b/drivers/gpio/gpio_sn74hc595.c
 @@ -34,6 +34,7 @@ struct gpio_sn74hc595_config {
@@ -87,7 +85,7 @@ index 520c94b58..c3c626de1 100644
                                                                                                     \
  	DEVICE_DT_DEFINE(DT_DRV_INST(n), &gpio_sn74hc595_init, NULL, &sn74hc595_data_##n,          \
 diff --git a/dts/bindings/gpio/ti,sn74hc595.yaml b/dts/bindings/gpio/ti,sn74hc595.yaml
-index cdc25f051..0c35501b3 100644
+index cdc25f05170..0c35501b3a6 100644
 --- a/dts/bindings/gpio/ti,sn74hc595.yaml
 +++ b/dts/bindings/gpio/ti,sn74hc595.yaml
 @@ -39,6 +39,13 @@ properties:
@@ -104,3 +102,6 @@ index cdc25f051..0c35501b3 100644
    ngpios:
      type: int
      required: true
+-- 
+2.55.0
+

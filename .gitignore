@@ -2,3 +2,4 @@ target/
 /build/
 result
 build-native-sim/
+.DS_Store

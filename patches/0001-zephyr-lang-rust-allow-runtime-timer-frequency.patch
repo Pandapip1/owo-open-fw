@@ -1,17 +1,9 @@
-From aa03abce92bd4e4f4fe415e831a1afc1eb36f352 Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Mon, 19 Oct 2026 05:02:34 +0000
-Subject: [PATCH] Allow Rust on targets whose timer reads its frequency at run
- time
+From 76627d356f3b00c086e12ec6236913c62194fe96 Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 15:35:12 -0400
+Subject: [PATCH] rust: allow runtime hardware timer frequency
 
-Kernel ticks per second is still CONFIG_SYS_CLOCK_TICKS_PER_SEC; only the
-hardware cycle frequency becomes a run-time value, which this crate never uses.
-
-Make CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC unusable (compile error) when that
-frequency is a run-time value, and add zephyr::time::hw_cycles_per_sec().
-
-Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+Assisted-By: Codex (GPT-5)
 ---
  Kconfig                 |  3 +--
  zephyr-build/src/lib.rs | 28 +++++++++++++++++++++++++---
@@ -124,5 +116,5 @@ index a67f3b0..909a115 100644
  /// internally to match.  This should end up the same size as `k_ticks_t`, but unsigned instead of
  /// signed.
 -- 
-2.43.0
+2.55.0
 
