@@ -32,8 +32,8 @@ peripheral server):
 build/qemu/qemu-system-arm -trace efr32bg22_rac_command,file=build/qemu-runtime/rac.trace ...
 ```
 
-It records the written command word and resulting modeled RAC state. The trace file is
-transient and belongs under `build/qemu-runtime/`.
+It records written command words and every modeled RAC state transition, including timer-driven
+completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
 ## Status
 * Stock 7.9.07 boots through the bootloader to its idle loop, feeds WDOG0 and leaves the
