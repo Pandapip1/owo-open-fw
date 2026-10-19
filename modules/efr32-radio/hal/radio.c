@@ -231,7 +231,9 @@ void radio_aa_set(const uint8_t *aa)
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SYNC0_OFFSET) = sync0;
 }
 
-/* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
+/* [regs-partial] FRC length/header configuration remains unproven (T5;
+ * docs/radio-tables.md §4.2). CRC, whitening, and access-address
+ * configuration are implemented above. */
 void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 {
 	ARG_UNUSED(bits_len);
