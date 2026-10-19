@@ -86,14 +86,17 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
 
 #define EFR32_RAC_BASE 0xB8020000UL
+#define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
+#define EFR32_REGISTER_SET_OFFSET 0x1000U
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
 #define EFR32_RAC_STATUS_STATE_MASK 0xFU
 #define EFR32_RAC_STATE_OFF 0U
 #define EFR32_RAC_CMD_TXEN (1U << 0)
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
+#define EFR32_RAC_RXENSRCEN_SWRXEN (1U << 1)
 
 #define EFR32_BUFC_BASE 0xBA000000UL
 #define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
@@ -612,10 +615,18 @@ uint32_t radio_rx_chain_delay_get(uint8_t phy, uint8_t flags)
 	return 0;
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/*
+ * [regs-vendor] RAIL StartRx writes RXENSRCEN.SET.SWRXEN (bit 1). The
+ * archived primitive is at librail_efr32xg22_gcc_release.a(rail_rf_hal.o),
+ * sli_rail_dadf1c52f26190429dcacf7151424c68; see radio-tables.md §4.1.
+ */
 void radio_rx_enable(void)
 {
-	EFR32_RADIO_AIR_TODO("RAC command/state and FRC/BUFC status/IF bits");
+	while (!radio_is_idle()) {
+	}
+
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 }
 
 /* [regs-public] RAC.CMD.TXEN is a write-only command bit (T2). */
