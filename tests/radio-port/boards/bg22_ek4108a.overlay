@@ -1,0 +1,30 @@
+/*
+ * Zephyr's software link layer instead of the Silicon Labs binary controller.
+ * UNVALIDATED ON HARDWARE.
+ */
+&bt_hci_silabs {
+	status = "disabled";
+};
+
+&radio {
+	bt_hci_owo: bt_hci_owo {
+		compatible = "zephyr,bt-hci-ll-sw-split";
+		status = "okay";
+	};
+};
+
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_owo;
+	};
+
+	aliases {
+		/* 32768 Hz 32-bit tick counter for the ticker (modules/owo-radio-efr32/hal/cntr.c);
+		 * RTCC is taken by the sleeptimer (xg22.dtsi: silabs,sleeptimer = &rtcc0). */
+		ll-counter = &burtc0;
+	};
+};
+
+&burtc0 {
+	status = "okay";
+};

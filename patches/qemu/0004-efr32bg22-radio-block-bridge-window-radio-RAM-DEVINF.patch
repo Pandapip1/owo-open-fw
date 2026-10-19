@@ -1,7 +1,7 @@
 From 9b790233a102c152dcff7c983e2c9d415774bb77 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 14:18:42 +0000
-Subject: [PATCH 4/4] efr32bg22: radio-block bridge window, radio RAM,
+Subject: [PATCH 4/5] efr32bg22: radio-block bridge window, radio RAM,
  DEVINFO/USERDATA; per-block fallback devices
 
 The radio register blocks (0xA8000000..) are undocumented in the public SDK; they are

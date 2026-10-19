@@ -1,7 +1,7 @@
 From 61c0defe517563a6cebdc4cfc6839dcd4065ac4e Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 13:36:03 +0000
-Subject: [PATCH 1/4] hw/arm: add efr32bg22 machine with out-of-process
+Subject: [PATCH 1/5] hw/arm: add efr32bg22 machine with out-of-process
  peripheral bridge
 
 Cortex-M33 machine with 512K flash and 32K SRAM that resets at 0 (for a

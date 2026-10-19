@@ -1,0 +1,39 @@
+# Zephyr split Link Layer (ULL/LLL) lower layer for the EFR32BG22 radio.
+#
+# UNVALIDATED ON HARDWARE and mostly stubs: see docs/zephyr-ll-port.md and docs/radio-tables.md.
+# SPDX-License-Identifier: Apache-2.0
+
+config BT_LLL_VENDOR_OWO_EFR32
+	bool "Open EFR32BG22 lower link layer for Zephyr's split controller"
+	depends on BT_LL_SW_SPLIT
+	depends on SOC_SERIES_EFR32BG22
+	default y
+	# Same feature selection as Zephyr's OpenISA LLL (subsys/bluetooth/controller/
+	# Kconfig.ll_sw_split, BT_LLL_VENDOR_OPENISA): legacy advertising/scanning, one-PHY connections,
+	# software AES (PSA) and software TIFS. Nothing here is a claim about what the radio can do.
+	select BT_HAS_HCI_VS
+	select BT_CTLR_ENTROPY_SUPPORT
+	select BT_CTLR_CRYPTO_SUPPORT
+	select BT_CTLR_LE_ENC_SUPPORT if BT_CTLR_CRYPTO_SUPPORT && !BT_CTLR_DATA_LENGTH_CLEAR
+	select BT_CTLR_PRIVACY_SUPPORT if BT_CTLR_CRYPTO_SUPPORT
+	select BT_CTLR_PHY_UPDATE_SUPPORT
+	select BT_CTLR_EXT_REJ_IND_SUPPORT
+	select BT_TICKER_REMAINDER_SUPPORT
+	select BT_TICKER_UPDATE if BT_BROADCASTER || BT_CONN
+	select PSA_CRYPTO
+	help
+	  Out-of-tree lower link layer ("vendor") for subsys/bluetooth/controller/ll_sw. The LLL
+	  sources are derived at configure time from Zephyr's OpenISA LLL (Apache-2.0); only the
+	  hardware abstraction in this module is new. Replaces the Silicon Labs binary controller
+	  (BT_SILABS_EFR32); the two are mutually exclusive.
+
+if BT_LLL_VENDOR_OWO_EFR32
+
+config OWO_RADIO_EFR32_STUB_REGISTERS
+	bool "Do not touch radio registers (all radio_* hooks are TODO stubs)"
+	default y
+	help
+	  The radio register map is not public (docs/radio-tables.md). While set, the radio HAL only
+	  keeps software state and asserts when the controller tries to put a packet on the air.
+
+endif # BT_LLL_VENDOR_OWO_EFR32

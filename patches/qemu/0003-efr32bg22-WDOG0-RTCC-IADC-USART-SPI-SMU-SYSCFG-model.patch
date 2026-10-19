@@ -1,7 +1,7 @@
 From a5a40c68a3c0d03f87b5a7260d0c035698be2955 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 14:12:15 +0000
-Subject: [PATCH 3/4] efr32bg22: WDOG0, RTCC, IADC, USART (SPI), SMU/SYSCFG
+Subject: [PATCH 3/5] efr32bg22: WDOG0, RTCC, IADC, USART (SPI), SMU/SYSCFG
  models; dump pin/SPI/ADC logs on exit
 
 Stock 7.9.07 firmware boots through the hand-built Gecko Bootloader to its

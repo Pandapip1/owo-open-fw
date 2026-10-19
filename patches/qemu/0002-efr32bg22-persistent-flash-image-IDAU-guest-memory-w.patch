@@ -1,7 +1,7 @@
 From 6d016961b1910cf3bbc00fb91fcfa663ae66ce89 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 14:05:56 +0000
-Subject: [PATCH 2/4] efr32bg22: persistent flash image, IDAU, guest memory
+Subject: [PATCH 2/5] efr32bg22: persistent flash image, IDAU, guest memory
  writes and reset handshake; Python peripheral models
 
 - flash=<image> machine property; flash survives system reset (MSC model
