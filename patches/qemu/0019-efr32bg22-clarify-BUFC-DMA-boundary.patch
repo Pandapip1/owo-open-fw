@@ -1,0 +1,31 @@
+From 5e465ee8b3799ec306a971d228df86e622963a64 Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 15:07:41 -0400
+Subject: [PATCH] efr32bg22: clarify BUFC DMA boundary
+
+Document that guest-memory reads exist while the trace still lacks DMA trigger and length semantics.
+
+Assisted-By: Codex (GPT-5)
+---
+ tools/efr32bg22/models.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/tools/efr32bg22/models.py b/tools/efr32bg22/models.py
+index 27bf627..84785bb 100644
+--- a/tools/efr32bg22/models.py
++++ b/tools/efr32bg22/models.py
+@@ -242,8 +242,9 @@ class BUFC(IrqDev):
+     combine the public efr32xg21_bufc.h with offsets observed in the xG22 stock
+     trace: channels start at +0x0c with a 0x40 stride; IF/IEN are +0x114/+0x118.
+     This model covers the programmed data port, offsets, status, clear command,
+-    threshold flags and IRQ.  DMA through BUF.ADDR still needs guest-memory reads
+-    in the bridge protocol and is deliberately not pretended here.
++    threshold flags and IRQ.  The bridge can now read guest memory, but the
++    trace has not established BUFC's DMA trigger or transfer length, so DMA is
++    deliberately not pretended here.
+     """
+     IF_OFF, IEN_OFF = 0x114, 0x118
+     irq_name = "BUFC"
+-- 
+2.55.0
+
