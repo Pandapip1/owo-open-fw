@@ -1,0 +1,3 @@
+#ifndef SL_COMPONENT_CATALOG_H
+#define SL_COMPONENT_CATALOG_H
+#endif
