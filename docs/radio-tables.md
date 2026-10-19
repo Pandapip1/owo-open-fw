@@ -46,7 +46,7 @@ Examples: `0x0001400C` writes one word to `FRC.DFLCTRL` (`0xA800400C`); `0x1001C
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] register fields known; exact BLE descriptor setup not yet derived** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F]** known | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
 | T7 | PA power registers | unknown (RAIL PA tables are public per-board) | `radio_tx_power_*` |
-| T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | unknown | `radio_tmr_*`, `radio_tmr_tifs_*` |
+| T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
 | T9 | AGC RSSI read | **[F] live/frame value registers and fixed-point fields known; readiness/measurement policy unknown** | `radio_rssi_*` |
 
 Software-only (nothing blocked, not yet written): filter, bc, gpio, ccm, ar.
@@ -70,6 +70,9 @@ The same public revB2 model identifies the remaining core data-path fields. SYNT
 FRC exposes dynamic-frame-length configuration at `DFLCTRL +0x00C`, `MAXLENGTH +0x010`, frame/length/address word-count comparators at `+0x020..+0x028`, whitening control/polynomial/init at `+0x030/+0x034/+0x038`, RX control at `+0x058`, and four frame configuration descriptors `FCD0..3` later in the block. RFCRC is a separately generated block at `0xA8010000`. The public BLE configurator also supplies concrete PHY values—for example its channel-specific entries write `FRC.WHITEINIT`—but deriving the complete advertising descriptor sequence still requires correlating stock or RAIL accesses.
 
 AGC's live `RSSI +0x018` and latched `FRAMERSSI +0x01C` have the same signed-looking 8-bit integer field in bits 8..15 and two fractional bits in bits 6..7 (reset raw value `0x8000`). The generated files do not document signedness, units, when the frame latch updates, or a measurement-ready contract, so T9 is only structurally resolved.
+
+## 4.3 PROTIMER access pattern [F]
+The public xG22 RAIL archive's `rfhal_protimer.o` accesses the secure alias of `0xA801C000`, confirming the base. It writes command values including `1`, `4`, `0x20`, `0x40`, `0x80`, and `0x10000` to `+0x00C`; uses `+0x030` and `+0x038` as timer state/period inputs; and accesses four 16-byte compare slots starting at `+0x100` (with associated control words at `+0x200`). The object also drives `RAC_RSM_IRQHandler`, so timer behavior is part of the event path. These are access facts only—the register field names, counter unit, capture semantics, and safe TIFS sequence remain unresolved, so no HAL or QEMU timer implementation is inferred from them.
 
 ## 5. Shortest path to advertising in the QEMU radio model
 1. **Partially done in QEMU patches 0006–0007:** BUFC has the trace-corrected programmed-data path and threshold IRQs; RAC uses the public xG22 register/command/state map and distinct RAC_RSM/RAC_SEQ interrupt banks. Seven focused tests cover both models. BUFC DMA via `BUF.ADDR`, packet socket/pcap output, and real sequencer timing remain unimplemented.
