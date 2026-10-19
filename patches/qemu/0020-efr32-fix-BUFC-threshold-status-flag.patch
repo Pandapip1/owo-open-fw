@@ -1,0 +1,41 @@
+From a6ed1f5978b9bca57f317cf65d6cdbc8c70d2df9 Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 15:10:22 -0400
+Subject: [PATCH] efr32: fix BUFC threshold status flag
+
+Assisted-By: Codex (GPT-5)
+---
+ tools/efr32bg22/models.py            | 4 +++-
+ tools/efr32bg22/test_radio_models.py | 1 +
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/tools/efr32bg22/models.py b/tools/efr32bg22/models.py
+index 84785bb..4042034 100644
+--- a/tools/efr32bg22/models.py
++++ b/tools/efr32bg22/models.py
+@@ -303,7 +303,9 @@ def read(self, off, size=4):
+         if reg == 0x20:                         # STATUS
+             rd = self.regs.get(base + 0x0C, 0) & 0x1FFF
+             count = max(0, len(self.data[n]) - rd) & 0x1FFF
+-            flag = (1 << 20) if self.regs.get(self.IF_OFF, 0) & (1 << n) else 0
++            # STATUS.THRESHOLDFLAG is bit 20 for every buffer.  Its source
++            # is that buffer's sparse global IF threshold bit, 8*n+2.
++            flag = (1 << 20) if self.regs.get(self.IF_OFF, 0) & (1 << (8 * n + 2)) else 0
+             return count | flag
+         return super().read(off, size)
+ 
+diff --git a/tools/efr32bg22/test_radio_models.py b/tools/efr32bg22/test_radio_models.py
+index 7be951b..0e4d6b1 100644
+--- a/tools/efr32bg22/test_radio_models.py
++++ b/tools/efr32bg22/test_radio_models.py
+@@ -64,6 +64,7 @@ def test_xwrite_clear_threshold_and_irq(self):
+         dev.write(base + 0x1C, 0x55)
+         self.assertEqual(dev.contents(1), b"U")
+         self.assertEqual(dev.read(dev.IF_OFF), 1 << 10)
++        self.assertEqual(dev.read(base + 0x20) & (1 << 20), 1 << 20)
+         self.assertTrue(machine.irq & (1 << models.resets.IRQS["BUFC"]))
+         dev.write(base + 0x28, 1)
+         self.assertEqual(dev.contents(1), b"")
+-- 
+2.55.0
+
