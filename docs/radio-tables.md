@@ -39,8 +39,8 @@ Examples: `0x0001400C` writes one word to `FRC.DFLCTRL` (`0xA800400C`); `0x1001C
 ## 3. Per-function blockers (IDs used in `modules/owo-radio-efr32/hal/radio.c`)
 | ID | Needs | Status | Functions |
 |---|---|---|---|
-| T1 | block enables/reset, which IRQ ends an event | [I] EN at +4; IRQ choice unknown | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
-| T2 | RAC command + state/status registers | unknown | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
+| T1 | block enables/reset, which IRQ ends an event | **[F] RAC has separate RSM and SEQ flag/enable banks; event policy still unknown** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
+| T2 | RAC command + state/status registers | **[F] core command/state map known; sequencer behavior still abstract** | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded and blocks labeled; HAL/table import not implemented** | `radio_phy_set` |
 | T4 | SYNTH channel/frequency registers | unknown | `radio_freq_chan_set` |
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | unknown | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
@@ -55,11 +55,17 @@ Timing constants in `lll/lll_vendor.h` and the `*_delay_get` functions are OpenI
 ## 4. BUFC [F]
 The per-buffer field order matches the public xG21 header, but the xG22 trace establishes a different layout: four buffers begin at `+0x00C`, use a `0x40` stride, and have `THRESHOLDCTRL`/`CMD` at buffer-relative `+0x24`/`+0x28`. Global `IF`/`IEN` are at `+0x114`/`+0x118`. For example, stock configures buffer 3 with `CTRL +0x0CC`, `ADDR +0x0D0`, `THRESHOLDCTRL +0x0F0`, then `CMD +0x0F4`; the other three sequences occur at bases `+0x00C`, `+0x04C`, and `+0x08C`. These offsets are now covered by QEMU patch 0006 tests. `BUF.ADDR` DMA behavior remains unmodelled. Source: the xG21 `efr32xg21_bufc.h` header (Silicon Labs Gecko SDK, public) and the stock 7.9.07 QEMU trace.
 
-## 4.1 RAC trace facts [F]
-The recovered stock image reaches radio initialization at about 98.5 ms virtual time. At the inferred RAC base `0xA8020000`, it enables `+0x004`, writes `+0x010` with `0x80`, `0x100`, and `0x20` in distinct initialization paths, writes several values to `+0x014`, and performs a write/read handshake using `+0x040`. These observations narrow T2 but do not yet identify command names or state encodings. Patch 0006's `1/2/3` command contract remains explicitly simulator-only and must not be treated as this hardware map.
+## 4.1 RAC core [F]
+The public Simplicity SDK generated revB2 register model
+(`platform/radio/efr32_multiphy_configurator/host_py_rm_studio_internal/full/efr32xg22/revB2/RAC_S_{register,field}.py`)
+matches the stock disassembly and trace exactly. At `0xA8020000`: `EN +0x004`, `RXENSRCEN +0x008`, read-only `STATUS +0x00C`, write-only `CMD +0x010`, `CTRL +0x014`, `FORCESTATE +0x018`, `IF/IEN +0x01C/+0x020`, and `SEQIF/SEQIEN +0x028/+0x02C`. SET/CLR/TGL aliases are at `+0x1000/+0x2000/+0x3000`.
+
+`CMD` bit 0 is `TXEN`, bit 1 `FORCETX`, bit 5 `TXDIS` (`0x20`), bit 7 `RXCAL` (`0x80`), and bit 8 `RXDIS` (`0x100`). `RXENSRCEN.SWRXEN` occupies bits 0..7. `STATUS.STATE` is bits 24..27; the matching sequencer flags establish OFF=0, RXWARM=1, RXSEARCH=2, RXFRAME=3, RXPD=4, RX2RX=5, RXOVERFLOW=6, RX2TX=7, TXWARM=8, TX=9, TXPD=10, TX2RX=11, TX2TX=12, SHUTDOWN=13. `STATUS` also exposes `SEQACTIVE`, `DEMODENS`, `TXENS`, and `RXENS` in bits 28..31.
+
+This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. QEMU patch 0007 replaces patch 0006's synthetic register contract with this map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
 ## 5. Shortest path to advertising in the QEMU radio model
-1. **Partially done in QEMU patch 0006:** the model now has the trace-corrected xG22 BUFC programmed-data path, offsets/status/threshold IRQs, and a test hook that exposes each buffer's bytes. It also has an explicitly simulator-only RAC contract (idle/RX/TX, timed TX completion, RAC_SEQ IRQ) so model work can proceed without representing its offsets as hardware facts. BUFC DMA via `BUF.ADDR` still needs guest-memory reads in the bridge protocol, and socket/pcap output is not implemented. The recovered stock trace now constrains several RAC offsets, but assigning hardware-compatible T2 semantics still needs disassembly correlation or SWD capture.
+1. **Partially done in QEMU patches 0006–0007:** BUFC has the trace-corrected programmed-data path and threshold IRQs; RAC uses the public xG22 register/command/state map and distinct RAC_RSM/RAC_SEQ interrupt banks. Seven focused tests cover both models. BUFC DMA via `BUF.ADDR`, packet socket/pcap output, and real sequencer timing remain unimplemented.
 2. Let stock firmware run to PHY configuration (BLE advertising start) under the model and log the writes; compare to the public tables to decode `ty` (T3) and to label MODEM/FRC registers (T5).
 3. Implement T1/T2/T6/T8 in `hal/radio.c` for ADV_IND TX only (no RX, no TIFS), drop the `STUB_REGISTERS` asserts for `radio_tx_enable`/`radio_tmr_start`.
 4. Then RX window for SCAN_REQ/CONNECT_IND (T9, T5), then software TIFS (T8).
