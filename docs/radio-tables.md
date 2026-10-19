@@ -13,7 +13,7 @@ model; **[I]** = inference, not confirmed. No blob bytes or disassembly are repr
 | RFCRC | 0xA8010000 | [F] same |
 | MODEM | 0xA8014000 | [F] same |
 | SYNTH | 0xA8018000 | [F] same |
-| PROTIMER | 0xA801C000 | [I] |
+| PROTIMER | 0xA801C000 | [F] RAIL archive object access; see §4.3 |
 | RAC | 0xA8020000 | [F] public table plus stock disassembly literals |
 | RF mailbox | 0xA8028000, 0xA802C000 | [I] |
 | BUFC | 0xAA000000 | [F] layout matches the xG21 public header; matched by stock init trace |
