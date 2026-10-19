@@ -51,7 +51,7 @@ BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one c
 | Stage | Work | Test that can run now / next |
 |---|---|---|
 | 0 **done** | `crates/ble-ll`: CRC-24, whitening, CSA #1/#2, advertising/connect PDUs, data header, SN/NESN, LL control subset, window widening/transmit window timing, instants, supervision, HCI framing/event builders, `Peripheral<R: Radio>` driver | `cargo test` in the crate: 30 tests (§6) |
-| 1 | `hci_owo_ll.c` replacing `hci_silabs_efr32.c`; HCI command layer for the commands Zephyr's host sends at init (list below); ACL ↔ `queue_data` flow control | native_sim: Zephyr host + our controller + a software central (the mock radio of `tests/peripheral.rs`, scripted by a second instance of the crate in central role or by pre-recorded PDUs) |
+| 1 | `hci_efr32_ll.c` replacing `hci_silabs_efr32.c`; HCI command layer for the commands Zephyr's host sends at init (list below); ACL ↔ `queue_data` flow control | native_sim: Zephyr host + our controller + a software central (the mock radio of `tests/peripheral.rs`, scripted by a second instance of the crate in central role or by pre-recorded PDUs) |
 | 2 | Encryption: LL_ENC_REQ/RSP, START_ENC, AES-CCM per Vol 6 Part B §5.1.3 | sample data from Core Spec Vol 6 Part C (encryption sample data) |
 | 3 | Radio driver v0 *on top of RAIL* (public API) implementing `Radio`; keeps the closed sequencer and RAIL, removes only `liblinklayer.a` | QEMU radio model (sibling task, `docs/radio-block.md`): compare the register traffic of our driver with the stock link layer's for "start advertising" |
 | 4 | Capture ground truth: register dumps/traces from a real EFR32BG22 dev kit over SWD (the user's hardware) for TX/RX/IFS sequences | needs hardware, no substitute |
