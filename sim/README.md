@@ -2,9 +2,9 @@
 
 **Unvalidated on hardware. Bench-test the output stage on a dummy load first.**
 
-* `patches/qemu/*.patch` — series on top of QEMU v9.2.0 adding the `efr32bg22` machine
+* `vendor/qemu/` — pinned QEMU v9.2.0 fork adding the `efr32bg22` machine
   (Cortex-M33, IDAU, persistent flash, MMIO bridge to an out-of-process Python peripheral
-  server in `tools/efr32bg22/`). Apply with `git am`.
+  server in `tools/efr32bg22/`).
 * `sim/bootloader/` — hand-configured build of the real Gecko Bootloader main stage
   (sources from gecko_sdk, see `Makefile`; app base moved to 0x16000 to match the suit).
   SHA-256 is a software shim and ECDSA verification is a stub: signatures are NOT checked.

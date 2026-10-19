@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Run the output-stage integration test on Zephyr's native_sim (no hardware).
-# Needs the west workspace (`west update`), the Zephyr patches applied (scripts/apply-patches.sh),
+# Needs the west workspace (`west update`), the pinned Zephyr submodule,
 # and the Rust target:  rustup target add x86_64-unknown-none
 # Extra arguments are passed to cmake, e.g. -DZEPHYR_EXTRA_MODULES=<path>.
 set -eu

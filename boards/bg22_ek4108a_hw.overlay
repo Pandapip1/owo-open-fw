@@ -160,7 +160,7 @@
 
 	chosen {
 		/* Zephyr's timing API, backed by a counter that keeps counting in every sleep state
-		 * (BURTC, 32768 Hz; see patches/zephyr). */
+			 * (BURTC, 32768 Hz; see the pinned Zephyr submodule). */
 		zephyr,timing-counter = &burtc0;
 	};
 

@@ -19,12 +19,12 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `src/hal.rs` | `Output`: dry-run log, or (opt-in) the `owo-stim` supervisor + `owo-suit` |
 | `modules/owo-stim/` | **Reusable Zephyr module**: per-part Rust crates, a Rust DAC driver, bindings, shim. See below |
 | `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
-| `patches/zephyr/` | Two small Zephyr patches: a Counter-backed timing backend, and read-back verification for `ti,sn74hc595` |
+| `vendor/zephyr/` | Pinned patched Zephyr submodule: Counter-backed timing backend and read-back verification for `ti,sn74hc595` |
 | `docs/ota.md`, `scripts/make-gbl.py` | Keeping the Silicon Labs OTA update working (flash map and boot-mode request in devicetree, OTA service in `src/ble.rs`) and packaging a GBL |
 | `docs/stock-stim-path.md` | What the stock firmware's output stage does, its interlocks, and the ones it lacks |
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
-| `patches/`, `scripts/apply-patches.sh` | Local patch to zephyr-lang-rust (see above) and its applier |
+| `vendor/zephyr-lang-rust/` | Pinned patched Rust-for-Zephyr submodule (see above) |
 | `west.yml` | Pins Zephyr + `zephyr-lang-rust` and imports only the modules needed |
 | `flake.nix` | flake-parts dev shell (+ a `checks.owo-core` host-test check) |
 
@@ -32,8 +32,7 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 ```
 nix develop                              # Rust (thumbv8m.main targets), west, Arm GCC 13, cmake, ninja, dtc, libclang
 git init -q && git add -A                # flakes only see tracked files; skip if this is already in a repo
-west init -l . && west update            # workspace goes in the parent directory
-./scripts/apply-patches.sh               # required: lets zephyr-lang-rust coexist with the Silabs sleeptimer
+git submodule update --init --recursive   # pinned QEMU, Zephyr, and Rust module revisions
 west blobs fetch hal_silabs              # Silicon Labs' radio libraries
 OWO_SERIAL=<your serial> west build -b bg22_ek4108a .      # dry run (no output)
 # bench only:  ... -- -DOWO_HW=ON   (adds boards/<board>_hw.overlay + owo-suit-hw.conf)
@@ -65,8 +64,7 @@ drivers can be checked independently, and a new board (or a different MCU family
 | Glue | `owo-suit`, `zephyr-io` | `owo-suit` implements `Hw`; every number it uses (DAC scale, level ceiling, sense scale, switch routes, boost duty) is read from the `owo,suit-output` node; `zephyr-io` is the Rust view of the shim's 1:1 wrappers (most Zephyr calls are static inline) |
 
 The C shim contains no decisions: wrappers, devicetree lookups, and the ADC callback that stamps the
-clock. The Zephyr patches (`patches/zephyr/`, applied by `scripts/apply-patches.sh`; also on branch
-`owo/patches` of a Zephyr checkout) are written to be upstreamable.
+clock. The Zephyr changes live in the pinned `vendor/zephyr` submodule and are written to be upstreamable.
 
 Why a new DAC driver: Zephyr's `dac_ad56xx` sends the same bytes but clocks in SPI mode 1 and cannot
 address "all DACs"; the LTC262x data sheet is mode 0.
@@ -134,8 +132,8 @@ reads e.g. ``non-primitive cast: `HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwC
 The `bench` and `embassy` samples in zephyr-lang-rust use the Kconfig value and would now stop compiling
 on such targets (they could not be built there before, since Rust was disabled).
 
-`patches/0001-*.patch` removes both guards and adds that check (if you applied the earlier version of this patch, run `git -C ../modules/lang/rust checkout .` first). `scripts/apply-patches.sh` applies it to the west-managed
-checkout (idempotent; re-run after every `west update`). It is a local patch, not upstream. With it,
+The pinned `vendor/zephyr-lang-rust` submodule removes both guards and adds that check. It is a local
+change, not upstream. With it,
 `prj.conf` keeps the sleeptimer and `CONFIG_PM=y`. Without it, Kconfig reports
 `RUST ... was assigned the value 'y' but got the value 'n'`.
 
@@ -153,7 +151,7 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 ## What was validated
 - **`tests/native-sim`** runs the real shim, the real Zephyr drivers (`ti,sn74hc595` with read-back, the Rust `ltc2634`, `regulator-fixed`, the async ADC sequence, the Counter API) and the supervisor on `native_sim`, with emulated GPIO/SPI/ADC/counter and a small circuit model (`src/test_hw.c`). It checks: safe state after init, a biphasic pulse (positive then negative, measured level, no shoot-through, everything back off), the dead-man, over-delivery tripping, a hung ADC never closing the bridge, and a switch read-back mismatch never closing the bridge and clearing the switch. It found a real bug in the `sn74hc595` read-back patch (the cached outputs stayed at the old value after a failed read-back, so the clear request was skipped), now fixed. The circuit model is mine, not the suit's: it proves the wiring and logic, not the electrical behaviour.
 - Host tests: `owo-stim` 19, `owo-hbridge` 3, `owo-switch` 4, `ltc2634` 3, all pass; clippy `-D warnings` clean. `owo-stim` tests: (supervisor against a mock output stage: bridge ordering, clamps, overdrive trip at the early and the mid-pulse sample, switch-verify failure, lockout, coverage window and dead-man, soft start, duty budget, open-circuit hint). Not run on hardware.
-- Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the Zephyr patches applied. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
+- Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the pinned Zephyr submodule. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
 - Channel switch table and the pin/DAC/ADC details in `docs/stock-stim-path.md` were obtained by reading the stock code and, for the table, by emulating its start-up with `unicorn`.
 - `owo-core`: 13 host tests pass (the vectors from the firmware analysis: frame/config/power/
   widths/pairing, plus scheduler behaviour: 100 wake-ups for a 500 ms, 100 Hz, 2-channel frame
@@ -162,9 +160,9 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
   clean under Zephyr's `-D warnings` and mandatory `// SAFETY:` comments, ~126 KB flash / ~26 KB RAM with the earlier SysTick configuration.
   Done twice: with Ubuntu's gcc-arm-none-eabi 13.2.1, and from a fresh `west init -l` + `west
   update` workspace using this `west.yml`, inside `nix develop` (Arm GNU 13.3.Rel1).
-- With the patch: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
+- With the pinned Rust module: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
   `TICKLESS_KERNEL=y` compiles and links (~134 KB flash / ~27 KB RAM), from a fresh `west init -l` +
-  `west update` workspace plus `scripts/apply-patches.sh`; without it, Rust is disabled by Kconfig.
+  `west update` workspace with the pinned submodule; without it, Rust is disabled by Kconfig.
   Also checked: `hw_cycles_per_sec()` builds in that configuration; using the Kconfig constant fails to
   compile with the error above; with SysTick (option off) the constant is numeric again (78000000) and
   both forms compile. The patch applies cleanly to the pristine pinned revision.
