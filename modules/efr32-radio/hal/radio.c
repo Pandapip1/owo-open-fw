@@ -69,6 +69,7 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_RFCRC_BLE_CTRL 0x00000708U
 
 #define EFR32_FRC_BASE 0xA8004000UL
+#define EFR32_AGC_BASE 0xA800C000UL
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
@@ -86,6 +87,8 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_RAC_CMD_TXEN (1U << 0)
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
+
+#define EFR32_RADIO_EN_OFFSET 0x004U
 
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
@@ -326,10 +329,20 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 	EFR32_RADIO_TODO("IRQ routing (T1)");
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [regs-public] Enable the six blocks whose public xG22 models expose EN.EN. */
 void radio_setup(void)
 {
-	EFR32_RADIO_TODO("IRQ routing, block enables and reset sequence");
+	/*
+	 * Every address below is a rev-B2 secure EN register at +0x004, with
+	 * the sole writable field EN.EN at bit zero. This deliberately does not
+	 * claim an ordering, reset protocol, BUFC enable, or IRQ event policy.
+	 */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_AGC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 }
 
 /* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */

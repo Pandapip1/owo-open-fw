@@ -18,7 +18,7 @@ model; **[I]** = inference, not confirmed. No blob bytes or disassembly are repr
 | RF mailbox | 0xA8028000, 0xA802C000 | [I] |
 | BUFC | 0xAA000000 | [F] layout matches the xG21 public header; matched by stock init trace |
 
-Every block has `+0x004 = EN` [I]. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
+The public rev-B2 models establish a narrower, usable fact: FRC, AGC, RFCRC, MODEM, SYNTH, and RAC each have writable one-bit `EN.EN` at `+0x004` (their respective `*_S_register.py:24-37` and `*_S_field.py:17-24` files). `radio_setup()` enables exactly those six blocks, and QEMU masks the matching latches to bit zero with a native regression. No conclusion is drawn for PRORTC, PROTIMER, BUFC, mailbox blocks, enable ordering, reset sequencing, or interrupt policy. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
 (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h`).
 
 ## 2. RAIL PHY configuration table format (`ble_efr32xg22_configurator_out.c`, Zlib licence) [F]
@@ -43,7 +43,7 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 ## 3. Per-function blockers (IDs used in `modules/efr32-radio/hal/radio.c`)
 | ID | Needs | Status | Functions |
 |---|---|---|---|
-| T1 | block enables/reset, which IRQ ends an event | **[F] RAC has separate RSM and SEQ flag/enable banks; event policy still unknown** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
+| T1 | block enables/reset, which IRQ ends an event | **[F] six core EN latches implemented; RAC has separate RSM and SEQ flag/enable banks; reset and event policy remain unknown** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
 | T2 | RAC command + state/status registers | **[F] core command/state map known; sequencer behavior still abstract** | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded; address-independent BLE 1M base plus 1M/2M deltas imported, PHYINFO/coded remain unresolved** | `radio_phy_set` |
 | T4 | SYNTH channel/frequency registers | **[F] implemented from public BLE channel config and CHCTRL field** | `radio_freq_chan_set` |
