@@ -1,0 +1,264 @@
+From 285b74e86cd5a6b57b3a4f9f02de41df58cc2da9 Mon Sep 17 00:00:00 2001
+From: Codex <noreply@openai.com>
+Date: Mon, 19 Oct 2026 12:37:57 -0400
+Subject: [PATCH] efr32bg22: model BUFC and simulator radio transitions
+
+Implement the public xG21-compatible BUFC programmed data path and a deliberately simulator-only RAC command/state contract. Add focused tests for both models.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+---
+ tools/efr32bg22/models.py            | 131 +++++++++++++++++++++++++++
+ tools/efr32bg22/test_radio_models.py |  91 +++++++++++++++++++
+ 2 files changed, 222 insertions(+)
+ create mode 100644 tools/efr32bg22/test_radio_models.py
+
+diff --git a/tools/efr32bg22/models.py b/tools/efr32bg22/models.py
+index e8ebb9f..483fad2 100644
+--- a/tools/efr32bg22/models.py
++++ b/tools/efr32bg22/models.py
+@@ -235,6 +235,135 @@ def write(self, off, val):
+             self.irq_update()
+ 
+ 
++class BUFC(IrqDev):
++    """xG22 four-channel radio byte-buffer controller.
++
++    xG22's public device headers omit this block.  The layout and bit fields here
++    combine the public efr32xg21_bufc.h with offsets observed in the xG22 stock
++    trace: channels start at +0x0c with a 0x40 stride; IF/IEN are +0x114/+0x118.
++    This model covers the programmed data port, offsets, status, clear command,
++    threshold flags and IRQ.  DMA through BUF.ADDR still needs guest-memory reads
++    in the bridge protocol and is deliberately not pretended here.
++    """
++    IF_OFF, IEN_OFF = 0x114, 0x118
++    irq_name = "BUFC"
++    BUF0, STRIDE = 0x00C, 0x040
++
++    def __init__(self, name):
++        super().__init__(name, "")
++        self.data = [bytearray() for _ in range(4)]
++
++    def decode(self, off):
++        rel = off - self.BUF0
++        if 0 <= rel < 4 * self.STRIDE:
++            return rel // self.STRIDE, rel % self.STRIDE
++        return None, None
++
++    def capacity(self, n):
++        return 64 << (self.regs.get(self.BUF0 + n * self.STRIDE, 0) & 7)
++
++    def update_threshold(self, n):
++        base = self.BUF0 + n * self.STRIDE
++        cfg = self.regs.get(base + 0x24, 0)
++        threshold = cfg & 0xFFF
++        hit = len(self.data[n]) <= threshold if cfg & 0x2000 else len(self.data[n]) > threshold
++        bit = 1 << n
++        if hit:
++            self.regs[self.IF_OFF] = self.regs.get(self.IF_OFF, 0) | bit
++        else:
++            self.regs[self.IF_OFF] = self.regs.get(self.IF_OFF, 0) & ~bit
++        self.irq_update()
++
++    def push(self, n, value, xor=False):
++        base = self.BUF0 + n * self.STRIDE
++        pos = self.regs.get(base + 0x08, 0) & 0x1FFF
++        buf = self.data[n]
++        if pos >= self.capacity(n):
++            return
++        if pos >= len(buf):
++            buf.extend(b"\0" * (pos + 1 - len(buf)))
++        buf[pos] = (buf[pos] ^ value) if xor else value
++        self.regs[base + 0x08] = (pos + 1) & 0x1FFF
++        self.update_threshold(n)
++
++    def read(self, off, size=4):
++        n, reg = self.decode(off & ~3)
++        if n is None:
++            return super().read(off, size)
++        base = self.BUF0 + n * self.STRIDE
++        if reg == 0x14:                         # READDATA
++            pos = self.regs.get(base + 0x0C, 0) & 0x1FFF
++            value = self.data[n][pos] if pos < len(self.data[n]) else 0
++            self.regs[base + 0x0C] = (pos + 1) & 0x1FFF
++            self.update_threshold(n)
++            return value
++        if reg == 0x20:                         # STATUS
++            rd = self.regs.get(base + 0x0C, 0) & 0x1FFF
++            count = max(0, len(self.data[n]) - rd) & 0x1FFF
++            flag = (1 << 20) if self.regs.get(self.IF_OFF, 0) & (1 << n) else 0
++            return count | flag
++        return super().read(off, size)
++
++    def write(self, off, val):
++        n, reg = self.decode(off)
++        if n is None:
++            return super().write(off, val)
++        base = self.BUF0 + n * self.STRIDE
++        if reg == 0x18:                         # WRITEDATA
++            self.push(n, val & 0xFF)
++        elif reg == 0x1C:                       # XWRITE
++            self.push(n, val & 0xFF, xor=True)
++        elif reg == 0x28:                       # CMD
++            if val & 1:                         # CLEAR
++                self.data[n].clear()
++                self.regs[base + 0x08] = self.regs[base + 0x0C] = 0
++                self.update_threshold(n)
++        else:
++            super().write(off, val)
++            if reg in (0x00, 0x08, 0x0C, 0x24):
++                self.update_threshold(n)
++
++    def contents(self, n):
++        """Return bytes currently exposed by a channel (test/pcap hook)."""
++        return bytes(self.data[n])
++
++
++class SimRAC(IrqDev):
++    """Simulator-only radio state machine; not an asserted xG22 register map.
++
++    CMD(+0x10): 1=disable, 2=RX, 3=TX. STATUS(+0x14): 0=idle, 1=RX,
++    2=TX. EVENT IF/IEN are +0x18/+0x1c, bit 0. TX completes after 150 us;
++    RX remains active until disabled.  Keeping this contract separate and named
++    SIM_* prevents these offsets being mistaken for hardware facts.
++    """
++    IF_OFF, IEN_OFF = 0x018, 0x01C
++    irq_name = "RAC_SEQ"
++    IDLE, RX, TX = 0, 1, 2
++
++    def __init__(self, name):
++        super().__init__(name, "")
++        self.state = self.IDLE
++        self.generation = 0
++
++    def r_014(self):
++        return self.state
++
++    def w_010(self, value):
++        self.generation += 1
++        generation = self.generation
++        if value == 1:
++            self.state = self.IDLE
++        elif value == 2:
++            self.state = self.RX
++        elif value == 3:
++            self.state = self.TX
++            def complete():
++                if generation == self.generation and self.state == self.TX:
++                    self.state = self.IDLE
++                    self.raise_if(1)
++            self.m.after(150_000, complete)
++
++
+ class PCF8575:
+     """16-bit quasi-bidirectional I/O expander.  Two data bytes per transfer, P0-P7 first."""
+     def __init__(self, addr7=0x20):
+@@ -1052,5 +1181,7 @@ def build(m, reset=False, cause=1):
+     m.add(IADC("IADC0"), 0x4A004000)
+     m.add(USART("USART0", "USART0_RX"), 0x4005C000)
+     m.add(USART("USART1", "USART1_RX"), 0x40060000)
++    m.rac = m.add(SimRAC("RAC_SIM"), 0xA8020000)
++    m.bufc = m.add(BUFC("BUFC"), 0xAA000000)
+     trng = m.add(TRNG("TRNG", ""), 0x4C021000, 0x1000)
+     m.add(TRNGFifo("TRNGFIFO", trng), 0x4C024000, 0x1000)
+diff --git a/tools/efr32bg22/test_radio_models.py b/tools/efr32bg22/test_radio_models.py
+new file mode 100644
+index 0000000..ca706e1
+--- /dev/null
++++ b/tools/efr32bg22/test_radio_models.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python3
++import heapq
++import pathlib
++import sys
++import unittest
++
++sys.path.insert(0, str(pathlib.Path(__file__).parent))
++import models
++
++
++class Machine:
++    def __init__(self):
++        self.now = 0
++        self.irq = 0
++        self.events = []
++        self.seq = 0
++
++    def set_irq(self, number, level):
++        if level:
++            self.irq |= 1 << number
++        else:
++            self.irq &= ~(1 << number)
++
++    def after(self, delay, callback):
++        self.seq += 1
++        heapq.heappush(self.events, (self.now + delay, self.seq, callback))
++
++    def advance(self, delay):
++        self.now += delay
++        while self.events and self.events[0][0] <= self.now:
++            heapq.heappop(self.events)[2]()
++
++
++def attach(device):
++    machine = Machine()
++    device.m = machine
++    return machine, device
++
++
++class BufcTests(unittest.TestCase):
++    def test_xg22_trace_offsets(self):
++        dev = models.BUFC("BUFC")
++        self.assertEqual((dev.BUF0, dev.STRIDE), (0x00C, 0x040))
++        self.assertEqual((dev.IF_OFF, dev.IEN_OFF), (0x114, 0x118))
++
++    def test_programmed_io_offsets_status_and_contents(self):
++        _, dev = attach(models.BUFC("BUFC"))
++        base = dev.BUF0
++        dev.write(base + 0x18, 0x41)
++        dev.write(base + 0x18, 0x42)
++        self.assertEqual(dev.contents(0), b"AB")
++        self.assertEqual(dev.read(base + 0x20) & 0x1FFF, 2)
++        self.assertEqual(dev.read(base + 0x14), ord("A"))
++        self.assertEqual(dev.read(base + 0x20) & 0x1FFF, 1)
++
++    def test_xwrite_clear_threshold_and_irq(self):
++        machine, dev = attach(models.BUFC("BUFC"))
++        base = dev.BUF0 + dev.STRIDE
++        dev.write(dev.IEN_OFF, 1 << 1)
++        dev.write(base + 0x24, 0)             # larger than zero
++        dev.write(base + 0x1C, 0x55)
++        self.assertEqual(dev.contents(1), b"U")
++        self.assertTrue(machine.irq & (1 << models.resets.IRQS["BUFC"]))
++        dev.write(base + 0x28, 1)
++        self.assertEqual(dev.contents(1), b"")
++        self.assertFalse(machine.irq & (1 << models.resets.IRQS["BUFC"]))
++
++
++class SimRacTests(unittest.TestCase):
++    def test_tx_completes_and_raises_rac_seq(self):
++        machine, dev = attach(models.SimRAC("RAC_SIM"))
++        dev.write(dev.IEN_OFF, 1)
++        dev.write(0x10, 3)
++        self.assertEqual(dev.read(0x14), dev.TX)
++        machine.advance(149_999)
++        self.assertEqual(dev.read(0x14), dev.TX)
++        machine.advance(1)
++        self.assertEqual(dev.read(0x14), dev.IDLE)
++        self.assertTrue(machine.irq & (1 << models.resets.IRQS["RAC_SEQ"]))
++
++    def test_disable_cancels_pending_tx_completion(self):
++        machine, dev = attach(models.SimRAC("RAC_SIM"))
++        dev.write(0x10, 3)
++        dev.write(0x10, 1)
++        machine.advance(150_000)
++        self.assertEqual(dev.read(0x14), dev.IDLE)
++        self.assertEqual(dev.read(dev.IF_OFF), 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.55.0
+

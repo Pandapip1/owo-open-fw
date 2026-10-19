@@ -16,6 +16,7 @@
 #include <zephyr/device.h>
 #include <zephyr/irq.h>
 #include <soc.h>
+#include <psa/crypto.h>
 
 #include "hal/ccm.h"
 #include "hal/radio.h"
@@ -50,6 +51,49 @@ static uint8_t MALIGN(4) pkt_empty[PDU_EM_LL_SIZE_MAX];
 /* Largest data PDU the controller can be configured to receive, plus MIC; or an advertising PDU. */
 static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_SIZE_MAX + 4,
 					 PDU_AC_LL_SIZE_MAX)];
+
+#define BLE_CCM_MIC_SIZE 4U
+#define BLE_CCM_NONCE_SIZE 13U
+#define BLE_CCM_AAD_MASK 0xE3U
+
+static struct {
+	struct ccm config;
+	struct pdu_data *rx_in;
+	struct pdu_data *rx_out;
+	bool pending_rx;
+	bool done;
+	bool mic_valid;
+	bool empty;
+} ccm_ctx;
+
+static void ccm_nonce_build(const struct ccm *ccm, uint8_t nonce[BLE_CCM_NONCE_SIZE])
+{
+	uint64_t counter = ccm->counter;
+
+	memcpy(nonce, &counter, 5);
+	nonce[4] |= ccm->direction << 7;
+	memcpy(&nonce[5], ccm->iv, sizeof(ccm->iv));
+}
+
+static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
+{
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t id = 0;
+	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
+
+	if (psa_crypto_init() != PSA_SUCCESS) {
+		return 0;
+	}
+	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&attr, 128);
+	psa_set_key_usage_flags(&attr, usage);
+	psa_set_key_algorithm(&attr, alg);
+	if (psa_import_key(&attr, ccm->key, sizeof(ccm->key), &id) != PSA_SUCCESS) {
+		return 0;
+	}
+
+	return id;
+}
 
 
 /* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
@@ -539,44 +583,117 @@ void radio_gpio_pa_lna_disable(void)
 	/* No front-end module on the target board. */
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Synchronous BLE AES-CCM through PSA. */
 void *radio_ccm_rx_pkt_set(struct ccm *ccm, uint8_t phy, void *pkt)
 {
-	ARG_UNUSED(ccm);
 	ARG_UNUSED(phy);
-	ARG_UNUSED(pkt);
-	OWO_RADIO_TODO("software: software (no register access needed); not implemen");
-	return NULL;
+	memcpy(&ccm_ctx.config, ccm, sizeof(*ccm));
+	ccm_ctx.rx_in = (struct pdu_data *)pkt_scratch;
+	ccm_ctx.rx_out = pkt;
+	ccm_ctx.pending_rx = true;
+	ccm_ctx.done = false;
+	ccm_ctx.mic_valid = false;
+	ccm_ctx.empty = false;
+
+	return pkt_scratch;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Encrypts synchronously; returned storage remains valid until the next radio packet. */
 void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 {
-	ARG_UNUSED(ccm);
-	ARG_UNUSED(pkt);
-	OWO_RADIO_TODO("software: software (no register access needed); not implemen");
-	return NULL;
+	struct pdu_data *in = pkt;
+	uint8_t nonce[BLE_CCM_NONCE_SIZE];
+	uint8_t aad = *(uint8_t *)pkt & BLE_CCM_AAD_MASK;
+	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
+	psa_key_id_t id;
+	size_t out_len;
+	psa_status_t status;
+
+	ccm_ctx.pending_rx = false;
+	ccm_ctx.done = false;
+	ccm_ctx.mic_valid = false;
+	ccm_ctx.empty = false;
+	if (in->len == 0U) {
+		ccm_ctx.done = true;
+		return pkt;
+	}
+
+	id = ccm_key_import(ccm, PSA_KEY_USAGE_ENCRYPT);
+	if (id == 0) {
+		return NULL;
+	}
+	ccm_nonce_build(ccm, nonce);
+	status = psa_aead_encrypt(id, alg, nonce, sizeof(nonce), &aad, sizeof(aad),
+				  (uint8_t *)pkt + 2, in->len, pkt_scratch + 2,
+				  sizeof(pkt_scratch) - 2, &out_len);
+	(void)psa_destroy_key(id);
+	if (status != PSA_SUCCESS || out_len != in->len + BLE_CCM_MIC_SIZE) {
+		return NULL;
+	}
+
+	pkt_scratch[0] = *(uint8_t *)pkt;
+	pkt_scratch[1] = in->len + BLE_CCM_MIC_SIZE;
+	ccm_ctx.done = true;
+	return pkt_scratch;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Completes a pending receive decrypt synchronously. */
 uint32_t radio_ccm_is_done(void)
 {
-	OWO_RADIO_TODO("software");
-	return 0;
+	uint8_t nonce[BLE_CCM_NONCE_SIZE];
+	uint8_t aad;
+	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
+	psa_key_id_t id;
+	size_t out_len;
+	psa_status_t status;
+
+	if (!ccm_ctx.pending_rx) {
+		return ccm_ctx.done;
+	}
+	ccm_ctx.pending_rx = false;
+	if (ccm_ctx.rx_in->len == 0U) {
+		memcpy(ccm_ctx.rx_out, ccm_ctx.rx_in, 2);
+		ccm_ctx.empty = true;
+		ccm_ctx.mic_valid = true;
+		ccm_ctx.done = true;
+		return 1;
+	}
+	if (ccm_ctx.rx_in->len <= BLE_CCM_MIC_SIZE) {
+		return 0;
+	}
+
+	id = ccm_key_import(&ccm_ctx.config, PSA_KEY_USAGE_DECRYPT);
+	if (id == 0) {
+		return 0;
+	}
+	ccm_nonce_build(&ccm_ctx.config, nonce);
+	aad = *(uint8_t *)ccm_ctx.rx_in & BLE_CCM_AAD_MASK;
+	status = psa_aead_decrypt(id, alg, nonce, sizeof(nonce), &aad, sizeof(aad),
+				  (uint8_t *)ccm_ctx.rx_in + 2, ccm_ctx.rx_in->len,
+				  (uint8_t *)ccm_ctx.rx_out + 2,
+				  ccm_ctx.rx_in->len - BLE_CCM_MIC_SIZE, &out_len);
+	(void)psa_destroy_key(id);
+	if (status != PSA_SUCCESS || out_len != ccm_ctx.rx_in->len - BLE_CCM_MIC_SIZE) {
+		return 0;
+	}
+
+	*(uint8_t *)ccm_ctx.rx_out = *(uint8_t *)ccm_ctx.rx_in;
+	ccm_ctx.rx_out->len = out_len;
+	ccm_ctx.mic_valid = true;
+	ccm_ctx.done = true;
+	return 1;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] */
 uint32_t radio_ccm_mic_is_valid(void)
 {
-	OWO_RADIO_TODO("software");
-	return 0;
+	return ccm_ctx.mic_valid;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] OpenISA uses this to report an empty received PDU. */
 uint32_t radio_ccm_is_available(void)
 {
-	OWO_RADIO_TODO("software");
-	return 0;
+	return ccm_ctx.empty;
 }
 
 /* [software] software (no register access needed); not implemented yet */

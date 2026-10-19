@@ -58,9 +58,8 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
 * **[F]** `lll.c:124-127` gets the default entropy device (`BT_CTLR_ENTROPY`); the xG22 build selects `CONFIG_ENTROPY_GECKO_TRNG`. Nothing to write.
 * **Done** `hal/ecb.c`: AES-128 ECB (`hal/ecb.h`: `ecb_encrypt`, `ecb_encrypt_be`, `ecb_encrypt_nonblocking`) via PSA (`psa_cipher_encrypt`,
   `PSA_ALG_ECB_NO_PADDING`), the API Zephyr's host uses (`subsys/bluetooth/crypto/bt_crypto_psa.c:10`). TinyCrypt is no longer in this tree.
-* **TODO** `radio_ccm_rx_pkt_set/tx_pkt_set/is_done/mic_is_valid/is_available` (`hal/ccm.h`: key, 39-bit counter, direction, IV):
-  software AES-CCM with a 4-byte MIC (`psa_aead_*`, `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM,4)`), the same split OpenISA does in `radio.c:1229-1360`.
-  Needs no register knowledge. `radio_ar_*` (resolvable-address match, `radio.c:203 ar_execute`) likewise.
+* **Implemented and compile-checked** `radio_ccm_rx_pkt_set/tx_pkt_set/is_done/mic_is_valid/is_available` (`hal/ccm.h`: key, 39-bit counter, direction, IV):
+  synchronous software AES-CCM with a 4-byte MIC through `psa_aead_*` and `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM,4)`, preserving OpenISA's 13-byte BLE nonce and masked one-byte AAD contract. The nonce/AAD construction was cross-checked against OpenISA's Bluetooth Core sample vector (`f388...6088`). `radio_ar_*` (resolvable-address match) remains TODO.
 
 ### 2.4 The radio HAL (`hal/radio.h` -> `hal/efr32/radio/radio.h`, 78 functions)
 The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA uses the hardware (this is the model to follow):
@@ -85,7 +84,7 @@ Status of every function (all in `modules/owo-radio-efr32/hal/radio.c`, each com
 | RSSI | `radio_rssi_*` | regs | T9 |
 | Power | `radio_tx_power_set/max_set` | regs | T7 |
 | Delays | `radio_*_ready_delay_get`, `radio_*_chain_delay_get` | measured constants | hardware timing capture |
-| Software | `radio_pkt_empty/scratch_get` (done), `radio_filter_*`, `radio_bc_*`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*`, `radio_ar_*` | software | nothing (not written) |
+| Software | `radio_pkt_empty/scratch_get`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*` (implemented and compile-checked); `radio_filter_*`, `radio_bc_*`, `radio_ar_*` remain | software | nothing |
 
 Functions that would start air activity (`radio_rx_enable`, `radio_tx_enable`, `radio_tmr_start*`) `LL_ASSERT` while `CONFIG_OWO_RADIO_EFR32_STUB_REGISTERS=y`.
 
