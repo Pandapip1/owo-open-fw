@@ -80,6 +80,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
 #define EFR32_FRC_IF_OFFSET 0x068U
+#define EFR32_FRC_IEN_OFFSET 0x06CU
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
 #define EFR32_FRC_IF_TXDONE (1U << 0)
@@ -435,6 +436,14 @@ void radio_setup(void)
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+
+	/*
+	 * The LLL connects its radio ISR to FRC_IRQn.  Enable only the two
+	 * completion latches it observes, rather than treating a RAC state change
+	 * or an unrelated FRC condition as an OpenISA radio completion.
+	 */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
 }
 
 /* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */

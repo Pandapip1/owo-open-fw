@@ -11,4 +11,8 @@
 #define LL_SWI_RADIO_IRQn  SW0_IRQn
 #define LL_SWI_JOB_IRQn    SW1_IRQn
 #define LL_RTC0_IRQn       SW2_IRQn      /* pended by the counter alarm callback (hal/cntr.c) */
-#define LL_RADIO_IRQn      RAC_SEQ_IRQn  /* Zephyr Series-2 RAIL installer routes rac_seq here. */
+/*
+ * FRC owns the TXDONE/RXDONE latches used by radio_is_done().  RAC_SEQ is a
+ * separate sequencer route and is not enabled by this port for completion.
+ */
+#define LL_RADIO_IRQn      FRC_IRQn
