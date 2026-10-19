@@ -1,0 +1,9 @@
+[package]
+name = "owo-hal"
+description = "Minimal bus/pin traits shared by the OWO per-part driver crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

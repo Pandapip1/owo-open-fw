@@ -14,7 +14,8 @@ zephyr = "0.1.0"
 zephyr-panic = "0.1.0"
 log = "0.4.22"
 owo-core = { path = "crates/owo-core" }
-owo-stim = { path = "modules/owo-stim/rust", features = ["xg22"] }
+owo-stim = { path = "modules/owo-stim/rust/crates/owo-stim" }
+owo-suit = { path = "modules/owo-stim/rust/crates/owo-suit" }
 
 [build-dependencies]
 zephyr-build = "0.1.0"

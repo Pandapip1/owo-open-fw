@@ -121,6 +121,7 @@
             cargoLock.lockFile = ./crates/owo-core/Cargo.lock;
             doCheck = true;
           };
+          # The whole workspace (supervisor and the per-part crates).
           checks.owo-stim = pkgs.rustPlatform.buildRustPackage {
             pname = "owo-stim";
             version = "0.1.0";

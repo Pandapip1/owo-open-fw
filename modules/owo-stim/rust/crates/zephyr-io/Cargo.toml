@@ -1,0 +1,12 @@
+[package]
+name = "zephyr-io"
+description = "Safe-ish handles over Zephyr's GPIO, SPI, DAC, PWM and ADC APIs, via the C shim in modules/owo-stim/shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+owo-hal = { path = "../owo-hal" }
+
+[lints]
+workspace = true

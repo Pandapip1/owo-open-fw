@@ -1,16 +1,19 @@
-[package]
-name = "owo-stim"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/owo-hal",
+    "crates/owo-stim",
+    "crates/owo-hbridge",
+    "crates/owo-switch",
+    "crates/ltc2634",
+    "crates/zephyr-io",
+    "crates/owo-suit",
+]
+
+[workspace.package]
 edition = "2021"
-description = "Reusable stimulation-output driver + safety supervisor for the OWO suit hardware (EFR32xG22)"
 license = "Apache-2.0 OR MIT"
+version = "0.1.0"
 
-[features]
-default = []
-# Real hardware backend (needs the Zephyr build environment for bindgen).
-xg22 = ["dep:bindgen"]
-
-[dependencies]
-
-[build-dependencies]
-bindgen = { version = "0.72.1", features = ["experimental"], optional = true }
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"

@@ -1,0 +1,176 @@
+From 83ae3bb7366c7fa7411795fcf0f064801db77c48 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 05:53:59 +0000
+Subject: [PATCH] drivers: adc: add optional adc_read_polled() and implement it
+ for silabs IADC
+
+A non-sleeping, lock-free single read with a bounded busy-wait, for time-critical
+code (e.g. current sensing inside an interrupt-locked section) that cannot use
+adc_read() because it waits on a semaphore.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+---
+ drivers/adc/adc_silabs_iadc.c | 64 +++++++++++++++++++++++++++++++++++
+ include/zephyr/drivers/adc.h  | 49 +++++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+)
+
+diff --git a/drivers/adc/adc_silabs_iadc.c b/drivers/adc/adc_silabs_iadc.c
+index a50de8277..c66f94939 100644
+--- a/drivers/adc/adc_silabs_iadc.c
++++ b/drivers/adc/adc_silabs_iadc.c
+@@ -671,6 +671,69 @@ static int iadc_read(const struct device *dev, const struct adc_sequence *sequen
+ 	return error;
+ }
+ 
++/* Busy-wait read: no locks, no sleeping, no IADC interrupt. Needs a previous iadc_read() with
++ * the same channels, resolution and oversampling to have programmed the hardware.
++ */
++static int iadc_read_polled(const struct device *dev, const struct adc_sequence *sequence,
++			    uint32_t timeout_us)
++{
++	const struct iadc_config *config = dev->config;
++	struct iadc_data *data = dev->data;
++	IADC_TypeDef *iadc = config->base;
++	uint8_t *out = sequence->buffer;
++	uint32_t expected = data->active_channels;
++	uint32_t start, limit;
++	sl_hal_iadc_result_t sample;
++	uint32_t flags;
++
++	if (data->dma.dma_dev != NULL) {
++		return -ENOTSUP;
++	}
++	if (sequence->channels == 0U || sequence->channels != data->channels ||
++	    data->active_channels == 0U || data->active_channels > IADC_SCAN_FIFO_DEPTH ||
++	    sequence->options != NULL) {
++		return -EINVAL;
++	}
++	if (sequence->buffer_size < data->active_channels * data->data_size) {
++		return -ENOMEM;
++	}
++	if (atomic_get(&data->sampling) != 0) {
++		return -EBUSY;
++	}
++
++	sl_hal_iadc_clear_interrupts(iadc, IADC_IF_SCANTABLEDONE | IADC_ERROR_FLAGS);
++	sl_hal_iadc_set_scan_mask(iadc, sequence->channels);
++	sl_hal_iadc_start_scan(iadc);
++
++	start = k_cycle_get_32();
++	limit = (uint32_t)(((uint64_t)timeout_us * sys_clock_hw_cycles_per_sec()) / 1000000U);
++
++	for (;;) {
++		flags = sl_hal_iadc_get_pending_interrupts(iadc);
++		if ((flags & IADC_ERROR_FLAGS) != 0U) {
++			sl_hal_iadc_stop_scan(iadc);
++			sl_hal_iadc_clear_interrupts(iadc, flags);
++			return -EIO;
++		}
++		if ((flags & IADC_IF_SCANTABLEDONE) != 0U) {
++			break;
++		}
++		if ((k_cycle_get_32() - start) > limit) {
++			sl_hal_iadc_stop_scan(iadc);
++			return -ETIMEDOUT;
++		}
++	}
++
++	sl_hal_iadc_clear_interrupts(iadc, flags);
++	while (expected-- > 0U && sl_hal_iadc_get_scan_fifo_cnt(iadc) > 0) {
++		sample = sl_hal_iadc_pull_scan_fifo_result(iadc);
++		memcpy(out, &sample.data, data->data_size);
++		out += data->data_size;
++	}
++
++	return 0;
++}
++
+ #ifdef CONFIG_ADC_ASYNC
+ static int iadc_read_async(const struct device *dev, const struct adc_sequence *sequence,
+ 			   struct k_poll_signal *async)
+@@ -832,6 +895,7 @@ static int iadc_init(const struct device *dev)
+ 
+ static DEVICE_API(adc, iadc_api) = {
+ 	.channel_setup = iadc_channel_setup,
++	.read_polled = iadc_read_polled,
+ 	.read = iadc_read,
+ #ifdef CONFIG_ADC_ASYNC
+ 	.read_async = iadc_read_async,
+diff --git a/include/zephyr/drivers/adc.h b/include/zephyr/drivers/adc.h
+index 1727fabf1..3931cbdbe 100644
+--- a/include/zephyr/drivers/adc.h
++++ b/include/zephyr/drivers/adc.h
+@@ -986,6 +986,14 @@ typedef int (*adc_api_channel_setup)(const struct device *dev,
+ typedef int (*adc_api_read)(const struct device *dev,
+ 			    const struct adc_sequence *sequence);
+ 
++/**
++ * @brief Type definition of ADC API function for a polled, non-sleeping read.
++ * See adc_read_polled() for argument descriptions.
++ */
++typedef int (*adc_api_read_polled)(const struct device *dev,
++				   const struct adc_sequence *sequence,
++				   uint32_t timeout_us);
++
+ /**
+  * @brief Type definition of ADC API function for submitting a stream request.
+  */
+@@ -1026,6 +1034,8 @@ __subsystem struct adc_driver_api {
+ 	adc_api_channel_setup channel_setup;
+ 	/** @driver_ops_mandatory @copybrief adc_read */
+ 	adc_api_read          read;
++	/** @driver_ops_optional @copybrief adc_read_polled */
++	adc_api_read_polled   read_polled;
+ #if defined(CONFIG_ADC_ASYNC) || defined(__DOXYGEN__)
+ 	/**
+ 	 * @driver_ops_mandatory @copybrief adc_read_async
+@@ -1137,6 +1147,45 @@ static inline int z_impl_adc_read(const struct device *dev,
+ 	return DEVICE_API_GET(adc, dev)->read(dev, sequence);
+ }
+ 
++/**
++ * @brief Take one sampling by busy-waiting, without sleeping or locking.
++ *
++ * Meant for time-critical code that must read the ADC with a bounded latency, such as inside
++ * an interrupt handler or with interrupts locked. Unlike adc_read() it takes no mutex or
++ * semaphore, does not use the driver's interrupt, and gives up after @p timeout_us.
++ *
++ * The channels in @p sequence must already have been set up with adc_channel_setup(), and the
++ * driver must have been primed with a regular adc_read() of the same channel mask, resolution
++ * and oversampling (this lets the driver program the hardware in thread context). Only a
++ * single sampling of the channels is taken; @c options (interval, extra samplings, callback) must
++ * be NULL and @c calibrate is ignored.
++ *
++ * @note Not a system call: it can only be used from kernel mode.
++ *
++ * @param dev        Pointer to the device structure for the driver instance.
++ * @param sequence   Structure specifying the sampling, as for adc_read().
++ * @param timeout_us Longest time to wait for the conversion, in microseconds.
++ *
++ * @retval 0         On success.
++ * @retval -ENOSYS   The driver does not implement polled reads.
++ * @retval -EINVAL   The sequence does not match what the driver was primed with.
++ * @retval -EBUSY    A regular read is in progress on this ADC.
++ * @retval -ETIMEDOUT The conversion did not finish within @p timeout_us.
++ * @retval -EIO      The ADC reported an error.
++ */
++static inline int adc_read_polled(const struct device *dev,
++				  const struct adc_sequence *sequence,
++				  uint32_t timeout_us)
++{
++	const struct adc_driver_api *api = DEVICE_API_GET(adc, dev);
++
++	if (api->read_polled == NULL) {
++		return -ENOSYS;
++	}
++
++	return api->read_polled(dev, sequence, timeout_us);
++}
++
+ /**
+  * @brief Set a read request from a struct adc_dt_spec.
+  *
+-- 
+2.43.0
+

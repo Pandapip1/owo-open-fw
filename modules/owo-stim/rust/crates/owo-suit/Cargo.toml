@@ -1,0 +1,17 @@
+[package]
+name = "owo-suit"
+description = "The OWO suit's output stage: wires the per-part crates to Zephyr drivers and implements owo_stim::hw::Hw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+owo-hal = { path = "../owo-hal" }
+owo-stim = { path = "../owo-stim" }
+owo-hbridge = { path = "../owo-hbridge" }
+owo-switch = { path = "../owo-switch" }
+ltc2634 = { path = "../ltc2634", features = ["zephyr-driver"] }
+zephyr-io = { path = "../zephyr-io" }
+
+[lints]
+workspace = true

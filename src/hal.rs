@@ -39,15 +39,14 @@ impl DryRun {
 #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
 mod real {
     use super::*;
-    use owo_stim::board::OWO_SUIT;
     use owo_stim::stim::{Config, Outcome, PulseCmd, Skip, Stimulator};
-    use owo_stim::xg22::Xg22;
+    use owo_suit::Suit;
     use zephyr::kconfig as k;
 
-    /// `Stimulator` + the xG22 driver. The driver is created lazily (first `init`) because
+    /// `Stimulator` + the suit's output stage. It is created lazily (first `init`) because
     /// it needs the kernel to be up.
     pub struct Real {
-        hw: Option<Xg22>,
+        hw: Option<Suit>,
         sup: Stimulator,
         poll_every_us: u64,
     }
@@ -76,9 +75,7 @@ mod real {
         pub fn init(&mut self) {
             warn!("REAL stimulation backend enabled: UNVALIDATED on hardware; dummy load only");
             self.sup = Stimulator::new(config());
-            // SAFETY: called once, from the main thread, before anything else uses these
-            // peripherals; no other code in this firmware touches them.
-            match unsafe { Xg22::new(&OWO_SUIT) } {
+            match Suit::new() {
                 Ok(h) => self.hw = Some(h),
                 Err(e) => warn!("output stage init failed ({:?}); staying inert", e),
             }

@@ -1,0 +1,151 @@
+/*
+ * The OWO suit's output stage, expressed as Zephyr devicetree on the stand-in EFR32BG22
+ * explorer kit. Pins, buses and addresses come from reverse engineering firmware 7.9.07
+ * (docs/stock-stim-path.md); nothing here is confirmed on hardware, and the suit's real
+ * board needs its own board definition (clocks, DCDC, flash layout) which this is not.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/silabs-adc.h>
+#include <zephyr/dt-bindings/spi/spi.h>
+#include <zephyr/dt-bindings/pinctrl/silabs/xg22-pinctrl.h>
+
+&pinctrl {
+	suit_sw_spi: suit_sw_spi {
+		group0 {
+			pins = <USART0_TX_PC0>, <USART0_CLK_PC2>;
+			drive-push-pull;
+			output-low;
+		};
+		group1 {
+			pins = <USART0_RX_PC1>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+
+	suit_dac_spi: suit_dac_spi {
+		group0 {
+			pins = <USART1_TX_PA0>, <USART1_CLK_PA8>;
+			drive-push-pull;
+			output-low;
+		};
+		group1 {
+			pins = <USART1_RX_PA4>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+
+	suit_i2c: suit_i2c {
+		group0 {
+			pins = <I2C0_SCL_PA7>, <I2C0_SDA_PB4>;
+			bias-pull-up;
+			drive-open-drain;
+		};
+	};
+
+	suit_boost: suit_boost {
+		group0 {
+			pins = <TIMER1_CC0_PC7>;
+			drive-push-pull;
+			output-low;
+		};
+	};
+
+	suit_sense: suit_sense {
+		group0 {
+			silabs,analog-bus = <ABUS_BODD0_IADC0>;
+		};
+	};
+};
+
+/* Channel switch: USART0 as SPI mode 0, no chip select (the latch is a GPIO below). */
+&usart0 {
+	compatible = "silabs,usart-spi";
+	pinctrl-0 = <&suit_sw_spi>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	suit_switch: switch@0 {
+		compatible = "owo,switch-chain";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+	};
+};
+
+/* Amplitude DAC: USART1 as SPI mode 0, CS = PA5, /CLR on the expander. */
+&usart1 {
+	compatible = "silabs,usart-spi";
+	pinctrl-0 = <&suit_dac_spi>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpioa 5 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	suit_dac: dac@0 {
+		compatible = "lltc,ltc2634";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		#io-channel-cells = <1>;
+		reset-gpios = <&suit_expander 5 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/* PCF8575-class expander (8-bit write address 0x40 => 7-bit 0x20). */
+&i2c0 {
+	pinctrl-0 = <&suit_i2c>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	suit_expander: gpio@20 {
+		compatible = "nxp,pcf857x";
+		reg = <0x20>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+	};
+};
+
+&timer1 {
+	status = "okay";
+
+	suit_boost_pwm: pwm {
+		status = "okay";
+		pinctrl-0 = <&suit_boost>;
+		pinctrl-names = "default";
+	};
+};
+
+&adc0 {
+	pinctrl-0 = <&suit_sense>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	/* The explorer kit already has channel@0 (PB0); point it at the suit's PD3. */
+	channel@0 {
+		zephyr,input-positive = <IADC_INPUT_PD3>;
+	};
+};
+
+/ {
+	suit_output: suit-output {
+		compatible = "owo,suit-output";
+		/* PB0..PB3: high side A, high side B, low side A, low side B */
+		bridge-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>, <&gpiob 1 GPIO_ACTIVE_HIGH>,
+			       <&gpiob 2 GPIO_ACTIVE_HIGH>, <&gpiob 3 GPIO_ACTIVE_HIGH>;
+		latch-gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;
+		/* Expander P2, P3 */
+		supply-gpios = <&suit_expander 2 GPIO_ACTIVE_HIGH>, <&suit_expander 3 GPIO_ACTIVE_HIGH>;
+		switch = <&suit_switch>;
+		dac = <&suit_dac>;
+		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
+		io-channels = <&adc0 0>;
+	};
+};

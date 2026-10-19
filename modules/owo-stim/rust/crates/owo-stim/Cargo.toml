@@ -1,0 +1,9 @@
+[package]
+name = "owo-stim"
+description = "Hardware-independent stimulation safety supervisor for the OWO suit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

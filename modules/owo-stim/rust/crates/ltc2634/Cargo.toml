@@ -1,0 +1,18 @@
+[package]
+name = "ltc2634"
+description = "LTC262x-family 12-bit SPI DAC: protocol core, plus a Zephyr DAC-API driver (feature zephyr-driver)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Export the C symbols used by drivers/dac/dac_ltc2634.c (the Zephyr device glue).
+zephyr-driver = ["dep:zephyr-io"]
+
+[dependencies]
+owo-hal = { path = "../owo-hal" }
+zephyr-io = { path = "../zephyr-io", optional = true }
+
+[lints]
+workspace = true

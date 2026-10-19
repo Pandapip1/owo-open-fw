@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+description: |
+  Collects the devices that make up the OWO suit's electrode output stage so the owo-stim module
+  can find them. Each property points at a normal Zephyr driver node.
+
+compatible: "owo,suit-output"
+
+include: base.yaml
+
+properties:
+  bridge-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Four H-bridge gates in the order high-side A, high-side B, low-side A, low-side B, all
+      GPIO_ACTIVE_HIGH. Off = both low sides on.
+
+  latch-gpios:
+    type: phandle-array
+    required: true
+    description: Channel-switch latch line. Active = high (latched).
+
+  supply-gpios:
+    type: phandle-array
+    required: true
+    description: Two enable lines for the stimulation supply (expander P2 and P3 on the suit).
+
+  switch:
+    type: phandle
+    required: true
+    description: The owo,switch-chain SPI device.
+
+  dac:
+    type: phandle
+    required: true
+    description: The amplitude DAC (lltc,ltc2634 or compatible DAC API device).
+
+  pwms:
+    type: phandle-array
+    required: true
+    description: PWM output that drives the boost converter (4 kHz in the stock firmware).
+
+  io-channels:
+    type: phandle-array
+    required: true
+    description: ADC channel that senses the delivered output.

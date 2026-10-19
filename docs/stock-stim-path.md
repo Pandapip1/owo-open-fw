@@ -73,7 +73,7 @@ width field of the table is ever used, for both phases; the second width (field 
 | 8 | **Supply off whenever the pulse queue is empty.** The stock switches the boost from the Start/Stop handlers and the end-of-run state (0x3AFD6 / 0x3AFEC), not per queue-empty. **[F]** weakly: the callers were read, the full state graph was not. | `Stimulator::release` / `safe_off` |
 | 9 | **Supply, routing and DAC are cleared after every pulse**, not only at the end of a run. | `Stimulator::fire` |
 | 10 | **Bounded interrupt-off window.** The pulse runs with interrupts off for at most 2 x max phase + max gap; the stock relies on ISR priorities. | `Hw::critical`, `fire` |
-| 11 | **Sense timeout.** A stuck ADC conversion cannot hold the bridge on: waits are bounded by wall time (100 us). | `xg22.rs::sense` |
+| 11 | **Sense timeout.** A stuck ADC conversion cannot hold the bridge on: waits are bounded by wall time (100 us). | `owo-suit::sense` (`adc_read_polled`) |
 | 12 | **Output only after explicit opt-in at build time**, behind a Kconfig symbol that states the code has not run on hardware. | `CONFIG_OWO_STIM_UNVALIDATED_HARDWARE` |
 
 ## Unknowns that block calling the output validated
@@ -82,4 +82,4 @@ width field of the table is ever used, for both phases; the second width (field 
 - Whether the stock sense calibration (RAM 0x20003D58, piecewise trim) is needed; this backend uses the uncalibrated formula.
 - The real phase length (the 2 x scale above), the boost duty/frequency for each level (the stock firmware uses 50 % always),
   and the electrical limits of the output stage (isolation, maximum voltage/current).
-- Pin states between reset and `Xg22::new` (the gate drivers may float), whether the stage is current-limited in hardware.
+- Pin states between reset and `Suit::new` (the gate drivers may float), whether the stage is current-limited in hardware.

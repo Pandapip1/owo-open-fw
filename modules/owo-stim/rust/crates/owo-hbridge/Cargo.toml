@@ -1,0 +1,12 @@
+[package]
+name = "owo-hbridge"
+description = "Break-before-make H-bridge driver for the OWO suit output stage (4 GPIO gates)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+owo-hal = { path = "../owo-hal" }
+
+[lints]
+workspace = true

@@ -2,3 +2,5 @@ name: owo_stim
 build:
   cmake: .
   kconfig: Kconfig
+  settings:
+    dts_root: .

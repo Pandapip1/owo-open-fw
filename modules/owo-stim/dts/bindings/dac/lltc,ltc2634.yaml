@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+description: |
+  LTC262x-family 12-bit SPI DAC (24-bit frame: 4-bit command, 4-bit address, 12-bit data).
+  Channels 0..3 are the individual outputs; channel 15 writes all outputs at once.
+  The protocol is implemented in Rust (modules/owo-stim/rust/crates/ltc2634).
+
+compatible: "lltc,ltc2634"
+
+include: [dac-controller.yaml, spi-device.yaml]
+
+properties:
+  "#io-channel-cells":
+    const: 1
+
+  reset-gpios:
+    type: phandle-array
+    description: |
+      /CLR pin. Declare it GPIO_ACTIVE_LOW; the driver asserts it once during init to zero the
+      outputs.
+
+io-channel-cells:
+  - output
