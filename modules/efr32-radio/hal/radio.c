@@ -92,6 +92,12 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
 
+#define EFR32_AGC_FRAMERSSI_OFFSET 0x01CU
+#define EFR32_AGC_RSSI_CODE_SHIFT 6U
+#define EFR32_AGC_RSSI_CODE_MASK 0x3FFU
+#define EFR32_AGC_RSSI_INVALID (-512)
+#define EFR32_AGC_RSSI_OFFSET_QUARTER_DB 200
+
 #define EFR32_RAC_BASE 0xB8020000UL
 #define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
@@ -759,11 +765,33 @@ void radio_rssi_measure(void)
 	EFR32_RADIO_TODO("AGC RSSI registers");
 }
 
-/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; value conversion is unvalidated (T9) */
+/*
+ * RAIL reads FRAMERSSI rather than the live RSSI register for a received
+ * packet. The encoded 10-bit value is signed quarter-dB with RAIL's
+ * source-backed -200 quarter-dB offset. OpenISA stores RSSI as a positive
+ * magnitude, so negate the resulting signed dB value at the API boundary.
+ */
 uint32_t radio_rssi_get(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	int32_t code = (*radio_reg32(EFR32_AGC_BASE + EFR32_AGC_FRAMERSSI_OFFSET) >>
+			EFR32_AGC_RSSI_CODE_SHIFT) & EFR32_AGC_RSSI_CODE_MASK;
+	int32_t rssi_quarter_db;
+	int32_t rssi_db;
+
+	if (code & 0x200) {
+		code -= 0x400;
+	}
+	if (code == EFR32_AGC_RSSI_INVALID) {
+		return 127U;
+	}
+
+	rssi_quarter_db = code - EFR32_AGC_RSSI_OFFSET_QUARTER_DB;
+	if (rssi_quarter_db < -511) {
+		rssi_quarter_db = -511;
+	}
+	rssi_db = rssi_quarter_db / 4;
+
+	return rssi_db < 0 ? (uint32_t)-rssi_db : 0U;
 }
 
 /* [regs-partial] AGC RSSI/FRAMERSSI fields are public; latch/reset semantics are unknown (T9) */
