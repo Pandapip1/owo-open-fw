@@ -1,0 +1,58 @@
+From d8fd2fc5d4998a638148aaea6874d7647fd90f69 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 05:02:34 +0000
+Subject: [PATCH] Allow Rust on targets whose timer reads its frequency at run
+ time
+
+Ticks per second is still CONFIG_SYS_CLOCK_TICKS_PER_SEC; only the hardware
+cycle frequency becomes a run-time value, which this crate never uses.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+---
+ Kconfig            |  3 +--
+ zephyr/src/time.rs | 14 ++++++++------
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/Kconfig b/Kconfig
+index 2d3eddc..41209d9 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -10,8 +10,7 @@ config RUST_SUPPORTED
+ 	default y if ((CPU_CORTEX_M || \
+ 				(RISCV && !RISCV_ISA_RV32E && !RISCV_ISA_RV128I) || \
+ 				(ARCH_POSIX && 64BIT) || \
+-				HEXAGON) && \
+-				!TIMER_READS_ITS_FREQUENCY_AT_RUNTIME)
++				HEXAGON))
+ 	help
+ 	  Selected for platforms that have support for Rust.
+ 
+diff --git a/zephyr/src/time.rs b/zephyr/src/time.rs
+index a67f3b0..f79f490 100644
+--- a/zephyr/src/time.rs
++++ b/zephyr/src/time.rs
+@@ -28,12 +28,14 @@ use zephyr_sys::{k_ticks_t, k_timeout_t, k_uptime_ticks};
+ 
+ use core::fmt::Debug;
+ 
+-// The system ticks, is mostly a constant, but there are some boards that use a dynamic tick
+-// frequency, and thus need to read this at runtime.
+-#[cfg(CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME)]
+-compile_error!("Rust does not (yet) support dynamic frequency timer");
+-
+-// Given the above not defined, the system time base comes from a kconfig.
++// Kernel *ticks* per second is always the compile-time constant CONFIG_SYS_CLOCK_TICKS_PER_SEC.
++// CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME only makes the *hardware cycle* frequency
++// (sys_clock_hw_cycles_per_sec()) a run-time value; the driver then derives its cycles-per-tick
++// from it. Nothing here converts cycles, so that option does not affect these types.
++// Code that does convert cycles (k_cycle_get_*) must not use CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC,
++// which is 0 in that configuration.
++
++// The system time base comes from a kconfig.
+ /// The system time base.  The system clock has this many ticks per second.
+ pub const SYS_FREQUENCY: u32 = crate::kconfig::CONFIG_SYS_CLOCK_TICKS_PER_SEC as u32;
+ 
+-- 
+2.43.0
+

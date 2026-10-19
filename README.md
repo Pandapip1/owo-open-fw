@@ -18,6 +18,7 @@ board is identified and measured on a dummy load.
 | `src/hal.rs` | Output abstraction + dry-run backend |
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
+| `patches/`, `scripts/apply-patches.sh` | Local patch to zephyr-lang-rust (see above) and its applier |
 | `west.yml` | Pins Zephyr + `zephyr-lang-rust` and imports only the modules needed |
 | `flake.nix` | flake-parts dev shell (+ a `checks.owo-core` host-test check) |
 
@@ -26,6 +27,7 @@ board is identified and measured on a dummy load.
 nix develop                              # Rust (thumbv8m.main targets), west, Arm GCC 13, cmake, ninja, dtc, libclang
 git init -q && git add -A                # flakes only see tracked files; skip if this is already in a repo
 west init -l . && west update            # workspace goes in the parent directory
+./scripts/apply-patches.sh               # required: lets zephyr-lang-rust coexist with the Silabs sleeptimer
 west blobs fetch hal_silabs              # Silicon Labs' radio libraries
 OWO_SERIAL=<your serial> west build -b xg24_dk2601b .
 cargo test --manifest-path crates/owo-core/Cargo.toml     # or: nix flake check
@@ -34,17 +36,29 @@ cargo test --manifest-path crates/owo-core/Cargo.toml     # or: nix flake check
 `xg24_dk2601b` is a stand-in dev kit: the suit's exact part is unknown (Series 2
 per the firmware analysis).
 
-## IMPORTANT: this build gives up deep sleep
-`zephyr-lang-rust` refuses system clocks whose frequency is read at run time
-(`RUST_SUPPORTED` needs `!TIMER_READS_ITS_FREQUENCY_AT_RUNTIME`; the crate also has a
-`compile_error!` for it), and Zephyr's Silicon Labs sleeptimer driver selects exactly
-that. So `prj.conf` switches the system timer to the Cortex-M SysTick
-(`SILABS_SLEEPTIMER_TIMER=n`, `CORTEX_M_SYSTICK=y`). Silicon Labs' power manager needs
-the sleeptimer (the link fails with undefined `sl_sleeptimer_*` otherwise), so
-`CONFIG_PM=n` and the core idles in WFI only. **This works against the idle-power goal**
-that motivated the project; the firmware stays tickless (no periodic wake-ups) but EM2/EM3
-sleep is not used. Not measured. The alternative that keeps the sleeptimer is Rust logic
-behind a thin C BLE shim (the `owo-core` crate is reusable for that).
+## Rust together with the Silicon Labs sleeptimer (needs a patch)
+Stock `zephyr-lang-rust` refuses systems whose timer reads its frequency at run time:
+`RUST_SUPPORTED` requires `!TIMER_READS_ITS_FREQUENCY_AT_RUNTIME` and `zephyr/src/time.rs` has a
+`compile_error!` for it, added as a precaution ("until this support can be added"). Zephyr's Silicon
+Labs sleeptimer driver selects that option, and Silicon Labs' power manager (EM2/EM3 sleep) needs the
+sleeptimer (without it the link fails on `sl_sleeptimer_*`).
+
+What the option actually changes: only the *hardware cycle* frequency becomes a run-time value
+(`silabs_sleeptimer_timer.c` reads `sl_sleeptimer_get_timer_frequency()` and derives
+`cyc_per_tick = hz / CONFIG_SYS_CLOCK_TICKS_PER_SEC`). Kernel *ticks* per second stay the compile-time
+`CONFIG_SYS_CLOCK_TICKS_PER_SEC` (32768 here), which is all the Rust `time` module uses
+(`SYS_FREQUENCY`, `Duration`, `Instant`, `Timeout`); nothing in the crate converts cycles. The one hazard
+is code that does: `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` defaults to 0 under this option (this SoC's
+defconfig overrides it to 32768, but don't rely on it), so use `sys_clock_hw_cycles_per_sec()` there.
+The `bench` and `embassy` samples in zephyr-lang-rust use the Kconfig value.
+
+`patches/0001-*.patch` removes both guards. `scripts/apply-patches.sh` applies it to the west-managed
+checkout (idempotent; re-run after every `west update`). It is a local patch, not upstream. With it,
+`prj.conf` keeps the sleeptimer and `CONFIG_PM=y`. Without it, Kconfig reports
+`RUST ... was assigned the value 'y' but got the value 'n'`.
+
+Not shown by any of this: that the core actually reaches EM2/EM3 while connected and idle. That needs
+hardware and the Silicon Labs blobs; the energy-mode requirements the BLE stack holds are unknown.
 
 ## Why a bindgen step
 `zephyr-sys` binds only `<zephyr/bluetooth/bluetooth.h>`; `bt_conn_*` and `bt_gatt_*` are
@@ -59,9 +73,12 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
   widths/pairing, plus scheduler behaviour: 100 wake-ups for a 500 ms, 100 Hz, 2-channel frame
   where a 1 kHz tick would need 500). Also via `nix flake check`.
 - Compile and link only: Zephyr `a915b2f` (4.5.0-rc2), board `xg24_dk2601b`, Rust 1.99.1, clippy
-  clean under Zephyr's `-D warnings` and mandatory `// SAFETY:` comments, ~126 KB flash / ~26 KB RAM.
+  clean under Zephyr's `-D warnings` and mandatory `// SAFETY:` comments, ~126 KB flash / ~26 KB RAM with the earlier SysTick configuration.
   Done twice: with Ubuntu's gcc-arm-none-eabi 13.2.1, and from a fresh `west init -l` + `west
   update` workspace using this `west.yml`, inside `nix develop` (Arm GNU 13.3.Rel1).
+- With the patch: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
+  `TICKLESS_KERNEL=y` compiles and links (~134 KB flash / ~27 KB RAM), from a fresh `west init -l` +
+  `west update` workspace plus `scripts/apply-patches.sh`; without it, Rust is disabled by Kconfig.
 - The 128-bit UUIDs are present in the linked ELF in little-endian byte order.
 
 ## Not validated
