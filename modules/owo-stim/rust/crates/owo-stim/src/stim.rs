@@ -333,13 +333,13 @@ impl Stimulator {
     }
 
     /// The newest conversion, or the fault that its absence/staleness is.
-    fn fresh<H: Hw>(&self, hw: &mut H) -> Result<crate::hw::Sample, Fault> {
+    fn fresh<H: Hw>(&self, hw: &mut H) -> Result<(crate::hw::Sample, u64), Fault> {
         let s = hw.sense_latest().ok_or(Fault::SenseTimeout)?;
         let age = hw.now_us().saturating_sub(s.at_us);
         if age > self.cfg.sense_max_age_us as u64 {
             return Err(Fault::StaleSense { age_us: age });
         }
-        Ok(s)
+        Ok((s, age))
     }
 
     /// One phase: close the bridge (only with fresh feedback), watch the output until the width
@@ -357,19 +357,22 @@ impl Stimulator {
             let _ = hw.bridge(Bridge::Off);
             return Err(Fault::Hw(e));
         }
-        let t0 = hw.now_us();
-        let settled = t0 + self.cfg.settle_us.min(width) as u64;
-        let end = t0 + width as u64;
+        // Widths come from the fine clock; sample ages from the (possibly coarser) timestamp clock.
+        // Each is only ever used as a difference of its own readings.
+        let f0 = hw.fine_mark();
+        let settle = self.cfg.settle_us.min(width) as u64;
         let mut measured = None;
         loop {
             hw.delay_us(self.cfg.poll_step_us);
-            let now = hw.now_us();
-            if now >= end {
+            let elapsed = hw.fine_since_us(f0);
+            if elapsed >= width {
                 break;
             }
             match self.fresh(hw) {
-                Ok(s) => {
-                    if s.at_us >= settled {
+                Ok((s, age)) => {
+                    // The conversion happened `age` ago: it is in the settled part of the phase
+                    // if the phase had been running for at least `settle` by then.
+                    if age + settle <= elapsed as u64 {
                         measured = Some(s.value);
                         if s.value > limit {
                             let _ = hw.bridge(Bridge::Off);
@@ -386,7 +389,7 @@ impl Stimulator {
         if let Err(e) = hw.bridge(Bridge::Off) {
             return Err(Fault::Hw(e));
         }
-        let elapsed = hw.now_us().saturating_sub(t0);
+        let elapsed = hw.fine_since_us(f0) as u64;
         if elapsed > width as u64 + self.cfg.overrun_slack_us as u64 {
             return Err(Fault::PhaseOverrun { elapsed_us: elapsed });
         }

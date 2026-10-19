@@ -40,6 +40,11 @@ pub trait Hw {
     fn supply(&mut self, on: bool) -> Result<(), HwError>;
     /// Monotonic microsecond clock.
     fn now_us(&mut self) -> u64;
+    /// Opaque reading of a fine-grained free-running counter (resolution of 1 us or better), taken
+    /// to time short intervals (pulse phase widths). Only valid for [`Hw::fine_since_us`].
+    fn fine_mark(&mut self) -> u32;
+    /// Microseconds elapsed since `mark`, correct across one wrap-around of the counter.
+    fn fine_since_us(&mut self, mark: u32) -> u32;
     /// Non-blocking: the newest conversion the sampler has completed since the supply came on,
     /// or `None` if there has been none yet. The sampler runs in interrupt context and stamps
     /// each result with the clock, so the caller can judge how old it is.

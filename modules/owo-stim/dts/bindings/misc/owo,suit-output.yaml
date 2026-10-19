@@ -46,6 +46,14 @@ properties:
       One 32-bit word per electrode channel (channel 0 first): the switch pins that are on for that
       channel. The first byte shifted into the chain is bits 31..24.
 
+  phase-timer:
+    type: phandle
+    required: true
+    description: |
+      A free-running 32-bit up-counting Counter device with at most 1 us per tick, used to time
+      pulse phase widths. It runs only while the stimulation supply is on, so it may stop in deep
+      sleep. (The timestamps of the feedback samples come from Zephyr's timing API instead.)
+
   pwms:
     type: phandle-array
     required: true

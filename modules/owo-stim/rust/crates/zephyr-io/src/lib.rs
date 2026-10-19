@@ -24,6 +24,10 @@ extern "C" {
     fn owo_sense_stop();
     fn owo_sense_latest(raw: *mut u16, stamp: *mut u64) -> c_int;
     fn owo_adc_raw_to_mv(a: *const c_void, raw: u16) -> i32;
+    fn owo_counter_start(d: *const c_void) -> c_int;
+    fn owo_counter_stop(d: *const c_void);
+    fn owo_counter_mark(d: *const c_void) -> u32;
+    fn owo_counter_since_us(d: *const c_void, mark: u32) -> u32;
     fn owo_timing_start();
     fn owo_timing_stamp() -> u64;
     fn owo_timing_to_us(cycles: u64) -> u64;
@@ -53,6 +57,7 @@ pub enum SuitHandle {
     Dac = 5,
     BoostPwm = 6,
     SenseAdc = 7,
+    PhaseTimer = 8,
 }
 
 /// Board parameters from the `owo,suit-output` node (kinds understood by `owo_suit_param`).
@@ -183,6 +188,35 @@ impl Pwm {
     pub fn set_percent(&mut self, percent: u8) -> Result<(), Errno> {
         // SAFETY: valid handle by construction.
         check(unsafe { owo_pwm_set_percent(self.0, percent) })
+    }
+}
+
+/// A free-running 32-bit Counter device (<= 1 us per tick) for timing short intervals.
+pub struct FineCounter(*const c_void);
+// SAFETY: static device pointer.
+unsafe impl Send for FineCounter {}
+impl FineCounter {
+    /// # Safety
+    /// `p` must be a ready `struct device *` of a Counter.
+    pub unsafe fn from_raw(p: *const c_void) -> Self {
+        Self(p)
+    }
+    /// Start counting (fails with `-ENOTSUP` if the counter is not 32-bit / fine enough).
+    pub fn start(&mut self) -> Result<(), Errno> {
+        // SAFETY: valid handle by construction.
+        check(unsafe { owo_counter_start(self.0) })
+    }
+    pub fn stop(&mut self) {
+        // SAFETY: valid handle by construction.
+        unsafe { owo_counter_stop(self.0) }
+    }
+    pub fn mark(&self) -> u32 {
+        // SAFETY: valid handle by construction.
+        unsafe { owo_counter_mark(self.0) }
+    }
+    pub fn since_us(&self, mark: u32) -> u32 {
+        // SAFETY: valid handle by construction.
+        unsafe { owo_counter_since_us(self.0, mark) }
     }
 }
 

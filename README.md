@@ -59,6 +59,7 @@ drivers can be checked independently, and a new board (or a different MCU family
 | Supply enables | `owo-suit` | Zephyr **regulator** (`regulator-fixed`), behind the `nxp,pcf857x` expander |
 | Boost converter | `owo-suit` | Zephyr **PWM** |
 | Feedback | `owo-suit` + `shim/owo_shim.c` | Zephyr **ADC async sequence** that repeats from its completion callback; newest sample in a depth-1 `k_msgq`; `adc_raw_to_millivolts_dt` for the conversion |
+| Phase widths | `owo-suit` + shim | Zephyr **Counter API** (`phase-timer`, 32-bit, <= 1 us ticks) |
 | Timestamps | shim | Zephyr **timing API**; on parts without a usable cycle counter the Counter-backed backend patch (`zephyr,timing-counter`) |
 | Glue | `owo-suit`, `zephyr-io` | `owo-suit` implements `Hw`; every number it uses (DAC scale, level ceiling, sense scale, switch routes, boost duty) is read from the `owo,suit-output` node; `zephyr-io` is the Rust view of the shim's 1:1 wrappers (most Zephyr calls are static inline) |
 
@@ -79,8 +80,9 @@ The only board verified to build is `bg22_ek4108a`; no second MCU family has bee
 
 Idle power: the ADC sampler and the timing counter run only while the supply is on. The timing backend never
 blocks sleep: it needs a counter that keeps counting in the sleep states in use, and arms an alarm half a
-counter period ahead so a flush always happens in time. The stand-in overlay currently names TIMER0, which
-stops in EM2, so that choice is not final (open question, see the commit notes).
+counter period ahead so a flush always happens in time. The stand-in overlay uses BURTC (32768 Hz, counts in every sleep state)
+for timestamps, and TIMER0 (1 us) as a separate `phase-timer` for pulse widths, started and stopped with the supply.
+Sample ages therefore have 30 us resolution; phase widths do not.
 
 
 - Interlocks (see `docs/stock-stim-path.md` for which the stock firmware has and which are new): hard

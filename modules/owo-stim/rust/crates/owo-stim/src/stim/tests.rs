@@ -111,6 +111,12 @@ impl Hw for Mock {
     fn now_us(&mut self) -> u64 {
         self.clock
     }
+    fn fine_mark(&mut self) -> u32 {
+        self.clock as u32
+    }
+    fn fine_since_us(&mut self, mark: u32) -> u32 {
+        (self.clock as u32).wrapping_sub(mark)
+    }
     fn sense_latest(&mut self) -> Option<Sample> {
         let from = self.sampler_from?;
         if self.no_samples {

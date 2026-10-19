@@ -10,6 +10,7 @@
 //! | supply enables | here | regulator (`regulator-fixed`) |
 //! | boost converter | here | PWM |
 //! | feedback | here (scaling) | ADC async sequence; timestamps from the timing API |
+//! | phase widths | here | Counter API (a 32-bit counter with <= 1 us ticks, running only while the supply is on) |
 
 #![no_std]
 
@@ -19,11 +20,12 @@ use owo_stim::hw::{Bridge, Hw, HwError, Sample};
 use owo_switch::Switch;
 use zephyr_io::{
     now_us, suit_handle, suit_param, suit_supply_handle, suit_switch_routes, Dac, Gpio, Port, Pwm,
-    Regulator, Sampler, SuitHandle, SuitParam,
+    FineCounter, Regulator, Sampler, SuitHandle, SuitParam,
 };
 
 /// The DAC driver's entry points are called only from C (`drivers/dac/dac_ltc2634.c`); this keeps
 /// the linker from dropping the Rust driver object because nothing in Rust refers to it.
+#[cfg(not(test))]
 #[used]
 static LTC2634_DRIVER: (
     extern "C" fn(u8, u8, bool) -> i32,
@@ -96,6 +98,7 @@ pub struct Suit {
     dac: Dac,
     boost: Pwm,
     sense: Sampler,
+    fine: FineCounter,
     supplies: [Option<Regulator>; MAX_SUPPLIES],
     scale: Scale,
     boost_duty: u8,
@@ -148,12 +151,19 @@ impl Suit {
         let dp = suit_handle(SuitHandle::Dac);
         let pp = suit_handle(SuitHandle::BoostPwm);
         let ap = suit_handle(SuitHandle::SenseAdc);
-        if sw.is_null() || dp.is_null() || pp.is_null() || ap.is_null() {
+        let fp = suit_handle(SuitHandle::PhaseTimer);
+        if sw.is_null() || dp.is_null() || pp.is_null() || ap.is_null() || fp.is_null() {
             return Err(InitError::NoDevice);
         }
         // SAFETY: non-null handles from the shim have the types named by their SuitHandle kind.
-        let (port, mut dac, mut boost, sense) = unsafe {
-            (Port::from_raw(sw), Dac::from_raw(dp), Pwm::from_raw(pp), Sampler::from_raw(ap))
+        let (port, mut dac, mut boost, sense, fine) = unsafe {
+            (
+                Port::from_raw(sw),
+                Dac::from_raw(dp),
+                Pwm::from_raw(pp),
+                Sampler::from_raw(ap),
+                FineCounter::from_raw(fp),
+            )
         };
         let scale = Scale::from_dt();
         ok(boost.set_percent(0))?;
@@ -165,6 +175,7 @@ impl Suit {
             dac,
             boost,
             sense,
+            fine,
             supplies,
             scale,
             boost_duty: suit_param(SuitParam::BoostDutyPercent) as u8,
@@ -214,6 +225,14 @@ impl Hw for Suit {
         now_us()
     }
 
+    fn fine_mark(&mut self) -> u32 {
+        self.fine.mark()
+    }
+
+    fn fine_since_us(&mut self, mark: u32) -> u32 {
+        self.fine.since_us(mark)
+    }
+
     fn sense_latest(&mut self) -> Option<Sample> {
         let (_raw, mv, at_us) = self.sense.latest()?;
         Some(Sample { value: self.scale.level_from_mv(mv), at_us })
@@ -227,6 +246,7 @@ impl Hw for Suit {
             let r = self
                 .supplies_set(true)
                 .and_then(|_| self.boost.set_percent(self.boost_duty))
+                .and_then(|_| self.fine.start())
                 .and_then(|_| self.sense.start(SENSE_INTERVAL_US));
             if r.is_ok() {
                 self.supply_on = true;
@@ -236,6 +256,7 @@ impl Hw for Suit {
         }
         // Always runs fully when asked to turn off (also after a failed turn-on).
         self.sense.stop();
+        self.fine.stop();
         // Boost first so the rail collapses, then the enables.
         let r1 = self.boost.set_percent(0);
         let r2 = self.supplies_set(false);

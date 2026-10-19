@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/dac.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -74,6 +75,40 @@ int owo_pwm_set_percent(const void *p, uint8_t percent)
 void owo_busy_wait_us(uint32_t us)
 {
 	k_busy_wait(us);
+}
+
+/* ---- fine counter for phase widths (Zephyr Counter API) ---- */
+
+int owo_counter_start(const void *d)
+{
+	const struct device *dev = d;
+
+	if (counter_get_max_top_value(dev) != UINT32_MAX || counter_get_frequency(dev) < 1000000U) {
+		return -ENOTSUP; /* needs 32 bits and at most 1 us per tick */
+	}
+	return counter_start(dev);
+}
+
+void owo_counter_stop(const void *d)
+{
+	(void)counter_stop((const struct device *)d);
+}
+
+uint32_t owo_counter_mark(const void *d)
+{
+	uint32_t t = 0;
+
+	(void)counter_get_value((const struct device *)d, &t);
+	return t;
+}
+
+uint32_t owo_counter_since_us(const void *d, uint32_t mark)
+{
+	const struct device *dev = d;
+	uint32_t now = 0;
+
+	(void)counter_get_value(dev, &now);
+	return (uint32_t)((uint64_t)(uint32_t)(now - mark) * 1000000ULL / counter_get_frequency(dev));
 }
 
 /* ---- timing (Zephyr timing API; the backend is the board's choice) ---- */
@@ -200,6 +235,7 @@ static const uint32_t switch_routes[] = {
 static const struct device *const switch_dev = DEVICE_DT_GET(DT_PHANDLE(SUIT, switch));
 static const struct device *const dac_dev =
 	DEVICE_DT_GET(DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude));
+static const struct device *const phase_timer = DEVICE_DT_GET(DT_PHANDLE(SUIT, phase_timer));
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
@@ -238,6 +274,7 @@ const void *owo_suit_handle(int kind)
 	case 5: h = dac_dev; dev = dac_dev; break;
 	case 6: h = &boost; dev = boost.dev; break;
 	case 7: h = &sense; dev = sense.dev; break;
+	case 8: h = phase_timer; dev = phase_timer; break;
 	default:
 		/* 16 + i: supply regulator i */
 		if (kind >= 16 && (size_t)(kind - 16) < ARRAY_SIZE(supplies)) {
