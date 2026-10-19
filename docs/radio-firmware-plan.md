@@ -1,0 +1,90 @@
+# Open radio firmware: inventory, plan, status
+
+**Unvalidated on hardware. Nothing in this document or in `crates/owo-ble-ll` has run on a real radio or been seen on air. Any output stage built on it must be bench-tested on a dummy load first.**
+
+Goal (user-confirmed): replace the Silicon Labs radio blobs on the EFR32BG22 with open code: an open BLE link layer, and eventually the radio sequencer firmware. This file records what was found, what is possible without undocumented hardware knowledge, and the order to do it in. Facts are tagged **[F]** (observed in a file or trace, source given), **[I]** (inferred), **[?]** (unknown).
+
+## 1. What runs where
+
+```
+Zephyr host (open: GAP/SMP/GATT/L2CAP)
+   | HCI (drivers/bluetooth/hci/hci_silabs_efr32.c)            [F] zephyr drivers/bluetooth/hci/hci_silabs_efr32.c
+Silabs link layer  liblinklayer.a  (M33, closed)               [F] blobs/.../bgstack/ll/build/gcc/xg22/release/liblinklayer.a
+   | RAIL API (public headers: rail.h, sl_rail.h, rail_ble.h)    [F] platform/radio/rail_lib/common/*.h
+RAIL  librail_*_efr32xg22_*.a  (M33, closed)                   [F] blobs/.../rail_lib/autogen/librail_release/
+   | memory-mapped radio blocks, 0xA8000000.. (undocumented)
+Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, see §2
+```
+
+* **[F]** `liblinklayer.a` (xg22) is 169 objects, about 265 kB. It contains the whole LL (`ll_*`, `sli_ll_*`, HCI parsers, `ll_crypto`, DRBG). Its undefined `sl_rail_*` symbols show that it reaches the radio only through RAIL: `sl_rail_start_tx/rx`, `sl_rail_set_rx_transitions`, `sl_rail_set_tx_transitions`, `sl_rail_set_state_timing`, `sl_rail_start_scheduled_tx/rx`, `sl_rail_set_tx_fifo`, `sl_rail_write_tx_fifo`, `sl_rail_peek_rx_packet`, `sl_rail_config_address_filter`, `sl_rail_ble_config_phy_1_mbps`, multi-timers, `sl_rail_get_time`, … (full list: `nm -u` of the archive).
+* **[F]** RAIL for xg22 (`librail_efr32xg22_gcc_release.a`) is about 75 kB of code in `rail_*`, `rfhal_*` and `generic_phy*` objects; `rfhal_{bufc,protimer,synth,rac,mailbox,radio,rfsense,pa,...}.o` are the M33-side register drivers. The sequencer image is a separate object, `generic_efr32xg22_release_seq.o` (14.5 kB, data only).
+* **[F]** Radio configuration for BLE is *public source* (Zlib licence): `platform/radio/rail_lib/plugin/sl_rail_util_built_in_phys/efr32xg22/sl_rail_ble_config.c` (1 Mbit/s "viterbi", 2 Mbit/s, coded PHY). Format: `[count<<16 | 16-bit offset from 0xA8000000][count values]` runs (e.g. `0x0001400C, 0x00018101`), with the SET/CLR alias selected by the top nibble of the header (**[I]** from the series-2 alias convention, which the QEMU server also uses). This is the only complete register/value list for the PHY that is not extracted from a binary.
+* **[F]** Zephyr's EFR32 HCI driver is the only seam to the controller: `sl_btctrl_init()`, `sl_btctrl_process_events()`, `sl_btctrl_hci_transmit_complete()`, `sl_btctrl_raise_events()` (`hci_silabs_efr32.c`). An open controller replaces that file and the two Silabs libraries behind it.
+
+## 2. The sequencer
+
+* **[F]** In a QEMU boot of the stock 7.9.07 image (`flash-stock.bin`) the application writes 16 kB to SEQRAM at 0xA0000000 (non-secure alias 0xB0000000) and a smaller block (about 1 kB used) to FRCRAM at 0xA0004000. A memory dump after boot shows blocks 0..3 (0xA0000000–0xA0003FFF) full and 4 sparsely used. (Method: QMP `pmemsave` on the running model; the dump is kept out of the repository.)
+* **[F]** SEQRAM starts with a Cortex-M style vector table: word 0 = 0x00003E90 (initial stack pointer inside SEQRAM), word 1 = 0x0000329D (reset vector, Thumb bit set), words 2–6 and 11–15 share one default handler, and the vectors from index 16 on point to distinct handlers. Reset code begins at 0x329C. So the sequencer is a small 32-bit microcontroller running Thumb code from the same 16 kB RAM it uses for stack and data.
+* **[F]** Instruction mix over 0x100..0x3300: 303 `bl`, `ldr`/`str`/`movs`/`lsls` dominate, `mrs`, `cpsid`, `cpsie`, `wfi` present; zero `cbz`, `it`, `ldrex`, `movw/movt`, `ubfx`, `udiv`. The code assembles and disassembles cleanly with the ARMv6-M instruction set (`arm-none-eabi-objdump -M force-thumb`). **[I]** It is ARMv6-M compatible code (a Cortex-M0+ class core). The core's identity is **[?]**: no public document available offline states it.
+* **[F]** The image in the stock application is not byte-identical to the one in the SDK's `generic_efr32xg22_release_seq.o` (a 32-byte prefix search of all its large data sections finds nothing in the stock firmware). The two are different RAIL versions; the M33↔sequencer contract changes between versions. The open sequencer therefore has to be built against *one* M33-side driver, not against "the" Silabs interface.
+* **[F]** Peripheral blocks referenced by literals in the sequencer image (counting aligned 32-bit constants in 0xA8000000–0xAAFFFFFF): 0xA8020000 (and its alias pages 0xA8021000/0xA8022000) by far the most, then 0xA8004000, 0xA8014000, 0xA801C000, 0xA8016000, 0xA8006000, 0xA8018000, 0xAA000000. The sequencer therefore programs the same radio blocks as the M33 does, and shares them with it. Names of blocks other than BUFC (0xA8004000 in `rfhal_bufc.o`) and the observed interrupt names (AGC, BUFC, FRC_PRI, FRC, MODEM, PROTIMER, RAC_RSM, RAC_SEQ, RDMAILBOX, RFSENSE, PRORTC, SYNTH in the device header's IRQ list) are **[?]** until the QEMU radio model fixes them from traces.
+* **[?]** The M33↔sequencer protocol (RDMAILBOX, `rfhal_mailbox*.o`, `seq_globals.o`), the sequencer's interrupt sources, and the RAC state machine are undocumented in everything available offline.
+
+## 3. What has to be replaced
+
+| Layer | Today | Needed for the goal | Hardware knowledge needed |
+|---|---|---|---|
+| Host | Zephyr, open | nothing | none |
+| HCI driver | `hci_silabs_efr32.c` over `sl_btctrl` | new driver over our controller | none |
+| Link layer | `liblinklayer.a` | `crates/owo-ble-ll` (started, §5) plus crypto, DLE/PHY procedures if wanted | none (timing budget aside) |
+| Radio driver (M33) | RAIL | `Radio` trait implementation | RAC/FRC/BUFC/MODEM/SYNTH/AGC/PROTIMER registers |
+| PHY configuration | `sl_rail_ble_config.c` tables (public) + RAIL calibration | same tables, applied by our driver; calibration routines | meaning of each register, calibration sequence |
+| Sequencer firmware | closed image in SEQRAM | open v6-M firmware | RAC state machine, mailbox, every register it touches |
+| DEVINFO calibration | read by RAIL at boot | same | DEVINFO fields (names in `efr32bg22_devinfo.h`, semantics for radio not documented) |
+
+## 4. Minimum viable open radio
+
+BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one connection in the peripheral role, GATT writes in, notifications out, channel selection #1 and #2, supervision timeout, encryption (the suit's firmware enforces MITM pairing: `CONFIG_BT_SMP_ENFORCE_MITM`, so LE encryption is **required** for the real device; it is not in the crate yet). No 2M/coded PHY, no extended advertising, no CTE, one connection.
+
+## 5. Staged plan
+
+| Stage | Work | Test that can run now / next |
+|---|---|---|
+| 0 **done** | `crates/owo-ble-ll`: CRC-24, whitening, CSA #1/#2, advertising/connect PDUs, data header, SN/NESN, LL control subset, window widening/transmit window timing, instants, supervision, HCI framing/event builders, `Peripheral<R: Radio>` driver | `cargo test` in the crate: 30 tests (§6) |
+| 1 | `hci_owo_ll.c` replacing `hci_silabs_efr32.c`; HCI command layer for the commands Zephyr's host sends at init (list below); ACL ↔ `queue_data` flow control | native_sim: Zephyr host + our controller + a software central (the mock radio of `tests/peripheral.rs`, scripted by a second instance of the crate in central role or by pre-recorded PDUs) |
+| 2 | Encryption: LL_ENC_REQ/RSP, START_ENC, AES-CCM per Vol 6 Part B §5.1.3 | sample data from Core Spec Vol 6 Part C (encryption sample data) |
+| 3 | Radio driver v0 *on top of RAIL* (public API) implementing `Radio`; keeps the closed sequencer and RAIL, removes only `liblinklayer.a` | QEMU radio model (sibling task, `docs/radio-block.md`): compare the register traffic of our driver with the stock link layer's for "start advertising" |
+| 4 | Capture ground truth: register dumps/traces from a real EFR32BG22 dev kit over SWD (the user's hardware) for TX/RX/IFS sequences | needs hardware, no substitute |
+| 5 | Radio driver v1 that programs the blocks directly from `sl_rail_ble_config.c` tables, without RAIL | QEMU model + hardware |
+| 6 | Open sequencer firmware (Rust/C, `thumbv6m-none-eabi`) | QEMU would need a second CPU model for it; practically hardware only |
+
+HCI commands the host needs at init (from `subsys/bluetooth/host/hci_core.c`): Reset, Read Local Features, Read Local Version Info, Read Supported Commands, Set Event Mask, Read Buffer Size / LE Read Buffer Size, LE Read Local Features, LE Read Supported States, LE Set Event Mask, LE Write LE Host Support, LE Read Max Data Length / Write Default Data Length (if enabled), LE Set Default PHY (if enabled), LE Read Filter Accept List size, LE Rand, LE LTK Request (Neg) Reply, LE Set Advertising Parameters/Data/Scan Response/Enable, Disconnect, Read Remote Version Info, LE Read Remote Features, Host Number Of Completed Packets / Set Controller To Host Flow Control (if enabled). Opcode values for the first group are in `hci.rs` and checked against `hci_types.h` by tests.
+
+### Alternative that removes most of stages 0–2
+Zephyr ships an open, Apache-2.0 link layer (`subsys/bluetooth/controller/ll_sw`, split controller `ull`/`lll`) with encryption, data length, PHY update, channel selection and a full HCI. It needs a port of its radio HAL (`hal/radio.h`-style `radio_*` calls, a ticker timebase, CCM and RNG) for the EFR32 radio, which is exactly the same missing hardware knowledge as stages 3–5. Using it would trade this Rust crate for C code that is already feature-complete. The crate's value is then limited to being a small, testable reference and a possible Rust-only firmware. Recommendation: decide after stage 3 shows how much of the radio can be driven; both options share the `Radio`-level work.
+
+## 6. What the crate covers and how it was checked
+
+Verified against external sources (all offline):
+* **Channel selection #2**: Core v5.2 Vol 6 Part C §3.1/§3.2 sample data (channel identifier 0x305F, `prn_e` 56857 at event 0, channels 25/20/6/21 and 23/9/34), as quoted in `zephyr/subsys/bluetooth/controller/ll_sw/lll_chan.c` (`lll_chan_sel_2_ut`). The implementation here was written from the spec text and the tests passed first time.
+* Opcode numbers, error codes, HCI opcodes/event codes: compared with `zephyr/subsys/bluetooth/controller/ll_sw/pdu.h` and `zephyr/include/zephyr/bluetooth/hci_types.h`.
+* Timing constants: SCA table, `EVENT_JITTER_US` 16, T_IFS 150 µs, `WIN_DELAY_LEGACY` 1250 µs, window-widening cap `interval/2 - T_IFS` (zephyr `lll_clock.c`, `lll_vendor.h`, `pdu.h`, `ull_peripheral.c`).
+
+Self-consistency only (no external vector available offline):
+* **CRC-24** bit-serial LFSR vs the reflected fast form (equal on random data), appended-CRC detects every single-bit error, empty-message value.
+* **Whitening**: involution, 127-bit period (x^7+x^4+1 is primitive), channels differ.
+* Peripheral driver against a mock radio and a scripted central: scan response after IFS, 3-channel advertising event with random delay, first-event transmit window, SN/NESN acknowledgement/retransmission/duplicate suppression, bad-CRC silence with growing widening, LL_TERMINATE_IND, feature/unknown responses, supervision timeout.
+
+### What is not verified
+1. CRC-24 and whitening bit/byte order against a real on-air capture or a published packet; the transmission order of the CRC register (position 23 first) is from memory of the spec figure.
+2. Transmit-window handling for LL_CONNECTION_UPDATE_IND (no extra 1.25 ms delay, window offset measured from the old grid): implemented from the spec description, no vector.
+3. Local sleep-clock accuracy (`Config::local_ppm`): board property of the suit, unknown. The stock firmware's value was not extracted.
+4. The 150 µs `tx_after_rx` deadline and `EVENT_JITTER_US` margin are assumptions of the trait; whether an M33 interrupt handler can meet them without hardware auto-turnaround is unknown (RAIL's `set_rx_transitions` suggests the radio does the turnaround itself, which the trait mirrors).
+5. Peer behaviour with real centrals (phones): untested.
+6. LL_TERMINATE_IND sent by us is not waited for with an acknowledgement; peripheral latency is not used (we listen every event, which is legal); no encryption.
+
+## 7. Blockers
+
+* The radio register map and the RAC/mailbox semantics. They are not in the SDK headers (only BUFC for xG21 is public), not in the libraries as names (symbols are present, register names are not), and not in anything available offline. Without hardware traces, stages 3 (partly), 5 and 6 cannot be validated; QEMU can only replay what is learned.
+* Hardware access for stage 4 (SWD read-out of radio registers during advertising and a connection).
+* Licence hygiene: no Silabs bytes or disassembly are stored in this repository; the PHY tables above are Zlib-licensed SDK source and may be used with the notice retained.
