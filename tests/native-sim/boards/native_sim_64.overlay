@@ -1,0 +1,95 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/*
+ * The output stage on emulated parts. Same owo,suit-output node shape as boards/<board>_hw.overlay
+ * of a real board; only the controllers behind it differ. gpio0 pins: 0-3 bridge gates, 4-5 supply
+ * enables, 6-7 SPI chip selects.
+ */
+/ {
+	test_adc: adc {
+		compatible = "zephyr,adc-emul";
+		nchannels = <1>;
+		ref-vdd-mv = <3300>;
+		#io-channel-cells = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		channel@0 {
+			reg = <0>;
+			zephyr,gain = "ADC_GAIN_1";
+			zephyr,reference = "ADC_REF_VDD_1";
+			zephyr,vref-mv = <3300>;
+			zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+			zephyr,resolution = <12>;
+		};
+	};
+
+	test_pwm: pwm {
+		compatible = "owo,test-pwm";
+		#pwm-cells = <3>;
+	};
+
+	supply_a: supply-a {
+		compatible = "regulator-fixed";
+		regulator-name = "supply-a";
+		enable-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+	};
+
+	supply_b: supply-b {
+		compatible = "regulator-fixed";
+		regulator-name = "supply-b";
+		enable-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+	};
+
+	test_spi: spi@10000 {
+		compatible = "zephyr,spi-emul-controller";
+		reg = <0x10000 0x100>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		cs-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>, <&gpio0 7 GPIO_ACTIVE_LOW>;
+		status = "okay";
+
+		test_switch: switch@0 {
+			compatible = "ti,sn74hc595";
+			reg = <0>;
+			spi-max-frequency = <1000000>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <32>;
+			verify-readback;
+		};
+
+		test_dac: dac@1 {
+			compatible = "lltc,ltc2634";
+			reg = <1>;
+			spi-max-frequency = <8000000>;
+			#io-channel-cells = <1>;
+		};
+	};
+
+	suit_output: suit-output {
+		compatible = "owo,suit-output";
+		bridge-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>, <&gpio0 1 GPIO_ACTIVE_HIGH>,
+			       <&gpio0 2 GPIO_ACTIVE_HIGH>, <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		supplies = <&supply_a>, <&supply_b>;
+		switch = <&test_switch>;
+		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
+				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
+		phase-timer = <&counter0>;
+		pwms = <&test_pwm 0 250000 0>;
+		boost-duty-percent = <50>;
+		io-channels = <&test_dac 15>, <&test_adc 0>;
+		io-channel-names = "amplitude", "sense";
+		amplitude-resolution = <12>;
+		amplitude-scale = <0x12FED 0x9C4>;
+		max-level = <126>;
+		sense-uv-per-level = <19150>;
+		sense-offset = <3>;
+	};
+};
+
+&counter0 {
+	status = "okay";
+};

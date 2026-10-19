@@ -38,6 +38,7 @@ west blobs fetch hal_silabs              # Silicon Labs' radio libraries
 OWO_SERIAL=<your serial> west build -b bg22_ek4108a .      # dry run (no output)
 # bench only:  ... -- -DOWO_HW=ON   (adds boards/<board>_hw.overlay + owo-suit-hw.conf)
 cargo test --manifest-path crates/owo-core/Cargo.toml      # protocol + scheduler
+./scripts/test-native-sim.sh                               # output stage on native_sim, no hardware (see tests/native-sim)
 cargo test --manifest-path modules/owo-stim/rust/Cargo.toml --workspace   # supervisor + part crates; or: nix flake check
 ```
 `flake.lock` is not included (see "Not validated"); `nix` creates it on first use.
@@ -150,6 +151,7 @@ at start-up rather than in a `const`. `static inline` functions are not bound (t
 compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notify_uuid`.
 
 ## What was validated
+- **`tests/native-sim`** runs the real shim, the real Zephyr drivers (`ti,sn74hc595` with read-back, the Rust `ltc2634`, `regulator-fixed`, the async ADC sequence, the Counter API) and the supervisor on `native_sim`, with emulated GPIO/SPI/ADC/counter and a small circuit model (`src/test_hw.c`). It checks: safe state after init, a biphasic pulse (positive then negative, measured level, no shoot-through, everything back off), the dead-man, over-delivery tripping, a hung ADC never closing the bridge, and a switch read-back mismatch never closing the bridge and clearing the switch. It found a real bug in the `sn74hc595` read-back patch (the cached outputs stayed at the old value after a failed read-back, so the clear request was skipped), now fixed. The circuit model is mine, not the suit's: it proves the wiring and logic, not the electrical behaviour.
 - Host tests: `owo-stim` 19, `owo-hbridge` 3, `owo-switch` 4, `ltc2634` 3, all pass; clippy `-D warnings` clean. `owo-stim` tests: (supervisor against a mock output stage: bridge ordering, clamps, overdrive trip at the early and the mid-pulse sample, switch-verify failure, lockout, coverage window and dead-man, soft start, duty budget, open-circuit hint). Not run on hardware.
 - Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the Zephyr patches applied. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
 - Channel switch table and the pin/DAC/ADC details in `docs/stock-stim-path.md` were obtained by reading the stock code and, for the table, by emulating its start-up with `unicorn`.

@@ -1,0 +1,25 @@
+[package]
+name = "rustapp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+zephyr = "0.1.0"
+zephyr-panic = "0.1.0"
+log = "0.4.22"
+owo-stim = { path = "../../modules/owo-stim/rust/crates/owo-stim" }
+owo-suit = { path = "../../modules/owo-stim/rust/crates/owo-suit" }
+
+[build-dependencies]
+zephyr-build = "0.1.0"
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
