@@ -1,0 +1,77 @@
+From 1559e4b06bb472f274dfae728fbfc228ef514f42 Mon Sep 17 00:00:00 2001
+From: Gavin John <gavinnjohn@gmail.com>
+Date: Mon, 19 Oct 2026 14:01:39 -0400
+Subject: [PATCH] efr32bg22: model public FRC whitening registers
+
+Record only the public configuration masks; FRC/SEQ packet whitening remains unmodelled.
+
+Assisted-By: Codex (GPT-5)
+---
+ tools/efr32bg22/models.py            | 22 ++++++++++++++++++++++
+ tools/efr32bg22/test_radio_models.py | 11 +++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/tools/efr32bg22/models.py b/tools/efr32bg22/models.py
+index e5b02b7..2236b4a 100644
+--- a/tools/efr32bg22/models.py
++++ b/tools/efr32bg22/models.py
+@@ -465,6 +465,27 @@ def write(self, off, val):
+             super().write(off, val)
+ 
+ 
++class FRC(Dev):
++    """Public xG22 FRC whitening configuration registers.
++
++    The packet pipeline, including applying the whitening LFSR, belongs to
++    FRC/SEQ behavior and is deliberately not modelled here.  Retaining these
++    public register masks makes the source-backed BLE setup observable.
++    """
++    WHITECTRL, WHITEPOLY, WHITEINIT = 0x030, 0x034, 0x038
++    MASKS = {
++        WHITECTRL: 0x00001F7F,
++        WHITEPOLY: 0x0000FFFF,
++        WHITEINIT: 0x0000FFFF,
++    }
++
++    def write(self, off, val):
++        if off in self.MASKS:
++            self.regs[off] = val & self.MASKS[off]
++        else:
++            super().write(off, val)
++
++
+ class PCF8575:
+     """16-bit quasi-bidirectional I/O expander.  Two data bytes per transfer, P0-P7 first."""
+     def __init__(self, addr7=0x20):
+@@ -1285,6 +1306,7 @@ def build(m, reset=False, cause=1):
+     m.rac = m.add(RAC("RAC"), 0xA8020000)
+     m.synth = m.add(Synth("SYNTH"), 0xA8018000)
+     m.rfcrc = m.add(RFCRC("RFCRC"), 0xA8010000)
++    m.frc = m.add(FRC("FRC"), 0xA8004000)
+     m.bufc = m.add(BUFC("BUFC"), 0xAA000000)
+     trng = m.add(TRNG("TRNG", ""), 0x4C021000, 0x1000)
+     m.add(TRNGFifo("TRNGFIFO", trng), 0x4C024000, 0x1000)
+diff --git a/tools/efr32bg22/test_radio_models.py b/tools/efr32bg22/test_radio_models.py
+index 192d0e7..f3b2d13 100644
+--- a/tools/efr32bg22/test_radio_models.py
++++ b/tools/efr32bg22/test_radio_models.py
+@@ -133,5 +133,16 @@ def test_public_configuration_masks_and_command_side_effects(self):
+         self.assertEqual(dev.read(dev.STATUS), 0)
+ 
+ 
++class FrcTests(unittest.TestCase):
++    def test_public_whitening_configuration_masks(self):
++        _, dev = attach(models.FRC("FRC"))
++        dev.write(dev.WHITECTRL, 0xFFFFFFFF)
++        dev.write(dev.WHITEPOLY, 0x1234ABCD)
++        dev.write(dev.WHITEINIT, 0xABCD1234)
++        self.assertEqual(dev.read(dev.WHITECTRL), 0x00001F7F)
++        self.assertEqual(dev.read(dev.WHITEPOLY), 0x0000ABCD)
++        self.assertEqual(dev.read(dev.WHITEINIT), 0x00001234)
++
++
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.55.0
+

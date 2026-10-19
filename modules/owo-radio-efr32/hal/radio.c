@@ -68,6 +68,12 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_RFCRC_POLY_OFFSET 0x020U
 #define EFR32_RFCRC_BLE_CTRL 0x00000708U
 
+#define EFR32_FRC_BASE 0xA8004000UL
+#define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
+#define EFR32_FRC_WHITEINIT_OFFSET 0x038U
+#define EFR32_FRC_BLE_WHITEPOLY 0x0044U
+#define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
+
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
 	return (volatile uint32_t *)address;
@@ -187,11 +193,14 @@ void radio_freq_chan_set(uint32_t chan)
 		channel_number & EFR32_SYNTH_CHCTRL_CHNO_MASK;
 }
 
-/* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
+/* [regs-public] RAIL's BLE helper writes FRC.WHITEPOLY=0x44 and WHITEINIT=iv|0x40 (T5). */
 void radio_whiten_iv_set(uint32_t iv)
 {
-	ARG_UNUSED(iv);
-	OWO_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
+	/* LLL supplies a Bluetooth physical channel number, 0 through 39. */
+	LL_ASSERT(iv <= 39U);
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WHITEPOLY_OFFSET) = EFR32_FRC_BLE_WHITEPOLY;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WHITEINIT_OFFSET) =
+		EFR32_FRC_BLE_WHITEINIT_MSB | iv;
 }
 
 /* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
