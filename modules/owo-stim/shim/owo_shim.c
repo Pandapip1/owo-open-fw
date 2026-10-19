@@ -1,7 +1,8 @@
 /*
- * C side of the Rust crates: plain functions over Zephyr APIs that are static inline or
- * syscall wrappers (and so invisible to bindgen), plus the devicetree lookups for the
- * "owo,suit-output" node. Handles are opaque pointers to static specs/devices.
+ * One-to-one wrappers around Zephyr APIs that are static inline or syscalls (invisible to
+ * bindgen), the devicetree lookups for the "owo,suit-output" node, and the timestamped feedback
+ * stream. No decisions are made here: every policy lives in the Rust crates, every hardware
+ * driver is a stock Zephyr driver.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -12,7 +13,9 @@
 #include <zephyr/drivers/dac.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/timing/timing.h>
 
 int owo_gpio_configure(const void *g, int active)
 {
@@ -23,6 +26,17 @@ int owo_gpio_configure(const void *g, int active)
 int owo_gpio_set(const void *g, int active)
 {
 	return gpio_pin_set_dt((const struct gpio_dt_spec *)g, active);
+}
+
+int owo_gpio_port_set_masked(const void *port, uint32_t mask, uint32_t value)
+{
+	return gpio_port_set_masked_raw((const struct device *)port, mask, value);
+}
+
+int owo_regulator_set(const void *reg, int on)
+{
+	return on ? regulator_enable((const struct device *)reg)
+		  : regulator_disable((const struct device *)reg);
 }
 
 int owo_spi_transceive(const void *s, const uint8_t *tx, uint8_t *rx, size_t len)
@@ -57,57 +71,112 @@ int owo_pwm_set_percent(const void *p, uint8_t percent)
 	return pwm_set_dt(spec, spec->period, (uint32_t)((uint64_t)spec->period * percent / 100U));
 }
 
-/* Channel 0 of the sense ADC is the only one used; 12 bit, no oversampling beyond the driver's 2x. */
-static uint16_t adc_buf;
-
-static struct adc_sequence adc_seq(const struct adc_dt_spec *a)
-{
-	return (struct adc_sequence){
-		.channels = BIT(a->channel_id),
-		.buffer = &adc_buf,
-		.buffer_size = sizeof(adc_buf),
-		.resolution = a->resolution,
-	};
-}
-
-int owo_adc_prime(const void *p)
-{
-	const struct adc_dt_spec *a = p;
-	struct adc_sequence seq = adc_seq(a);
-	int r = adc_channel_setup_dt(a);
-
-	if (r < 0) {
-		return r;
-	}
-	return adc_read_dt(a, &seq);
-}
-
-int owo_adc_read_polled(const void *p, uint32_t timeout_us, uint16_t *out)
-{
-	const struct adc_dt_spec *a = p;
-	struct adc_sequence seq = adc_seq(a);
-	int r = adc_read_polled(a->dev, &seq, timeout_us);
-
-	if (r == 0) {
-		*out = adc_buf;
-	}
-	return r;
-}
-
 void owo_busy_wait_us(uint32_t us)
 {
 	k_busy_wait(us);
 }
 
-uint32_t owo_irq_lock(void)
+/* ---- timing (Zephyr timing API; the backend is the board's choice) ---- */
+
+void owo_timing_start(void)
 {
-	return (uint32_t)irq_lock();
+	timing_init();
+	timing_start();
 }
 
-void owo_irq_unlock(uint32_t key)
+uint64_t owo_timing_stamp(void)
 {
-	irq_unlock((unsigned int)key);
+	return timing_counter_get();
 }
+
+uint64_t owo_timing_to_us(uint64_t cycles)
+{
+	return timing_cycles_to_ns(cycles) / 1000U;
+}
+
+/* ---- feedback stream: Zephyr ADC async sequence that repeats from its own callback ---- */
+
+struct sample {
+	uint64_t stamp;
+	uint16_t raw;
+};
+
+/* Depth 1, "latest wins": the ISR drops the old entry and stores the new; readers peek. */
+K_MSGQ_DEFINE(sample_q, sizeof(struct sample), 1, 8);
+static uint16_t sample_buf;
+static atomic_t sample_stop;
+static struct adc_sequence_options sample_opts;
+static struct adc_sequence sample_seq;
+
+static enum adc_action sample_cb(const struct device *dev, const struct adc_sequence *seq,
+				 uint16_t index)
+{
+	struct sample s;
+	struct sample old;
+
+	ARG_UNUSED(dev);
+	ARG_UNUSED(index);
+	if (atomic_get(&sample_stop)) {
+		timing_stop(); /* last conversion: release the timing source (PM lock, power) */
+		return ADC_ACTION_FINISH;
+	}
+	s.stamp = timing_counter_get();
+	s.raw = *(const uint16_t *)seq->buffer;
+	(void)k_msgq_get(&sample_q, &old, K_NO_WAIT);
+	(void)k_msgq_put(&sample_q, &s, K_NO_WAIT);
+	return ADC_ACTION_REPEAT;
+}
+
+int owo_sense_start(const void *p, uint32_t interval_us)
+{
+	const struct adc_dt_spec *a = p;
+	int r = adc_channel_setup_dt(a);
+
+	if (r < 0) {
+		return r;
+	}
+	k_msgq_purge(&sample_q);
+	atomic_set(&sample_stop, 0);
+	sample_opts = (struct adc_sequence_options){.interval_us = interval_us, .callback = sample_cb};
+	sample_seq = (struct adc_sequence){
+		.options = &sample_opts,
+		.channels = BIT(a->channel_id),
+		.buffer = &sample_buf,
+		.buffer_size = sizeof(sample_buf),
+		.resolution = a->resolution,
+	};
+	/* Blocks briefly if a previous run is still finishing. No signal: nobody waits for it. */
+	return adc_read_async(a->dev, &sample_seq, NULL);
+}
+
+void owo_sense_stop(void)
+{
+	atomic_set(&sample_stop, 1); /* the next conversion returns ADC_ACTION_FINISH */
+}
+
+/* 0 and *raw/*stamp set, or -ENODATA if nothing completed since owo_sense_start(). */
+int owo_sense_latest(uint16_t *raw, uint64_t *stamp)
+{
+	struct sample s;
+
+	if (k_msgq_peek(&sample_q, &s) != 0) {
+		return -ENODATA;
+	}
+	*raw = s.raw;
+	*stamp = s.stamp;
+	return 0;
+}
+
+/* Zephyr's own conversion: the channel's resolution, gain and reference. */
+int32_t owo_adc_raw_to_mv(const void *p, uint16_t raw)
+{
+	const struct adc_dt_spec *a = p;
+	int32_t v = raw;
+
+	return adc_raw_to_millivolts_dt(a, &v) < 0 ? -1 : v;
+}
+
+/* ---- devicetree: the "owo,suit-output" node ---- */
 
 #define SUIT DT_COMPAT_GET_ANY_STATUS_OKAY(owo_suit_output)
 
@@ -117,16 +186,45 @@ static const struct gpio_dt_spec bridge[4] = {
 	GPIO_DT_SPEC_GET_BY_IDX(SUIT, bridge_gpios, 0), GPIO_DT_SPEC_GET_BY_IDX(SUIT, bridge_gpios, 1),
 	GPIO_DT_SPEC_GET_BY_IDX(SUIT, bridge_gpios, 2), GPIO_DT_SPEC_GET_BY_IDX(SUIT, bridge_gpios, 3),
 };
-static const struct gpio_dt_spec latch = GPIO_DT_SPEC_GET(SUIT, latch_gpios);
-static const struct gpio_dt_spec supply[2] = {
-	GPIO_DT_SPEC_GET_BY_IDX(SUIT, supply_gpios, 0),
-	GPIO_DT_SPEC_GET_BY_IDX(SUIT, supply_gpios, 1),
+
+#define SUPPLY_DEV(i, _) DEVICE_DT_GET(DT_PHANDLE_BY_IDX(SUIT, supplies, i))
+static const struct device *const supplies[] = {
+	LISTIFY(DT_PROP_LEN(SUIT, supplies), SUPPLY_DEV, (,), _)
 };
-static const struct spi_dt_spec switch_spi =
-	SPI_DT_SPEC_GET(DT_PHANDLE(SUIT, switch), SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
-static const struct device *const dac_dev = DEVICE_DT_GET(DT_PHANDLE(SUIT, dac));
+
+#define ROUTE(i, _) DT_PROP_BY_IDX(SUIT, switch_routes, i)
+static const uint32_t switch_routes[] = {
+	LISTIFY(DT_PROP_LEN(SUIT, switch_routes), ROUTE, (,), _)
+};
+
+static const struct device *const switch_dev = DEVICE_DT_GET(DT_PHANDLE(SUIT, switch));
+static const struct device *const dac_dev =
+	DEVICE_DT_GET(DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude));
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
-static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_IDX(SUIT, 0);
+static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
+
+/* Board parameters. Kinds: see zephyr-io. */
+uint32_t owo_suit_param(int kind)
+{
+	switch (kind) {
+	case 0: return DT_PHA_BY_NAME(SUIT, io_channels, amplitude, output);
+	case 1: return DT_PROP(SUIT, amplitude_resolution);
+	case 2: return DT_PROP_BY_IDX(SUIT, amplitude_scale, 0);
+	case 3: return DT_PROP_BY_IDX(SUIT, amplitude_scale, 1);
+	case 4: return DT_PROP(SUIT, max_level);
+	case 5: return DT_PROP(SUIT, sense_uv_per_level);
+	case 6: return DT_PROP(SUIT, sense_offset);
+	case 7: return DT_PROP(SUIT, boost_duty_percent);
+	case 8: return ARRAY_SIZE(supplies);
+	case 9: return ARRAY_SIZE(switch_routes);
+	default: return 0;
+	}
+}
+
+const uint32_t *owo_suit_switch_routes(void)
+{
+	return switch_routes;
+}
 
 const void *owo_suit_handle(int kind)
 {
@@ -136,14 +234,16 @@ const void *owo_suit_handle(int kind)
 	switch (kind) {
 	case 0: case 1: case 2: case 3:
 		h = &bridge[kind]; dev = bridge[kind].port; break;
-	case 4: h = &latch; dev = latch.port; break;
-	case 5: case 6:
-		h = &supply[kind - 5]; dev = supply[kind - 5].port; break;
-	case 7: h = &switch_spi; dev = switch_spi.bus; break;
-	case 8: h = dac_dev; dev = dac_dev; break;
-	case 9: h = &boost; dev = boost.dev; break;
-	case 10: h = &sense; dev = sense.dev; break;
-	default: return NULL;
+	case 4: h = switch_dev; dev = switch_dev; break;
+	case 5: h = dac_dev; dev = dac_dev; break;
+	case 6: h = &boost; dev = boost.dev; break;
+	case 7: h = &sense; dev = sense.dev; break;
+	default:
+		/* 16 + i: supply regulator i */
+		if (kind >= 16 && (size_t)(kind - 16) < ARRAY_SIZE(supplies)) {
+			h = supplies[kind - 16]; dev = supplies[kind - 16]; break;
+		}
+		return NULL;
 	}
 	return (dev != NULL && device_is_ready(dev)) ? h : NULL;
 }
@@ -153,6 +253,17 @@ const void *owo_suit_handle(int kind)
 const void *owo_suit_handle(int kind)
 {
 	ARG_UNUSED(kind);
+	return NULL;
+}
+
+uint32_t owo_suit_param(int kind)
+{
+	ARG_UNUSED(kind);
+	return 0;
+}
+
+const uint32_t *owo_suit_switch_routes(void)
+{
 	return NULL;
 }
 

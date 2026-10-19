@@ -2,10 +2,12 @@ menuconfig OWO_STIM
 	bool "OWO stimulation output stage"
 	depends on RUST
 	select ADC
+	select ADC_ASYNC
 	select DAC
 	select PWM
 	select SPI
 	select GPIO
+	select REGULATOR
 	help
 	  Per-part drivers and the safety supervisor for the OWO suit's output stage. Needs an
 	  "owo,suit-output" devicetree node for the hardware backend (see dts/bindings/misc).
@@ -59,6 +61,17 @@ config OWO_STIM_WIDTH_SCALE_PERCENT
 	int "Pulse width scale vs. the stock table (stock tick suggests 200)"
 	default 100
 	range 25 200
+
+config OWO_STIM_SENSE_INTERVAL_US
+	int "Feedback ADC sampling interval while the supply is on"
+	default 100
+	help
+	  Zephyr's ADC interval is driven by a kernel timer, so the real period is rounded to the
+	  system tick resolution.
+
+config OWO_STIM_SENSE_MAX_AGE_US
+	int "Longest age of the newest ADC conversion while the bridge is closed"
+	default 500
 
 config OWO_STIM_FAULT_LOCKOUT
 	int "Faults before the whole output locks out until restart"

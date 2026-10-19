@@ -1,69 +1,50 @@
-//! The electrode channel switch: a chain of four shift-register bytes with a latch input, as used
-//! by the stock firmware (`fw @0x444c8`, table at RAM 0x20000E6C recovered by emulation).
-//!
-//! Protocol: drop the latch line, shift four bytes, raise the latch. Then, *with the latch left
-//! high*, clock four zero bytes and compare what comes back with what was written. Pulsing the
-//! latch again after shifting zeros in would latch zeros and disconnect the channel.
+//! The electrode channel switch: one switch pin per route, driven through a GPIO port. The pin
+//! assignment per channel comes from the board (devicetree `switch-routes`), so this crate is only
+//! the channel -> pin-mask mapping and the "clear on failure" rule. Latching, shifting and
+//! read-back verification belong to the GPIO driver underneath (in Zephyr: `ti,sn74hc595` with
+//! `verify-readback`); a verification failure surfaces as `EIO` from `set_masked`.
 
 #![cfg_attr(not(test), no_std)]
 
-use owo_hal::{Errno, OutputPin, SpiDevice};
+use owo_hal::{Errno, GpioPort};
 
-/// Route bytes for electrode channel 0..=10, as the stock firmware stores them.
-pub const TABLE: [[u8; 4]; 11] = [
-    [0x01, 0x00, 0x01, 0x00],
-    [0x00, 0x10, 0x00, 0x10],
-    [0x00, 0x40, 0x00, 0x40],
-    [0x00, 0x01, 0x00, 0x01],
-    [0x00, 0x04, 0x00, 0x04],
-    [0x00, 0x80, 0x00, 0x80],
-    [0x00, 0x02, 0x00, 0x02],
-    [0x00, 0x08, 0x00, 0x08],
-    [0x00, 0x20, 0x00, 0x20],
-    [0x02, 0x00, 0x02, 0x00],
-    [0x04, 0x00, 0x04, 0x00],
-];
+const EIO: Errno = -5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     BadChannel,
-    Spi(Errno),
-    Latch(Errno),
-    /// The read-back differed from what was written; the switch was cleared.
+    /// The port write failed.
+    Port(Errno),
+    /// The port reported that the outputs did not read back as written; the switch was cleared.
     Verify,
 }
 
-pub struct Switch<S: SpiDevice, L: OutputPin> {
-    spi: S,
-    latch: L,
+pub struct Switch<'a, P: GpioPort> {
+    port: P,
+    routes: &'a [u32],
+    all: u32,
 }
 
-impl<S: SpiDevice, L: OutputPin> Switch<S, L> {
-    pub fn new(spi: S, latch: L) -> Self {
-        Self { spi, latch }
+impl<'a, P: GpioPort> Switch<'a, P> {
+    /// `routes[ch]` is the set of port pins that are on for channel `ch`.
+    pub fn new(port: P, routes: &'a [u32]) -> Self {
+        let all = routes.iter().fold(0, |a, r| a | r);
+        Self { port, routes, all }
     }
 
-    fn load(&mut self, frame: [u8; 4]) -> Result<(), Error> {
-        self.latch.set(false).map_err(Error::Latch)?;
-        self.spi.write(&frame).map_err(Error::Spi)?;
-        self.latch.set(true).map_err(Error::Latch)
-    }
-
-    /// Connect `channel` (or nothing) and verify by read-back.
+    /// Connect `channel` (or nothing). On any failure the switch is cleared (best effort).
     pub fn select(&mut self, channel: Option<u8>) -> Result<(), Error> {
-        let Some(c) = channel else {
-            return self.load([0; 4]);
+        let want = match channel {
+            None => 0,
+            Some(c) => *self.routes.get(c as usize).ok_or(Error::BadChannel)?,
         };
-        let want = *TABLE.get(c as usize).ok_or(Error::BadChannel)?;
-        self.load(want)?;
-        let mut back = [0u8; 4];
-        // Latch stays high here.
-        let r = self.spi.transfer(&[0; 4], &mut back).map_err(Error::Spi);
-        if r.is_ok() && back == want {
-            return Ok(());
+        match self.port.set_masked(self.all, want) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.port.set_masked(self.all, 0);
+                Err(if e == EIO { Error::Verify } else { Error::Port(e) })
+            }
         }
-        let _ = self.load([0; 4]);
-        r.and(Err(Error::Verify))
     }
 }
 
@@ -75,65 +56,48 @@ mod tests {
     use std::rc::Rc;
     use std::vec::Vec;
 
-    #[derive(Debug, PartialEq, Clone)]
-    enum Ev {
-        Latch(bool),
-        Write([u8; 4]),
-        Xfer,
-    }
-    type Log = Rc<RefCell<Vec<Ev>>>;
-    struct L(Log);
-    impl OutputPin for L {
-        fn set(&mut self, a: bool) -> Result<(), Errno> {
-            self.0.borrow_mut().push(Ev::Latch(a));
-            Ok(())
+    type Log = Rc<RefCell<Vec<(u32, u32)>>>;
+    struct P(Log, Option<Errno>);
+    impl GpioPort for P {
+        fn set_masked(&mut self, m: u32, v: u32) -> Result<(), Errno> {
+            self.0.borrow_mut().push((m, v));
+            match self.1 {
+                Some(e) if v != 0 => Err(e),
+                _ => Ok(()),
+            }
         }
     }
-    struct S(Log, [u8; 4]);
-    impl SpiDevice for S {
-        fn transfer(&mut self, _: &[u8], rx: &mut [u8]) -> Result<(), Errno> {
-            self.0.borrow_mut().push(Ev::Xfer);
-            rx.copy_from_slice(&self.1);
-            Ok(())
-        }
-        fn write(&mut self, tx: &[u8]) -> Result<(), Errno> {
-            self.0.borrow_mut().push(Ev::Write(tx.try_into().unwrap()));
-            Ok(())
-        }
+    const R: [u32; 3] = [0x0100_0100, 0x0010_0010, 0x0040_0040];
+
+    #[test]
+    fn select_writes_route_under_full_mask() {
+        let log: Log = Default::default();
+        let mut sw = Switch::new(P(log.clone(), None), &R);
+        sw.select(Some(1)).unwrap();
+        sw.select(None).unwrap();
+        assert_eq!(*log.borrow(), [(0x0150_0150, 0x0010_0010), (0x0150_0150, 0)]);
     }
 
     #[test]
-    fn select_shifts_latches_then_reads_back_with_latch_high() {
+    fn eio_is_verify_and_clears() {
         let log: Log = Default::default();
-        let mut sw = Switch::new(S(log.clone(), TABLE[3]), L(log.clone()));
-        sw.select(Some(3)).unwrap();
-        assert_eq!(
-            *log.borrow(),
-            [Ev::Latch(false), Ev::Write(TABLE[3]), Ev::Latch(true), Ev::Xfer]
-        );
-    }
-
-    #[test]
-    fn mismatch_clears_switch() {
-        let log: Log = Default::default();
-        let mut sw = Switch::new(S(log.clone(), [0; 4]), L(log.clone()));
+        let mut sw = Switch::new(P(log.clone(), Some(-5)), &R);
         assert_eq!(sw.select(Some(0)), Err(Error::Verify));
-        assert_eq!(log.borrow().last(), Some(&Ev::Latch(true)));
-        assert!(log.borrow().contains(&Ev::Write([0; 4])));
+        assert_eq!(log.borrow().last(), Some(&(0x0150_0150, 0)));
+    }
+
+    #[test]
+    fn other_errors_are_port_errors() {
+        let log: Log = Default::default();
+        let mut sw = Switch::new(P(log, Some(-16)), &R);
+        assert_eq!(sw.select(Some(0)), Err(Error::Port(-16)));
     }
 
     #[test]
     fn bad_channel_touches_nothing() {
         let log: Log = Default::default();
-        let mut sw = Switch::new(S(log.clone(), [0; 4]), L(log.clone()));
-        assert_eq!(sw.select(Some(11)), Err(Error::BadChannel));
+        let mut sw = Switch::new(P(log.clone(), None), &R);
+        assert_eq!(sw.select(Some(3)), Err(Error::BadChannel));
         assert!(log.borrow().is_empty());
-    }
-
-    #[test]
-    fn table_is_two_identical_halves() {
-        for r in TABLE {
-            assert_eq!(r[..2], r[2..]);
-        }
     }
 }

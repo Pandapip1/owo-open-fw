@@ -73,7 +73,7 @@ width field of the table is ever used, for both phases; the second width (field 
 | 8 | **Supply off whenever the pulse queue is empty.** The stock switches the boost from the Start/Stop handlers and the end-of-run state (0x3AFD6 / 0x3AFEC), not per queue-empty. **[F]** weakly: the callers were read, the full state graph was not. | `Stimulator::release` / `safe_off` |
 | 9 | **Supply, routing and DAC are cleared after every pulse**, not only at the end of a run. | `Stimulator::fire` |
 | 10 | **Bounded interrupt-off window.** The pulse runs with interrupts off for at most 2 x max phase + max gap; the stock relies on ISR priorities. | `Hw::critical`, `fire` |
-| 11 | **Sense timeout.** A stuck ADC conversion cannot hold the bridge on: waits are bounded by wall time (100 us). | `owo-suit::sense` (`adc_read_polled`) |
+| 11 | **Sense freshness.** A stuck ADC cannot hold the bridge on: there is no wait: the newest ADC conversion (stamped by the ADC interrupt) must be fresh, else the bridge opens. | `owo-stim` (sense freshness), `owo-suit` (ADC sampler) |
 | 12 | **Output only after explicit opt-in at build time**, behind a Kconfig symbol that states the code has not run on hardware. | `CONFIG_OWO_STIM_UNVALIDATED_HARDWARE` |
 
 ## Unknowns that block calling the output validated

@@ -1,6 +1,6 @@
 [package]
 name = "owo-switch"
-description = "Driver for the OWO suit's electrode channel-switch chain (4-byte shift register with latch)"
+description = "OWO suit electrode channel switch: channel -> GPIO-port pin mask mapping"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

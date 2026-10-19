@@ -19,6 +19,15 @@ pub enum HwError {
     BridgeShoot,
 }
 
+/// The newest completed conversion of the feedback ADC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    /// In the same units as the commanded level.
+    pub value: u16,
+    /// When the ADC interrupt noted the completion, on the [`Hw::now_us`] clock.
+    pub at_us: u64,
+}
+
 pub trait Hw {
     /// Set the bridge. Must return with all drive off if it returns an error.
     fn bridge(&mut self, s: Bridge) -> Result<(), HwError>;
@@ -26,12 +35,15 @@ pub trait Hw {
     fn dac_level(&mut self, level: u8) -> Result<(), HwError>;
     /// Connect electrode channel `ch` (or none) and verify by read-back.
     fn select(&mut self, ch: Option<u8>) -> Result<(), HwError>;
-    /// Measure the delivered output, in the same units as the commanded level.
-    fn sense(&mut self) -> Result<u16, HwError>;
-    /// Enable/disable the high-voltage supply. Must be idempotent.
+    /// Enable/disable the high-voltage supply. Must be idempotent. Turning it on also starts the
+    /// free-running feedback sampler, turning it off stops it, so nothing runs while idle.
     fn supply(&mut self, on: bool) -> Result<(), HwError>;
-    /// Busy-wait. Used only inside [`Hw::critical`].
+    /// Monotonic microsecond clock.
+    fn now_us(&mut self) -> u64;
+    /// Non-blocking: the newest conversion the sampler has completed since the supply came on,
+    /// or `None` if there has been none yet. The sampler runs in interrupt context and stamps
+    /// each result with the clock, so the caller can judge how old it is.
+    fn sense_latest(&mut self) -> Option<Sample>;
+    /// Busy-wait. Interrupts stay enabled.
     fn delay_us(&mut self, us: u32);
-    /// Run `f` with interrupts locked so a phase cannot be stretched by an ISR.
-    fn critical<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R;
 }

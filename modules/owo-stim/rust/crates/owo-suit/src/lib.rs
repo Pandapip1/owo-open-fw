@@ -1,34 +1,44 @@
-//! Glue only: every part has its own crate, every bus/pin goes through a Zephyr driver chosen in
-//! devicetree (`owo,suit-output` node, see `dts/bindings/misc/owo,suit-output.yaml`).
+//! Glue only. Every part has its own crate or is a stock Zephyr driver chosen in devicetree
+//! (`owo,suit-output` node, see `dts/bindings/misc/owo,suit-output.yaml`); every board-specific
+//! number comes from that node, none lives here.
 //!
-//! | part | crate | Zephyr driver used |
+//! | part | logic | Zephyr driver used |
 //! |------|-------|--------------------|
 //! | H-bridge gates | `owo-hbridge` | GPIO |
-//! | channel switch chain | `owo-switch` | SPI (+ a GPIO latch) |
-//! | amplitude DAC | `ltc2634` | DAC API; the driver itself is the Rust one in `ltc2634::zephyr` |
-//! | boost converter | (here) | PWM |
-//! | PCF8575 expander lines (supply enables, DAC /CLR) | (devicetree) | `nxp,pcf8575` GPIO |
-//! | feedback | (here) | ADC, via the non-sleeping `adc_read_polled()` |
+//! | channel switch | `owo-switch` (channel -> pin mask) | GPIO port; `ti,sn74hc595` (with read-back verification) |
+//! | amplitude DAC | here (scaling) | DAC API; `ltc2634` is the Rust driver for the part |
+//! | supply enables | here | regulator (`regulator-fixed`) |
+//! | boost converter | here | PWM |
+//! | feedback | here (scaling) | ADC async sequence; timestamps from the timing API |
 
 #![no_std]
 
-use owo_hal::OutputPin as _;
+use owo_hal::Switchable as _;
 use owo_hbridge::{HBridge, State};
-use owo_stim::hw::{Bridge, Hw, HwError};
+use owo_stim::hw::{Bridge, Hw, HwError, Sample};
 use owo_switch::Switch;
-use zephyr_io::{suit_handle, AdcPolled, Dac, Gpio, Pwm, Spi, SuitHandle};
+use zephyr_io::{
+    now_us, suit_handle, suit_param, suit_supply_handle, suit_switch_routes, Dac, Gpio, Port, Pwm,
+    Regulator, Sampler, SuitHandle, SuitParam,
+};
 
-/// Stock conversion constants (fw @0x44aa0 and the DAC routine); see docs/stock-stim-path.md.
-const DAC_NUM: u32 = 0x12FED;
-const DAC_DEN: u32 = 0x9C4;
-const SENSE_NUM: u64 = 0xA_1220;
-const SENSE_DEN: u64 = 0xEF_510A;
-const SENSE_OFFSET: u32 = 3;
-const DAC_ALL: u8 = ltc2634::ADDR_ALL;
-/// Boost duty the stock firmware uses when the supply is on (fw @0x3afe2).
-const BOOST_DUTY_PERCENT: u8 = 50;
-const SENSE_TIMEOUT_US: u32 = 100;
-const MAX_LEVEL: u8 = 126;
+/// The DAC driver's entry points are called only from C (`drivers/dac/dac_ltc2634.c`); this keeps
+/// the linker from dropping the Rust driver object because nothing in Rust refers to it.
+#[used]
+static LTC2634_DRIVER: (
+    extern "C" fn(u8, u8, bool) -> i32,
+    unsafe extern "C" fn(*const core::ffi::c_void, *const core::ffi::c_void) -> i32,
+    unsafe extern "C" fn(*const core::ffi::c_void, u8, u32) -> i32,
+) = (
+    ltc2634::zephyr::ltc2634_rs_channel_setup,
+    ltc2634::zephyr::ltc2634_rs_init,
+    ltc2634::zephyr::ltc2634_rs_write_value,
+);
+
+/// Sampling interval while the supply is on; see CONFIG_OWO_STIM_SENSE_INTERVAL_US.
+const SENSE_INTERVAL_US: u32 = 100;
+/// Maximum number of supply regulators the binding allows.
+const MAX_SUPPLIES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitError {
@@ -37,14 +47,58 @@ pub enum InitError {
     Errno(i32),
 }
 
+/// Board constants, read once from devicetree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scale {
+    pub dac_channel: u8,
+    pub dac_resolution: u8,
+    pub dac_num: u32,
+    pub dac_den: u32,
+    pub max_level: u8,
+    pub uv_per_level: u32,
+    pub sense_offset: u32,
+}
+
+impl Scale {
+    fn from_dt() -> Self {
+        Self {
+            dac_channel: suit_param(SuitParam::DacChannel) as u8,
+            dac_resolution: suit_param(SuitParam::DacResolution) as u8,
+            dac_num: suit_param(SuitParam::DacScaleNum),
+            dac_den: suit_param(SuitParam::DacScaleDen),
+            max_level: suit_param(SuitParam::MaxLevel) as u8,
+            uv_per_level: suit_param(SuitParam::SenseUvPerLevel),
+            sense_offset: suit_param(SuitParam::SenseOffset),
+        }
+    }
+
+    /// DAC code for a commanded level, `None` if above the board's range.
+    pub fn dac_code(&self, level: u8) -> Option<u32> {
+        if level > self.max_level || self.dac_den == 0 {
+            return None;
+        }
+        Some((level as u64 * self.dac_num as u64 / self.dac_den as u64) as u32)
+    }
+
+    /// Commanded-level units for a pin voltage in millivolts.
+    pub fn level_from_mv(&self, mv: i32) -> u16 {
+        if mv <= 0 || self.uv_per_level == 0 {
+            return 0;
+        }
+        let lv = (mv as u64 * 1000 / self.uv_per_level as u64).saturating_sub(self.sense_offset as u64);
+        lv.min(u16::MAX as u64) as u16
+    }
+}
+
 pub struct Suit {
     bridge: HBridge<Gpio>,
-    switch: Switch<Spi, Gpio>,
+    switch: Switch<'static, Port>,
     dac: Dac,
     boost: Pwm,
-    sense: AdcPolled,
-    supply_a: Gpio,
-    supply_b: Gpio,
+    sense: Sampler,
+    supplies: [Option<Regulator>; MAX_SUPPLIES],
+    scale: Scale,
+    boost_duty: u8,
     supply_on: bool,
 }
 
@@ -76,40 +130,58 @@ impl Suit {
         ok(lb.configure_output(true))?;
         let bridge = HBridge::new(ha, hb, la, lb).map_err(|_| InitError::Errno(-5))?;
 
-        let mut supply_a = gpio(SuitHandle::SupplyA)?;
-        let mut supply_b = gpio(SuitHandle::SupplyB)?;
-        ok(supply_a.configure_output(false))?;
-        ok(supply_b.configure_output(false))?;
+        let n = suit_param(SuitParam::SupplyCount) as usize;
+        if n == 0 || n > MAX_SUPPLIES {
+            return Err(InitError::NoDevice);
+        }
+        let mut supplies: [Option<Regulator>; MAX_SUPPLIES] = [None, None, None, None];
+        for (i, slot) in supplies.iter_mut().enumerate().take(n) {
+            let p = suit_supply_handle(i as u32);
+            if p.is_null() {
+                return Err(InitError::NoDevice);
+            }
+            // SAFETY: non-null supply handles from the shim are ready regulator devices.
+            *slot = Some(unsafe { Regulator::from_raw(p) });
+        }
 
-        let mut latch = gpio(SuitHandle::SwitchLatch)?;
-        ok(latch.configure_output(true))?;
-        let sp = suit_handle(SuitHandle::SwitchSpi);
+        let sw = suit_handle(SuitHandle::Switch);
         let dp = suit_handle(SuitHandle::Dac);
         let pp = suit_handle(SuitHandle::BoostPwm);
         let ap = suit_handle(SuitHandle::SenseAdc);
-        if sp.is_null() || dp.is_null() || pp.is_null() || ap.is_null() {
+        if sw.is_null() || dp.is_null() || pp.is_null() || ap.is_null() {
             return Err(InitError::NoDevice);
         }
         // SAFETY: non-null handles from the shim have the types named by their SuitHandle kind.
-        let (spi, mut dac, mut boost, mut sense) = unsafe {
-            (Spi::from_raw(sp), Dac::from_raw(dp), Pwm::from_raw(pp), AdcPolled::from_raw(ap))
+        let (port, mut dac, mut boost, sense) = unsafe {
+            (Port::from_raw(sw), Dac::from_raw(dp), Pwm::from_raw(pp), Sampler::from_raw(ap))
         };
+        let scale = Scale::from_dt();
         ok(boost.set_percent(0))?;
-        ok(dac.channel_setup(DAC_ALL, 12))?;
-        ok(dac.write(DAC_ALL, 0))?;
-        ok(sense.prime())?;
+        ok(dac.channel_setup(scale.dac_channel, scale.dac_resolution))?;
+        ok(dac.write(scale.dac_channel, 0))?;
         let mut s = Self {
             bridge,
-            switch: Switch::new(spi, latch),
+            switch: Switch::new(port, suit_switch_routes()),
             dac,
             boost,
             sense,
-            supply_a,
-            supply_b,
+            supplies,
+            scale,
+            boost_duty: suit_param(SuitParam::BoostDutyPercent) as u8,
             supply_on: false,
         };
         s.switch.select(None).map_err(|_| InitError::Errno(-5))?;
         Ok(s)
+    }
+
+    fn supplies_set(&mut self, on: bool) -> Result<(), i32> {
+        let mut r = Ok(());
+        for s in self.supplies.iter_mut().flatten() {
+            if let Err(e) = s.set(on) {
+                r = Err(e);
+            }
+        }
+        r
     }
 }
 
@@ -127,11 +199,8 @@ impl Hw for Suit {
     }
 
     fn dac_level(&mut self, level: u8) -> Result<(), HwError> {
-        if level > MAX_LEVEL {
-            return Err(HwError::Bus);
-        }
-        let code = level as u32 * DAC_NUM / DAC_DEN;
-        self.dac.write(DAC_ALL, code).map_err(|_| HwError::Bus)
+        let code = self.scale.dac_code(level).ok_or(HwError::Bus)?;
+        self.dac.write(self.scale.dac_channel, code).map_err(|_| HwError::Bus)
     }
 
     fn select(&mut self, ch: Option<u8>) -> Result<(), HwError> {
@@ -141,37 +210,83 @@ impl Hw for Suit {
         })
     }
 
-    fn sense(&mut self) -> Result<u16, HwError> {
-        let raw = self.sense.read(SENSE_TIMEOUT_US).map_err(|_| HwError::Bus)?;
-        let v = (raw as u64 * SENSE_NUM / SENSE_DEN) as u32;
-        Ok(v.saturating_sub(SENSE_OFFSET) as u16)
+    fn now_us(&mut self) -> u64 {
+        now_us()
+    }
+
+    fn sense_latest(&mut self) -> Option<Sample> {
+        let (_raw, mv, at_us) = self.sense.latest()?;
+        Some(Sample { value: self.scale.level_from_mv(mv), at_us })
     }
 
     fn supply(&mut self, on: bool) -> Result<(), HwError> {
-        if on == self.supply_on {
+        if on && self.supply_on {
             return Ok(());
         }
         if on {
-            // The stock firmware sets expander P2/P3 in normal operation (fw @0x24e94); purpose unknown.
-            self.supply_a.set(true).map_err(|_| HwError::Bus)?;
-            self.supply_b.set(true).map_err(|_| HwError::Bus)?;
-            self.boost.set_percent(BOOST_DUTY_PERCENT).map_err(|_| HwError::Bus)?;
-        } else {
-            // Boost first so the rail collapses, then the enables.
-            let r1 = self.boost.set_percent(0);
-            let r2 = self.supply_a.set(false);
-            let r3 = self.supply_b.set(false);
-            r1.and(r2).and(r3).map_err(|_| HwError::Bus)?;
+            let r = self
+                .supplies_set(true)
+                .and_then(|_| self.boost.set_percent(self.boost_duty))
+                .and_then(|_| self.sense.start(SENSE_INTERVAL_US));
+            if r.is_ok() {
+                self.supply_on = true;
+                return Ok(());
+            }
+            // Fall through and switch everything back off.
         }
-        self.supply_on = on;
-        Ok(())
+        // Always runs fully when asked to turn off (also after a failed turn-on).
+        self.sense.stop();
+        // Boost first so the rail collapses, then the enables.
+        let r1 = self.boost.set_percent(0);
+        let r2 = self.supplies_set(false);
+        self.supply_on = false;
+        let off = r1.and(r2).map_err(|_| HwError::Bus);
+        if on {
+            Err(HwError::Bus)
+        } else {
+            off
+        }
     }
 
     fn delay_us(&mut self, us: u32) {
         zephyr_io::busy_wait_us(us);
     }
+}
 
-    fn critical<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        zephyr_io::irq_locked(|| f(self))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STOCK: Scale = Scale {
+        dac_channel: 15,
+        dac_resolution: 12,
+        dac_num: 0x12FED,
+        dac_den: 0x9C4,
+        max_level: 126,
+        uv_per_level: 19150,
+        sense_offset: 3,
+    };
+
+    #[test]
+    fn dac_code_matches_stock_endpoint() {
+        assert_eq!(STOCK.dac_code(126), Some(3921));
+        assert_eq!(STOCK.dac_code(0), Some(0));
+        assert_eq!(STOCK.dac_code(127), None);
+    }
+
+    #[test]
+    fn sense_scale_matches_stock_formula_closely() {
+        // stock: raw*660000/15683850 - 3 with raw 12-bit over 3.3 V (0.8057 mV/count)
+        for raw in [0u32, 100, 1000, 4095] {
+            let mv = (raw as u64 * 3300 / 4095) as i32;
+            let stock = (raw as u64 * 0xA1220 / 0xEF510A).saturating_sub(3);
+            let ours = STOCK.level_from_mv(mv) as u64;
+            assert!(ours.abs_diff(stock) <= 1, "raw {raw}: {ours} vs {stock}");
+        }
+    }
+
+    #[test]
+    fn negative_mv_is_zero() {
+        assert_eq!(STOCK.level_from_mv(-5), 0);
     }
 }

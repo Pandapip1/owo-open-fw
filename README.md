@@ -18,8 +18,8 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `src/ble.rs` | GATT table built at run time, pairing (passkey), advertising, connection handling |
 | `src/hal.rs` | `Output`: dry-run log, or (opt-in) the `owo-stim` supervisor + `owo-suit` |
 | `modules/owo-stim/` | **Reusable Zephyr module**: per-part Rust crates, a Rust DAC driver, bindings, shim. See below |
-| `boards/owo-suit-hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree on the stand-in board (only with `-DOWO_HW=ON`) |
-| `patches/zephyr/` | Zephyr patch: `adc_read_polled()` |
+| `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
+| `patches/zephyr/` | Two small Zephyr patches: a Counter-backed timing backend, and read-back verification for `ti,sn74hc595` |
 | `docs/stock-stim-path.md` | What the stock firmware's output stage does, its interlocks, and the ones it lacks |
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
@@ -35,7 +35,7 @@ west init -l . && west update            # workspace goes in the parent director
 ./scripts/apply-patches.sh               # required: lets zephyr-lang-rust coexist with the Silabs sleeptimer
 west blobs fetch hal_silabs              # Silicon Labs' radio libraries
 OWO_SERIAL=<your serial> west build -b bg22_ek4108a .      # dry run (no output)
-# bench only:  ... -- -DOWO_HW=ON   (adds boards/owo-suit-hw.overlay + owo-suit-hw.conf)
+# bench only:  ... -- -DOWO_HW=ON   (adds boards/<board>_hw.overlay + owo-suit-hw.conf)
 cargo test --manifest-path crates/owo-core/Cargo.toml      # protocol + scheduler
 cargo test --manifest-path modules/owo-stim/rust/Cargo.toml --workspace   # supervisor + part crates; or: nix flake check
 ```
@@ -45,39 +45,47 @@ addresses and vector table match xG22). The suit's exact part number is unknown.
 
 ## The `owo-stim` module (output stage)
 `modules/owo-stim/` is a Zephyr module (Kconfig, devicetree bindings, C glue) with a Cargo workspace of
-small crates, one per part, so each can be reused or replaced on its own. Everything that Zephyr already
-has a driver for goes through that driver; the suit's pins and buses are devicetree, not code
-(`boards/owo-suit-hw.overlay`).
+small crates. Two rules: **board facts live only in devicetree**, and **where Zephyr already has a
+driver or API of the right shape, that is what is used**. So the logic (supervisor, interlocks) and the
+drivers can be checked independently, and a new board (or a different MCU family) is a new overlay.
 
-| Part | Crate | How it reaches the hardware |
-|------|-------|-----------------------------|
-| Safety supervisor (all interlocks) | `owo-stim` | none: talks to the `Hw` trait; 19 host tests |
+| Part | Crate / code | Zephyr piece it sits on |
+|------|--------------|-------------------------|
+| Safety supervisor (all interlocks) | `owo-stim` | none: talks to the `Hw` trait; 21 host tests |
 | H-bridge gates | `owo-hbridge` | GPIO; break-before-make; 3 host tests |
-| Electrode channel switch | `owo-switch` | SPI + a GPIO latch; read-back verify; 4 host tests |
-| Amplitude DAC (LTC262x-class) | `ltc2634` | **A Zephyr DAC-API driver whose logic is Rust**: `drivers/dac/dac_ltc2634.c` defines the device, `ltc2634::zephyr` implements it; binding `lltc,ltc2634`; 3 host tests |
-| Boost converter | (`owo-suit`) | Zephyr PWM (`silabs,timer-pwm`) |
-| Expander (supply enables, DAC /CLR) | none | Zephyr `nxp,pcf857x` GPIO driver |
-| Feedback | (`owo-suit`) | Zephyr ADC, via `adc_read_polled()` (see below) |
-| Glue | `owo-suit` | implements `Hw` from the above; `zephyr-io` holds the Rust handles over Zephyr's GPIO/SPI/DAC/PWM/ADC (through `shim/owo_shim.c`, because most of those calls are static inline) |
+| Channel switch (32-bit shift chain) | `owo-switch` (channel -> pin mask only) | stock `ti,sn74hc595` GPIO driver via `gpio_port_set_masked`; read-back is a Zephyr patch (`verify-readback`) |
+| Amplitude DAC (LTC262x-class) | `ltc2634` | Zephyr **DAC API**: `drivers/dac/dac_ltc2634.c` is the device, the logic is Rust; binding `lltc,ltc2634` |
+| Supply enables | `owo-suit` | Zephyr **regulator** (`regulator-fixed`), behind the `nxp,pcf857x` expander |
+| Boost converter | `owo-suit` | Zephyr **PWM** |
+| Feedback | `owo-suit` + `shim/owo_shim.c` | Zephyr **ADC async sequence** that repeats from its completion callback; newest sample in a depth-1 `k_msgq`; `adc_raw_to_millivolts_dt` for the conversion |
+| Timestamps | shim | Zephyr **timing API**; on parts without a usable cycle counter the Counter-backed backend patch (`zephyr,timing-counter`) |
+| Glue | `owo-suit`, `zephyr-io` | `owo-suit` implements `Hw`; every number it uses (DAC scale, level ceiling, sense scale, switch routes, boost duty) is read from the `owo,suit-output` node; `zephyr-io` is the Rust view of the shim's 1:1 wrappers (most Zephyr calls are static inline) |
+
+The C shim contains no decisions: wrappers, devicetree lookups, and the ADC callback that stamps the
+clock. The Zephyr patches (`patches/zephyr/`, applied by `scripts/apply-patches.sh`; also on branch
+`owo/patches` of a Zephyr checkout) are written to be upstreamable.
 
 Why a new DAC driver: Zephyr's `dac_ad56xx` sends the same bytes but clocks in SPI mode 1 and cannot
 address "all DACs"; the LTC262x data sheet is mode 0.
 
-Why a Zephyr patch: `adc_read()` sleeps on a semaphore and its completion comes from the IADC interrupt,
-so it cannot be used inside the interrupt-locked pulse window. `patches/zephyr/` adds an optional,
-non-sleeping `adc_read_polled()` to the ADC API and implements it for `silabs,iadc` (branch
-`owo/adc-read-polled`). `scripts/apply-patches.sh` applies it after `west update`. An alternative
-without the patch (`adc_read_async` with a callback in the IADC ISR plus a timer ISR for the phase
-end) is possible but moves the "a phase cannot be stretched" guarantee from a locked section to
-interrupt priorities.
+**Porting to another board or MCU:** write `boards/<board>_hw.overlay` containing devicetree nodes for
+your parts (any Zephyr driver of the right class: GPIO for the bridge, a 32-pin GPIO controller for the
+switch, regulators, a PWM, a DAC channel, an ADC channel) plus one `owo,suit-output` node that points at
+them and carries the scaling numbers. The ADC driver must support `adc_read_async` with a sequence
+callback, and Zephyr's timing API needs a source (CPU cycle counter, or `zephyr,timing-counter`). If a
+part has no Zephyr driver yet, write that driver (one crate, one binding) and nothing else changes.
+The only board verified to build is `bg22_ek4108a`; no second MCU family has been tried.
+
+Idle power: the ADC sampler and the timing counter run only while the supply is on; the timing counter
+holds a PM lock while running (inferred from the Silabs PM mapping, not measured).
 
 - Interlocks (see `docs/stock-stim-path.md` for which the stock firmware has and which are new): hard
   level ceiling (default 40 of 126), coverage window + dead-man, soft start, per-channel duty budget,
-  phase/gap limits, charge-balanced phases, fault latch + lockout, supply off when idle, bounded
-  IRQ-off window, ADC sense timeout, break-before-make bridge, switch read-back.
+  phase/gap limits, charge-balanced phases, fault latch + lockout, supply off when idle, sense freshness (the bridge closes and stays closed only while the newest ADC conversion is recent), phase-overrun check,
+  break-before-make bridge, switch read-back.
 - Kconfig: `OWO_STIM_UNVALIDATED_HARDWARE` (set by `-DOWO_HW=ON`), `OWO_STIM_HARD_MAX_LEVEL`,
   `OWO_STIM_DEADMAN_MS`, `OWO_STIM_MAX_PHASE_US`, `OWO_STIM_SOFT_START_MS`, `OWO_STIM_MAX_DUTY_PERMILLE`,
-  `OWO_STIM_WIDTH_SCALE_PERCENT`, `OWO_STIM_FAULT_LOCKOUT`.
+  `OWO_STIM_WIDTH_SCALE_PERCENT`, `OWO_STIM_SENSE_INTERVAL_US`, `OWO_STIM_SENSE_MAX_AGE_US`, `OWO_STIM_FAULT_LOCKOUT`.
 
 ### Bench checklist (before any skin contact)
 1. Dummy load only (resistor network, a few kOhm per channel), current-limited bench supply in place of the
@@ -89,7 +97,7 @@ interrupt priorities.
    stock tick suggests 2x the table value), gap, polarity order, that there is never overlap between phases
    or both high sides on, and that the output returns to 0 V between pulses.
 5. Compare the measured amplitude with the commanded level at several levels to check the sense scaling
-   (`SENSE_NUM/SENSE_DEN` in `owo-suit`; the stock firmware also applies a RAM trim table that is not used here).
+   (`sense-uv-per-level` / `sense-offset` in the overlay; the stock firmware also applies a RAM trim table that is not used here).
 6. Pull the BLE link and stop sending frames: output must stop within the coverage window + dead-man.
 7. Force a fault (shunt the sense input high, or disconnect the load at level 20): the channel must latch
    and the supply must turn off; three faults must lock the whole output until Start.
@@ -137,7 +145,7 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 
 ## What was validated
 - Host tests: `owo-stim` 19, `owo-hbridge` 3, `owo-switch` 4, `ltc2634` 3, all pass; clippy `-D warnings` clean. `owo-stim` tests: (supervisor against a mock output stage: bridge ordering, clamps, overdrive trip at the early and the mid-pulse sample, switch-verify failure, lockout, coverage window and dead-man, soft start, duty budget, open-circuit hint). Not run on hardware.
-- Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the Zephyr patch applied. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, `iadc_read_polled` and the shim.
+- Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the Zephyr patches applied. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
 - Channel switch table and the pin/DAC/ADC details in `docs/stock-stim-path.md` were obtained by reading the stock code and, for the table, by emulating its start-up with `unicorn`.
 - `owo-core`: 13 host tests pass (the vectors from the firmware analysis: frame/config/power/
   widths/pairing, plus scheduler behaviour: 100 wake-ups for a 500 ms, 100 Hz, 2-channel frame

@@ -18,6 +18,12 @@
 //! 9. **[stock]** Closed-loop over-delivery trip using the sense ADC, per-channel latch.
 //! 10. **[stock]** Channel switch read-back verification.
 //! 11. **[stock]** Break-before-make on the bridge, bridge off before the channel changes.
+//! 12. **[new]** Sense freshness: the feedback ADC free-runs in interrupt context and stamps every
+//!     conversion. The bridge is only closed, and only stays closed, while the newest conversion
+//!     is at most `sense_max_age_us` old; a stalled ADC or an interrupt that starves the pulse
+//!     thread therefore ends the pulse. No interrupt lock is needed, so the ADC interrupt can run.
+//! 13. **[new]** Overrun check: a phase that took longer than `width + overrun_slack_us` (the
+//!     thread was preempted) is a fault, which latches the channel.
 
 use crate::hw::{Bridge, Hw, HwError};
 
@@ -39,8 +45,17 @@ pub struct Config {
     pub over_margin: u16,
     /// Report open circuit when measured is below commanded by more than this.
     pub under_margin: u16,
-    /// Delay after the bridge closes before the sense sample (us).
+    /// Samples that completed less than this long after the bridge closed are ignored for the
+    /// over-delivery check (the output is still rising).
     pub settle_us: u32,
+    /// Longest the newest conversion may be while the bridge is (about to be) closed.
+    pub sense_max_age_us: u32,
+    /// How long to wait for the first conversion after the supply comes on.
+    pub sense_startup_us: u32,
+    /// A phase may take this much longer than its width before it counts as an overrun.
+    pub overrun_slack_us: u32,
+    /// How often the pulse loop looks at the sampler while a phase is running.
+    pub poll_step_us: u32,
     /// Burst allowance of the duty bucket, in on-time microseconds.
     pub duty_burst_us: u32,
 }
@@ -59,6 +74,10 @@ impl Config {
             over_margin: 8,
             under_margin: 15,
             settle_us: 20,
+            sense_max_age_us: 500,
+            sense_startup_us: 3_000,
+            overrun_slack_us: 150,
+            poll_step_us: 10,
             duty_burst_us: 4_000,
         }
     }
@@ -77,6 +96,12 @@ pub enum Fault {
     Hw(HwError),
     /// Measured output exceeded the commanded level by more than the margin.
     Overdrive { measured: u16, commanded: u8 },
+    /// The newest conversion was older than `sense_max_age_us` while the output was live.
+    StaleSense { age_us: u64 },
+    /// No conversion arrived after the supply came on.
+    SenseTimeout,
+    /// A phase ran longer than its width plus the slack.
+    PhaseOverrun { elapsed_us: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,66 +291,106 @@ impl Stimulator {
             return self.fault(hw, ch, Fault::Hw(e));
         }
 
-        // Timing-critical part, interrupts locked. Bounded by 2*max_phase + max_gap + settle.
-        let settle = self.cfg.settle_us.min(width);
-        let mid = (width / 2).max(settle);
-        let limit = level as u16 + self.cfg.over_margin;
-        let r: Result<u16, Fault> = hw.critical(|hw| {
-            if let Err(e) = hw.bridge(Bridge::Positive) {
-                let _ = hw.bridge(Bridge::Off);
-                return Err(Fault::Hw(e));
-            }
-            // Two samples: an early one that can only catch gross over-delivery (the output may
-            // still be rising), and one at mid-phase, which is the value reported and the one
-            // used for the open-circuit hint (the stock firmware samples 2-3 ticks in).
-            let mut m = 0u16;
-            let mut at = 0u32;
-            for t in [settle, mid] {
-                if t < at || (t == at && at != 0) {
-                    continue;
-                }
-                hw.delay_us(t - at);
-                at = t;
-                m = match hw.sense() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = hw.bridge(Bridge::Off);
-                        return Err(Fault::Hw(e));
-                    }
-                };
-                if m > limit {
-                    let _ = hw.bridge(Bridge::Off);
-                    return Err(Fault::Overdrive { measured: m, commanded: level });
-                }
-            }
-            hw.delay_us(width.saturating_sub(at));
-            if let Err(e) = hw.bridge(Bridge::Off) {
-                return Err(Fault::Hw(e));
-            }
+        // The sampler starts with the supply; wait (bounded) for its first conversion so the
+        // bridge never closes without live feedback.
+        if let Err(f) = self.await_first_sample(hw) {
+            return self.fault(hw, ch, f);
+        }
+
+        let r: Result<Option<u16>, Fault> = (|| {
+            let a = self.phase(hw, Bridge::Positive, level, width)?;
             if gap > 0 {
                 hw.delay_us(gap);
             }
-            if let Err(e) = hw.bridge(Bridge::Negative) {
-                let _ = hw.bridge(Bridge::Off);
-                return Err(Fault::Hw(e));
-            }
-            hw.delay_us(width);
-            if let Err(e) = hw.bridge(Bridge::Off) {
-                return Err(Fault::Hw(e));
-            }
-            Ok(m)
-        });
+            let b = self.phase(hw, Bridge::Negative, level, width)?;
+            Ok(b.or(a))
+        })();
 
         match r {
             Ok(m) => {
                 // Leave the stage de-energised between pulses.
                 let _ = hw.dac_level(0);
                 let _ = hw.select(None);
-                let open_circuit = level >= 10 && m + self.cfg.under_margin < level as u16;
-                Outcome::Fired { measured: m, open_circuit }
+                let open_circuit =
+                    level >= 10 && m.is_some_and(|m| m + self.cfg.under_margin < level as u16);
+                Outcome::Fired { measured: m.unwrap_or(0), open_circuit }
             }
             Err(f) => self.fault(hw, ch, f),
         }
+    }
+
+    fn await_first_sample<H: Hw>(&self, hw: &mut H) -> Result<(), Fault> {
+        let start = hw.now_us();
+        loop {
+            if hw.sense_latest().is_some() {
+                return Ok(());
+            }
+            if hw.now_us().saturating_sub(start) > self.cfg.sense_startup_us as u64 {
+                return Err(Fault::SenseTimeout);
+            }
+            hw.delay_us(self.cfg.poll_step_us);
+        }
+    }
+
+    /// The newest conversion, or the fault that its absence/staleness is.
+    fn fresh<H: Hw>(&self, hw: &mut H) -> Result<crate::hw::Sample, Fault> {
+        let s = hw.sense_latest().ok_or(Fault::SenseTimeout)?;
+        let age = hw.now_us().saturating_sub(s.at_us);
+        if age > self.cfg.sense_max_age_us as u64 {
+            return Err(Fault::StaleSense { age_us: age });
+        }
+        Ok(s)
+    }
+
+    /// One phase: close the bridge (only with fresh feedback), watch the output until the width
+    /// has elapsed, open the bridge. Returns the newest in-phase reading, if any arrived.
+    fn phase<H: Hw>(
+        &self,
+        hw: &mut H,
+        pol: Bridge,
+        level: u8,
+        width: u32,
+    ) -> Result<Option<u16>, Fault> {
+        let limit = level as u16 + self.cfg.over_margin;
+        self.fresh(hw)?;
+        if let Err(e) = hw.bridge(pol) {
+            let _ = hw.bridge(Bridge::Off);
+            return Err(Fault::Hw(e));
+        }
+        let t0 = hw.now_us();
+        let settled = t0 + self.cfg.settle_us.min(width) as u64;
+        let end = t0 + width as u64;
+        let mut measured = None;
+        loop {
+            hw.delay_us(self.cfg.poll_step_us);
+            let now = hw.now_us();
+            if now >= end {
+                break;
+            }
+            match self.fresh(hw) {
+                Ok(s) => {
+                    if s.at_us >= settled {
+                        measured = Some(s.value);
+                        if s.value > limit {
+                            let _ = hw.bridge(Bridge::Off);
+                            return Err(Fault::Overdrive { measured: s.value, commanded: level });
+                        }
+                    }
+                }
+                Err(f) => {
+                    let _ = hw.bridge(Bridge::Off);
+                    return Err(f);
+                }
+            }
+        }
+        if let Err(e) = hw.bridge(Bridge::Off) {
+            return Err(Fault::Hw(e));
+        }
+        let elapsed = hw.now_us().saturating_sub(t0);
+        if elapsed > width as u64 + self.cfg.overrun_slack_us as u64 {
+            return Err(Fault::PhaseOverrun { elapsed_us: elapsed });
+        }
+        Ok(measured)
     }
 }
 

@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 description: |
-  Collects the devices that make up the OWO suit's electrode output stage so the owo-stim module
-  can find them. Each property points at a normal Zephyr driver node.
+  The OWO suit's electrode output stage, described only in terms of generic Zephyr devices, so a
+  different board (or a different MCU family) needs nothing but a devicetree overlay that points
+  at its own drivers. Everything that depends on the PCB (wiring, routing bytes, analog scaling)
+  is a property here; nothing board-specific is compiled into the firmware.
+
+  Everything points at stock Zephyr device classes: GPIO (H-bridge gates), a 32-pin GPIO
+  controller for the channel switch (ti,sn74hc595 on SPI: the chain, its store clock as the SPI
+  chip select), regulator (supply enables, e.g. regulator-fixed), PWM (boost), DAC (amplitude),
+  ADC (feedback). The ADC driver must support asynchronous reads with a sequence callback
+  (CONFIG_ADC_ASYNC), and Zephyr's timing API needs a source (a CPU cycle counter, or a Counter
+  device named in /chosen/zephyr,timing-counter).
 
 compatible: "owo,suit-output"
 
@@ -13,34 +22,79 @@ properties:
     required: true
     description: |
       Four H-bridge gates in the order high-side A, high-side B, low-side A, low-side B, all
-      GPIO_ACTIVE_HIGH. Off = both low sides on.
+      GPIO_ACTIVE_HIGH. Off = both low sides on, both high sides off. Positive = high A + low B,
+      negative = high B + low A.
 
-  latch-gpios:
-    type: phandle-array
+  supplies:
+    type: phandles
     required: true
-    description: Channel-switch latch line. Active = high (latched).
-
-  supply-gpios:
-    type: phandle-array
-    required: true
-    description: Two enable lines for the stimulation supply (expander P2 and P3 on the suit).
+    description: |
+      Regulators that are enabled together to power the stimulation supply (at most four).
+      regulator-fixed nodes with an enable-gpios line are enough.
 
   switch:
     type: phandle
     required: true
-    description: The owo,switch-chain SPI device.
+    description: |
+      GPIO controller whose pins are the channel switch's control lines (ti,sn74hc595, ngpios = 32,
+      verify-readback if the chain's output is wired back to the SPI controller's MISO).
 
-  dac:
-    type: phandle
+  switch-routes:
+    type: array
     required: true
-    description: The amplitude DAC (lltc,ltc2634 or compatible DAC API device).
+    description: |
+      One 32-bit word per electrode channel (channel 0 first): the switch pins that are on for that
+      channel. The first byte shifted into the chain is bits 31..24.
 
   pwms:
     type: phandle-array
     required: true
-    description: PWM output that drives the boost converter (4 kHz in the stock firmware).
+    description: PWM output that drives the boost converter. The period sets the frequency.
+
+  boost-duty-percent:
+    type: int
+    default: 50
+    description: Duty cycle while the supply is on.
 
   io-channels:
     type: phandle-array
     required: true
-    description: ADC channel that senses the delivered output.
+    description: |
+      The "amplitude" DAC channel (output cell) and the "sense" ADC channel (a channel child node
+      of the ADC, with its resolution, gain and reference).
+
+  io-channel-names:
+    type: string-array
+    required: true
+    description: Must be "amplitude", "sense" in the order of io-channels.
+
+  amplitude-resolution:
+    type: int
+    default: 12
+    description: Resolution passed to the DAC channel setup.
+
+  amplitude-scale:
+    type: array
+    required: true
+    description: |
+      <num den>: DAC code = level * num / den. The stock firmware uses <0x12FED 0x9C4>
+      (about 31.1 codes per level on a 12 bit DAC).
+
+  max-level:
+    type: int
+    default: 126
+    description: Highest level the stage accepts (stock protocol range is 0..126).
+
+  sense-uv-per-level:
+    type: int
+    required: true
+    description: |
+      Microvolts at the ADC pin per level step: level = max(microvolts / this - sense-offset, 0).
+      The conversion from the raw sample to microvolts is Zephyr's (adc_raw_to_millivolts_dt: the
+      channel's resolution, gain and reference). The stock firmware (12 bit, 3.3 V reference)
+      corresponds to 19150.
+
+  sense-offset:
+    type: int
+    default: 0
+    description: Levels subtracted from the converted reading (stock firmware uses 3).

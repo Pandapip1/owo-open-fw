@@ -21,3 +21,14 @@ pub trait SpiDevice {
     /// Clock `tx` out and discard the reply.
     fn write(&mut self, tx: &[u8]) -> Result<(), Errno>;
 }
+
+/// A GPIO controller used as a parallel output port (e.g. a shift-register chain exposed as a GPIO
+/// controller). Pins are numbered from 0; `mask` selects pins, `value` gives their levels.
+pub trait GpioPort {
+    fn set_masked(&mut self, mask: u32, value: u32) -> Result<(), Errno>;
+}
+
+/// A switchable power source (Zephyr regulator).
+pub trait Switchable {
+    fn set(&mut self, on: bool) -> Result<(), Errno>;
+}

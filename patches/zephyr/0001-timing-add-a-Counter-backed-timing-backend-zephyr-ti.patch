@@ -1,0 +1,211 @@
+From b11ca15c59f2f77e52f1c8ca36e9f8bcc2c69197 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 06:20:09 +0000
+Subject: [PATCH 1/2] timing: add a Counter-backed timing backend
+ (zephyr,timing-counter)
+
+Implements the SoC timing hooks on top of any Counter device selected in
+devicetree: 64-bit timestamps extended from the counter's top interrupt (no need to
+read regularly), start/stop reference counted by the timing core, and optional
+PM state locks while the counter would otherwise stop in sleep.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PdMVRPYdkoKYyoN2UWrcnz
+---
+ subsys/timing/CMakeLists.txt   |   1 +
+ subsys/timing/Kconfig          |  31 ++++++++
+ subsys/timing/timing_counter.c | 137 +++++++++++++++++++++++++++++++++
+ 3 files changed, 169 insertions(+)
+ create mode 100644 subsys/timing/timing_counter.c
+
+diff --git a/subsys/timing/CMakeLists.txt b/subsys/timing/CMakeLists.txt
+index dae6521c2..05c15c567 100644
+--- a/subsys/timing/CMakeLists.txt
++++ b/subsys/timing/CMakeLists.txt
+@@ -4,3 +4,4 @@
+ zephyr_library()
+ 
+ zephyr_library_sources(timing.c)
++zephyr_library_sources_ifdef(CONFIG_TIMING_COUNTER timing_counter.c)
+diff --git a/subsys/timing/Kconfig b/subsys/timing/Kconfig
+index fa359d18c..ab18caed2 100644
+--- a/subsys/timing/Kconfig
++++ b/subsys/timing/Kconfig
+@@ -17,3 +17,34 @@ config TIMING_FUNCTIONS_NEED_AT_BOOT
+ 
+ 	  To be selected by kernel and other subsystems which need
+ 	  to use timing functions.
++
++DT_CHOSEN_ZEPHYR_TIMING_COUNTER := zephyr,timing-counter
++
++config TIMING_COUNTER
++	bool "Timing functions backed by a Counter device"
++	default y if $(dt_chosen_enabled,$(DT_CHOSEN_ZEPHYR_TIMING_COUNTER))
++	depends on $(dt_chosen_enabled,$(DT_CHOSEN_ZEPHYR_TIMING_COUNTER))
++	select COUNTER
++	select TIMING_FUNCTIONS
++	select SOC_HAS_TIMING_FUNCTIONS
++	help
++	  Implement the timing API (timing_counter_get(), timing_cycles_get(), timing_ns_get(), ...)
++	  on top of the Counter device chosen as "zephyr,timing-counter", for SoCs that have no
++	  timing backend of their own and where the CPU cycle counter is not suitable (it stops in
++	  sleep, and it only exists on some cores).
++
++	  The value returned by timing_counter_get() is 64 bits wide: the counter's wrap-around
++	  is counted from the counter driver's top-value interrupt, so nothing has to be read
++	  regularly to keep the timestamp correct. Time only advances between timing_start() and
++	  timing_stop() (reference counted); the counter is stopped while the timing API is idle.
++
++	  The chosen counter should be a free-running, preferably 32-bit, up-counting device.
++
++config TIMING_COUNTER_PM_LOCK
++	bool "Keep the SoC out of the sleep states in which the counter stops"
++	default y
++	depends on TIMING_COUNTER && PM
++	help
++	  While timing is started, lock the suspend-to-idle, standby, suspend-to-RAM and
++	  suspend-to-disk power states so that the chosen counter keeps counting. Disable this if the
++	  chosen counter is known to run in every sleep state (for example an RTC).
+diff --git a/subsys/timing/timing_counter.c b/subsys/timing/timing_counter.c
+new file mode 100644
+index 000000000..fa66b9d36
+--- /dev/null
++++ b/subsys/timing/timing_counter.c
+@@ -0,0 +1,137 @@
++/*
++ * Copyright (c) 2026 Contributors to the Zephyr Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/**
++ * @file
++ * @brief Timing functions backed by a Counter device ("zephyr,timing-counter" chosen node).
++ *
++ * The 32-bit hardware count is extended to 64 bits by counting the counter's wrap-arounds from
++ * its top-value callback, so the timestamp stays correct without anybody having to read it
++ * regularly. A read is lock-free and may be done from any context, including interrupts.
++ */
++
++#include <zephyr/device.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/drivers/counter.h>
++#include <zephyr/kernel.h>
++#include <zephyr/pm/policy.h>
++#include <zephyr/sys/atomic.h>
++#include <zephyr/sys/clock.h>
++#include <zephyr/timing/timing.h>
++
++static const struct device *const tc_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_timing_counter));
++
++/* Number of completed wrap-arounds. Written only by the top callback (an interrupt). */
++static volatile uint32_t wraps;
++static uint64_t span;      /* ticks per wrap (max top value + 1) */
++static uint32_t freq_hz;
++
++static void wrap_cb(const struct device *dev, void *user_data)
++{
++	ARG_UNUSED(dev);
++	ARG_UNUSED(user_data);
++	wraps++;
++}
++
++#if defined(CONFIG_TIMING_COUNTER_PM_LOCK)
++static const enum pm_state locked_states[] = {
++	PM_STATE_SUSPEND_TO_IDLE,
++	PM_STATE_STANDBY,
++	PM_STATE_SUSPEND_TO_RAM,
++	PM_STATE_SUSPEND_TO_DISK,
++};
++
++static void pm_lock(bool lock)
++{
++	for (size_t i = 0; i < ARRAY_SIZE(locked_states); i++) {
++		if (lock) {
++			pm_policy_state_lock_get(locked_states[i], PM_ALL_SUBSTATES);
++		} else {
++			pm_policy_state_lock_put(locked_states[i], PM_ALL_SUBSTATES);
++		}
++	}
++}
++#else
++static void pm_lock(bool lock)
++{
++	ARG_UNUSED(lock);
++}
++#endif
++
++void soc_timing_init(void)
++{
++	struct counter_top_cfg top = {
++		.ticks = counter_get_max_top_value(tc_dev),
++		.callback = wrap_cb,
++		.flags = 0,
++	};
++
++	__ASSERT(device_is_ready(tc_dev), "timing counter not ready");
++	span = (uint64_t)top.ticks + 1U;
++	freq_hz = counter_get_frequency(tc_dev);
++	__ASSERT(freq_hz != 0U, "timing counter has no frequency");
++	(void)counter_set_top_value(tc_dev, &top);
++}
++
++void soc_timing_start(void)
++{
++	pm_lock(true);
++	(void)counter_start(tc_dev);
++}
++
++void soc_timing_stop(void)
++{
++	(void)counter_stop(tc_dev);
++	pm_lock(false);
++}
++
++timing_t soc_timing_counter_get(void)
++{
++	uint32_t w1, w2, ticks;
++
++	do {
++		w1 = wraps;
++		(void)counter_get_value(tc_dev, &ticks);
++		/* The hardware may have wrapped while its interrupt has not run yet (interrupts locked
++		 * or a higher-priority interrupt): count that wrap here. A pending interrupt with a
++		 * small count means exactly that, as the top interrupt is the only one in use.
++		 */
++		if (counter_get_pending_int(tc_dev) != 0U && ticks < span / 2U) {
++			w2 = w1 + 1U;
++			return (uint64_t)w2 * span + ticks;
++		}
++		w2 = wraps;
++	} while (w1 != w2);
++
++	return (uint64_t)w1 * span + ticks;
++}
++
++uint64_t soc_timing_cycles_get(volatile timing_t *const start, volatile timing_t *const end)
++{
++	return *end - *start; /* 64 bit: no wrap handling needed */
++}
++
++uint64_t soc_timing_freq_get(void)
++{
++	return freq_hz;
++}
++
++uint64_t soc_timing_cycles_to_ns(uint64_t cycles)
++{
++	/* Split so that cycles * 1e9 cannot overflow 64 bits. */
++	return (cycles / freq_hz) * NSEC_PER_SEC +
++	       ((cycles % freq_hz) * NSEC_PER_SEC) / freq_hz;
++}
++
++uint64_t soc_timing_cycles_to_ns_avg(uint64_t cycles, uint32_t count)
++{
++	return soc_timing_cycles_to_ns(cycles) / count;
++}
++
++uint32_t soc_timing_freq_get_mhz(void)
++{
++	return (uint32_t)(freq_hz / 1000000U);
++}

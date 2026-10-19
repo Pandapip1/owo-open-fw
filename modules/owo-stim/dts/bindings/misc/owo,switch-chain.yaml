@@ -1,9 +1,0 @@
-# SPDX-License-Identifier: Apache-2.0
-description: |
-  OWO suit channel switch: four shift-register bytes with a separate latch input. The latch is
-  not a chip select (it is raised after shifting and held high while the read-back is clocked),
-  so it is described in the owo,suit-output node and this SPI device has no cs-gpios.
-
-compatible: "owo,switch-chain"
-
-include: spi-device.yaml

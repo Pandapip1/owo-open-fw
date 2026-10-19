@@ -61,19 +61,28 @@
 	};
 };
 
-/* Channel switch: USART0 as SPI mode 0, no chip select (the latch is a GPIO below). */
+/*
+ * Channel switch: a 32-bit shift-register chain as a stock GPIO controller. The chip select is the
+ * chain's latch (PC3, idle high = latched), which is exactly how ti,sn74hc595 uses it. The
+ * chain's output is wired back to MISO, so the driver verifies each write by read-back.
+ */
 &usart0 {
 	compatible = "silabs,usart-spi";
 	pinctrl-0 = <&suit_sw_spi>;
 	pinctrl-names = "default";
 	#address-cells = <1>;
 	#size-cells = <0>;
+	cs-gpios = <&gpioc 3 GPIO_ACTIVE_LOW>;
 	status = "okay";
 
 	suit_switch: switch@0 {
-		compatible = "owo,switch-chain";
+		compatible = "ti,sn74hc595";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
+		verify-readback;
 	};
 };
 
@@ -128,24 +137,63 @@
 	#size-cells = <0>;
 	status = "okay";
 
-	/* The explorer kit already has channel@0 (PB0); point it at the suit's PD3. */
+	/* The explorer kit already has channel@0 (PB0); point it at the suit's PD3. Gain 1, VDD
+	 * reference (3.3 V), 12 bit, like the stock firmware. */
 	channel@0 {
 		zephyr,input-positive = <IADC_INPUT_PD3>;
 	};
 };
 
+/* Supply enables behind the expander (P2, P3): plain regulators. */
 / {
+	suit_supply_a: suit-supply-a {
+		compatible = "regulator-fixed";
+		regulator-name = "suit-supply-a";
+		enable-gpios = <&suit_expander 2 GPIO_ACTIVE_HIGH>;
+	};
+
+	suit_supply_b: suit-supply-b {
+		compatible = "regulator-fixed";
+		regulator-name = "suit-supply-b";
+		enable-gpios = <&suit_expander 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	chosen {
+		/* Zephyr's timing API, backed by a hardware counter (see patches/zephyr). 32 MHz / 32. */
+		zephyr,timing-counter = &timer0_counter;
+	};
+
 	suit_output: suit-output {
 		compatible = "owo,suit-output";
 		/* PB0..PB3: high side A, high side B, low side A, low side B */
 		bridge-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>, <&gpiob 1 GPIO_ACTIVE_HIGH>,
 			       <&gpiob 2 GPIO_ACTIVE_HIGH>, <&gpiob 3 GPIO_ACTIVE_HIGH>;
-		latch-gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;
-		/* Expander P2, P3 */
-		supply-gpios = <&suit_expander 2 GPIO_ACTIVE_HIGH>, <&suit_expander 3 GPIO_ACTIVE_HIGH>;
+		supplies = <&suit_supply_a>, <&suit_supply_b>;
 		switch = <&suit_switch>;
-		dac = <&suit_dac>;
+		/* One word per electrode channel 0..10 (stock table, recovered by emulation). */
+		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
+				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
 		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
-		io-channels = <&adc0 0>;
+		boost-duty-percent = <50>;
+		io-channels = <&suit_dac 15>, <&adc0 0>;
+		io-channel-names = "amplitude", "sense";
+		amplitude-resolution = <12>;
+		amplitude-scale = <0x12FED 0x9C4>;
+		max-level = <126>;
+		sense-uv-per-level = <19150>;
+		sense-offset = <3>;
 	};
+};
+
+/* The kit's LED PWM uses TIMER0; the suit needs it as the timing counter instead. */
+&timer0 {
+	clock-div = <32>;
+
+	timer0_counter: counter {
+		status = "okay";
+	};
+};
+
+&timer0_pwm {
+	status = "disabled";
 };

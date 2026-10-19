@@ -1,46 +1,56 @@
 use super::*;
-use crate::hw::{Bridge, Hw, HwError};
+use crate::hw::{Bridge, Hw, HwError, Sample};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Ev {
     Bridge(Bridge),
     Dac(u8),
     Select(Option<u8>),
-    Sense,
     Supply(bool),
-    Delay(u32),
-    CritIn,
-    CritOut,
 }
 
+/// Virtual-time model of the output stage: the clock advances only through `delay_us`, and a
+/// free-running sampler produces a conversion every `period` us while the supply is on. A
+/// conversion reports the commanded level if the bridge was closed when it completed.
 struct Mock {
     ev: Vec<Ev>,
+    clock: u64,
+    /// (time, bridge) history, to evaluate what a past conversion saw.
+    bridge_log: Vec<(u64, Bridge)>,
+    sampler_from: Option<u64>,
+    period: u64,
+    /// After this clock value the sampler stops producing conversions (ADC/interrupt stalled).
+    sampler_dies_at: Option<u64>,
+    /// Never produce a first conversion.
+    no_samples: bool,
     sense_gain: f32,
-    sense_fixed: Option<u16>,
-    sense_after: Option<(usize, u16)>,
-    sense_calls: usize,
+    /// Conversions completing at or after this clock value read this instead.
+    over_from: Option<(u64, u16)>,
+    /// Added to the next delay while the bridge is closed (a preempting interrupt).
+    stall_energised: u32,
     fail_select: bool,
     fail_bridge_on: Option<Bridge>,
     cur_dac: u8,
-    in_crit: bool,
-    crit_us: u32,
-    max_crit_us: u32,
+    energised_us: u64,
 }
 
 impl Mock {
     fn new() -> Mock {
         Mock {
             ev: vec![],
+            clock: 0,
+            bridge_log: vec![(0, Bridge::Off)],
+            sampler_from: None,
+            period: 60,
+            sampler_dies_at: None,
+            no_samples: false,
             sense_gain: 1.0,
-            sense_fixed: None,
-            sense_after: None,
-            sense_calls: 0,
+            over_from: None,
+            stall_energised: 0,
             fail_select: false,
             fail_bridge_on: None,
             cur_dac: 0,
-            in_crit: false,
-            crit_us: 0,
-            max_crit_us: 0,
+            energised_us: 0,
         }
     }
     fn bridge_trace(&self) -> Vec<Bridge> {
@@ -49,6 +59,24 @@ impl Mock {
             .filter_map(|e| if let Ev::Bridge(b) = e { Some(*b) } else { None })
             .collect()
     }
+    fn bridge_at(&self, t: u64) -> Bridge {
+        self.bridge_log.iter().rev().find(|(at, _)| *at <= t).map(|(_, b)| *b).unwrap()
+    }
+    fn set_bridge(&mut self, b: Bridge) {
+        self.bridge_log.push((self.clock, b));
+    }
+    fn conversion_at(&self, t: u64) -> u16 {
+        if let Some((from, v)) = self.over_from {
+            if t >= from {
+                return v;
+            }
+        }
+        if self.bridge_at(t) == Bridge::Off {
+            0
+        } else {
+            (self.cur_dac as f32 * self.sense_gain) as u16
+        }
+    }
 }
 
 impl Hw for Mock {
@@ -56,9 +84,11 @@ impl Hw for Mock {
         if self.fail_bridge_on == Some(s) {
             // A real driver must leave the bridge off when it reports an error.
             self.ev.push(Ev::Bridge(Bridge::Off));
+            self.set_bridge(Bridge::Off);
             return Err(HwError::Bus);
         }
         self.ev.push(Ev::Bridge(s));
+        self.set_bridge(s);
         Ok(())
     }
     fn dac_level(&mut self, l: u8) -> Result<(), HwError> {
@@ -73,35 +103,33 @@ impl Hw for Mock {
         }
         Ok(())
     }
-    fn sense(&mut self) -> Result<u16, HwError> {
-        self.ev.push(Ev::Sense);
-        self.sense_calls += 1;
-        if let Some((n, v)) = self.sense_after {
-            if self.sense_calls >= n {
-                return Ok(v);
-            }
-        }
-        Ok(self.sense_fixed.unwrap_or((self.cur_dac as f32 * self.sense_gain) as u16))
-    }
     fn supply(&mut self, on: bool) -> Result<(), HwError> {
         self.ev.push(Ev::Supply(on));
+        self.sampler_from = if on { Some(self.clock) } else { None };
         Ok(())
     }
-    fn delay_us(&mut self, us: u32) {
-        self.ev.push(Ev::Delay(us));
-        if self.in_crit {
-            self.crit_us += us;
-            self.max_crit_us = self.max_crit_us.max(self.crit_us);
-        }
+    fn now_us(&mut self) -> u64 {
+        self.clock
     }
-    fn critical<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        self.ev.push(Ev::CritIn);
-        self.in_crit = true;
-        self.crit_us = 0;
-        let r = f(self);
-        self.in_crit = false;
-        self.ev.push(Ev::CritOut);
-        r
+    fn sense_latest(&mut self) -> Option<Sample> {
+        let from = self.sampler_from?;
+        if self.no_samples {
+            return None;
+        }
+        let upto = self.sampler_dies_at.map_or(self.clock, |d| d.min(self.clock));
+        if upto < from + self.period {
+            return None;
+        }
+        let at = from + (upto - from) / self.period * self.period;
+        Some(Sample { value: self.conversion_at(at), at_us: at })
+    }
+    fn delay_us(&mut self, us: u32) {
+        let live = self.bridge_at(self.clock) != Bridge::Off;
+        let step = us as u64 + if live { core::mem::take(&mut self.stall_energised) as u64 } else { 0 };
+        if live {
+            self.energised_us += step;
+        }
+        self.clock += step;
     }
 }
 
@@ -158,33 +186,62 @@ fn level_clamped_to_hard_ceiling() {
 }
 
 #[test]
-fn widths_and_gaps_clamped_and_critical_section_bounded() {
+fn widths_and_gaps_clamped_and_energised_time_bounded() {
     let (mut s, mut m) = armed();
     let c = PulseCmd { channel: 1, level: 20, width_us: 5000, gap_us: 5000 };
     s.fire(&mut m, T0, &c);
-    assert!(m.max_crit_us <= 2 * 400 + 200, "critical section {} us", m.max_crit_us);
-    assert!(m.max_crit_us >= 2 * 400);
+    // 2 phases of max_phase (400), plus up to one poll step of quantisation each.
+    assert!(m.energised_us >= 2 * 400, "{}", m.energised_us);
+    assert!(m.energised_us <= 2 * (400 + 10), "{}", m.energised_us);
 }
 
 #[test]
-fn bridge_only_energised_inside_critical_section() {
+fn bridge_never_closes_without_a_first_conversion() {
+    let (mut s, mut m) = armed();
+    m.no_samples = true;
+    let o = s.fire(&mut m, T0, &cmd(0, 20));
+    assert_eq!(o, Outcome::Faulted(Fault::SenseTimeout));
+    let t = m.bridge_trace();
+    assert!(!t.contains(&Bridge::Positive) && !t.contains(&Bridge::Negative));
+    assert!(m.clock <= 3_100, "waited {} us", m.clock);
+}
+
+#[test]
+fn stalled_sampler_ends_the_phase() {
+    let mut s = Stimulator::new(Config { sense_max_age_us: 100, ..cfg() });
+    s.feed(T0, 60_000_000);
+    let mut m = Mock::new();
+    m.sampler_dies_at = Some(100); // last conversion at ~60, then silence
+    let o = s.fire(&mut m, T0, &cmd(0, 20));
+    assert!(matches!(o, Outcome::Faulted(Fault::StaleSense { .. })), "{o:?}");
+    assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
+    assert!(!m.bridge_trace().contains(&Bridge::Negative));
+}
+
+#[test]
+fn preempted_phase_is_an_overrun_fault() {
+    let (mut s, mut m) = armed();
+    m.stall_energised = 400;
+    let o = s.fire(&mut m, T0, &cmd(0, 20));
+    assert!(matches!(o, Outcome::Faulted(Fault::PhaseOverrun { .. })), "{o:?}");
+    assert!(s.channel_latched(0));
+    assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
+}
+
+#[test]
+fn bridge_closes_only_after_a_fresh_conversion_exists() {
     let (mut s, mut m) = armed();
     s.fire(&mut m, T0, &cmd(0, 20));
-    let mut inside = false;
-    for e in &m.ev {
-        match e {
-            Ev::CritIn => inside = true,
-            Ev::CritOut => inside = false,
-            Ev::Bridge(Bridge::Positive | Bridge::Negative) => assert!(inside),
-            _ => {}
-        }
-    }
+    let log = &m.bridge_log;
+    // first closure no earlier than the first conversion (60 us after the supply came on)
+    let first = log.iter().find(|(_, b)| *b == Bridge::Positive).unwrap().0;
+    assert!(first >= 60);
 }
 
 #[test]
 fn overdrive_trips_immediately_and_latches_channel() {
     let (mut s, mut m) = armed();
-    m.sense_fixed = Some(60); // far above 20 + 8
+    m.over_from = Some((0, 60)); // far above 20 + 8
     let o = s.fire(&mut m, T0, &cmd(2, 20));
     assert!(matches!(o, Outcome::Faulted(Fault::Overdrive { measured: 60, commanded: 20 })));
     assert!(!m.bridge_trace().contains(&Bridge::Negative));
@@ -194,7 +251,7 @@ fn overdrive_trips_immediately_and_latches_channel() {
     assert_eq!(s.fire(&mut m, T0 + 1_000_000, &cmd(2, 20)), Outcome::Skipped(Skip::ChannelLatched));
     s.reset();
     s.feed(T0 + 1_000_001, 60_000_000);
-    m.sense_fixed = None;
+    m.over_from = None;
     assert!(matches!(s.fire(&mut m, T0 + 2_000_000, &cmd(2, 20)), Outcome::Fired { .. }));
 }
 
@@ -221,7 +278,7 @@ fn bridge_error_mid_pulse_ends_with_everything_off() {
 #[test]
 fn lockout_after_repeated_faults_and_reset_clears() {
     let (mut s, mut m) = armed();
-    m.sense_fixed = Some(100);
+    m.over_from = Some((0, 100));
     for ch in 0..3u8 {
         let _ = s.fire(&mut m, T0 + ch as u64 * 1_000_000, &cmd(ch, 20));
     }
@@ -312,7 +369,7 @@ fn duty_budget_limits_sustained_rate_per_channel() {
 #[test]
 fn open_circuit_is_reported_not_faulted() {
     let (mut s, mut m) = armed();
-    m.sense_fixed = Some(0);
+    m.sense_gain = 0.0;
     let o = s.fire(&mut m, T0, &cmd(0, 30));
     assert_eq!(o, Outcome::Fired { measured: 0, open_circuit: true });
     assert!(!s.channel_latched(0));
@@ -335,19 +392,11 @@ fn release_leaves_everything_off_but_armed() {
 }
 
 #[test]
-fn overdrive_seen_only_at_mid_phase_still_trips_before_negative_phase() {
+fn overdrive_appearing_mid_phase_trips_before_negative_phase() {
     let (mut s, mut m) = armed();
-    m.sense_after = Some((2, 70)); // early sample fine, mid sample way over
+    m.over_from = Some((120, 70)); // fine at first, way over once the phase is under way
     let o = s.fire(&mut m, T0, &cmd(1, 20));
     assert!(matches!(o, Outcome::Faulted(Fault::Overdrive { measured: 70, .. })), "{o:?}");
     assert!(!m.bridge_trace().contains(&Bridge::Negative));
-    assert_eq!(m.sense_calls, 2);
     assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
-}
-
-#[test]
-fn two_samples_per_pulse_at_settle_and_mid() {
-    let (mut s, mut m) = armed();
-    s.fire(&mut m, T0, &cmd(0, 20));
-    assert_eq!(m.sense_calls, 2);
 }
