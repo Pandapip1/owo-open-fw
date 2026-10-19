@@ -57,6 +57,8 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
  * that declared allocation real even when OpenISA hands us a short PDU.
  */
 static uint8_t MALIGN(4) efr32_tx_fifo[512];
+/* RAIL configures the RX BUFC channel as a 512-byte power-of-two FIFO too. */
+static uint8_t MALIGN(4) efr32_rx_fifo[512];
 
 #define BLE_CCM_MIC_SIZE 4U
 #define BLE_CCM_NONCE_SIZE 13U
@@ -95,13 +97,16 @@ static uint8_t MALIGN(4) efr32_tx_fifo[512];
 
 #define EFR32_BUFC_BASE 0xBA000000UL
 #define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
+#define EFR32_BUFC_RX_BASE_OFFSET 0x04CU
 #define EFR32_BUFC_CFG_OFFSET 0x000U
 #define EFR32_BUFC_ADDR_OFFSET 0x004U
 #define EFR32_BUFC_WRITEOFFSET 0x008U
+#define EFR32_BUFC_THRESHOLD_OFFSET 0x024U
 #define EFR32_BUFC_CMD_OFFSET 0x028U
 #define EFR32_BUFC_CMD_CLEAR 1U
 #define EFR32_BUFC_CMD_PREFETCH 2U
 #define EFR32_BUFC_FIFO_512_CONFIG 3U
+#define EFR32_BUFC_RX_THRESHOLD 0x0FFFU
 
 #define EFR32_RADIO_EN_OFFSET 0x004U
 
@@ -522,11 +527,27 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 	EFR32_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
 }
 
-/* [regs-partial] BUFC RX setup and FRC handoff remain unproven (T5/T6). */
+/*
+ * [regs-partial] Configure only the source-backed BUFC RX staging FIFO.
+ * FRC's delivery of a received packet to this FIFO remains unproven (T5).
+ */
 void radio_pkt_rx_set(void *rx_packet)
 {
+	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
+
 	ARG_UNUSED(rx_packet);
-	EFR32_RADIO_TODO("regs-partial: BUFC layout is known (T6, [F]); FRC descriptors th");
+	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
+
+	/*
+	 * RAIL's RX FIFO helper configures channel 1 in this exact order: CLEAR,
+	 * capacity encoding, backing address, and threshold control. Unlike TX,
+	 * its helper does not issue PREFETCH. Keep the caller buffer untouched
+	 * until the unproven FRC packet handoff can be implemented.
+	 */
+	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_rx_fifo;
+	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
 }
 
 /*
