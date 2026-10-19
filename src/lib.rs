@@ -6,6 +6,7 @@
 mod ble;
 mod hal;
 mod ota;
+mod wdt;
 
 use log::{error, info};
 use owo_core::engine::{Engine, Next, LEVEL_CAP};
@@ -156,9 +157,13 @@ extern "C" fn rust_main() {
     }
     info!("pairing passkey for serial '{}': {:06}", SERIAL, passkey());
 
+    wdt::start();
+
     // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
-    // queued, sleep until a GATT write gives the semaphore. No periodic timer.
+    // queued, sleep until a GATT write gives the semaphore, but never longer than the watchdog
+    // feed interval (src/wdt.rs).
     loop {
+        wdt::feed();
         ota::reboot_if_requested();
         let (wake, poll) = {
             let mut s = STATE.lock().unwrap();
@@ -184,6 +189,8 @@ extern "C" fn rust_main() {
             (None, Some(p)) => Some(now_us() + p),
             (None, None) => None,
         };
+        // The watchdog counts while the CPU idles in EM1, so never sleep past its feed interval.
+        let until = wdt::cap_sleep(until, now_us());
         match until {
             None => {
                 let _ = WAKE.take(Forever);

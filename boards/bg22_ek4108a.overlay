@@ -39,6 +39,14 @@
  * signature 0xF00F = valid (btl_reset_info.h). Zephyr's boot-mode retention writes its prefix
  * and then one mode byte, so the prefix is those four bytes (little endian).
  */
+/*
+ * Hardware watchdog. Zephyr's wdt_gecko driver (silabs,gecko-wdog) is selected for Series 2
+ * (drivers/watchdog/Kconfig.gecko); it uses the 1 kHz ULFRCO. Fed from the pump (src/wdt.rs).
+ */
+&wdog0 {
+	status = "okay";
+};
+
 &sram0 {
 	reg = <0x20000008 (DT_SIZE_K(32) - 8)>;
 };
@@ -64,5 +72,9 @@
 
 	chosen {
 		zephyr,boot-mode = &boot_mode0;
+	};
+
+	aliases {
+		watchdog0 = &wdog0;
 	};
 };

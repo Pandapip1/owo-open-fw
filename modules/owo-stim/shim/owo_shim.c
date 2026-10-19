@@ -16,6 +16,7 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/watchdog.h>
 #include <zephyr/timing/timing.h>
 
 int owo_gpio_configure(const void *g, int active)
@@ -304,4 +305,48 @@ const uint32_t *owo_suit_switch_routes(void)
 	return NULL;
 }
 
+#endif
+
+/*
+ * Hardware watchdog (devicetree alias "watchdog0"). Started once with a reset-the-SoC
+ * timeout; paused in EM2/EM3 (WDT_OPT_PAUSE_IN_SLEEP) so long sleeps are safe, but it keeps
+ * counting while the CPU idles in EM1, so the caller must feed it at least every timeout.
+ */
+#if DT_HAS_ALIAS(watchdog0) && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(watchdog0))
+static const struct device *const wdt_dev = DEVICE_DT_GET(DT_ALIAS(watchdog0));
+static int wdt_channel = -1;
+
+int owo_wdt_start(uint32_t timeout_ms)
+{
+	struct wdt_timeout_cfg cfg = {
+		.window = {.min = 0, .max = timeout_ms},
+		.flags = WDT_FLAG_RESET_SOC,
+	};
+	int ch;
+
+	if (!device_is_ready(wdt_dev)) {
+		return -ENODEV;
+	}
+	ch = wdt_install_timeout(wdt_dev, &cfg);
+	if (ch < 0) {
+		return ch;
+	}
+	wdt_channel = ch;
+	return wdt_setup(wdt_dev, WDT_OPT_PAUSE_IN_SLEEP);
+}
+
+int owo_wdt_feed(void)
+{
+	return wdt_channel < 0 ? -ENODEV : wdt_feed(wdt_dev, wdt_channel);
+}
+#else
+int owo_wdt_start(uint32_t timeout_ms)
+{
+	return -ENODEV;
+}
+
+int owo_wdt_feed(void)
+{
+	return -ENODEV;
+}
 #endif
