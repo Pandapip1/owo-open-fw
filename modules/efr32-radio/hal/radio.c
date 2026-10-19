@@ -92,6 +92,137 @@ static inline volatile uint32_t *radio_reg32(uintptr_t address)
 	return (volatile uint32_t *)address;
 }
 
+/*
+ * The public RAIL configurator uses this compact, address-independent format
+ * for radio tables. Do not put SEQ.PHYINFO records here: their data words are
+ * pointers into the vendor image and are not portable to this firmware.
+ */
+#define EFR32_RADIO_TABLE_END 0xFFFFFFFFU
+#define EFR32_RADIO_TABLE_OP_WRITE 0U
+#define EFR32_RADIO_TABLE_OP_AND 1U
+#define EFR32_RADIO_TABLE_OP_OR 3U
+
+/*
+ * Public xG22 BLE viterbi 1M configuration, copied as table operations rather
+ * than as a vendor-addressed PHYINFO record. Source: the Zlib-licensed
+ * ble_efr32xg22_configurator_out.c arrays at lines 225-319 and 474-534 in
+ * the sibling Simplicity SDK checkout. radio_aa_set(), radio_crc_configure(),
+ * and radio_whiten_iv_set() deliberately replace its dynamic defaults later.
+ */
+static const uint32_t efr32_ble_1m_base_table[] = {
+	0x0001400CU, 0x00018101U, /* FRC.DFLCTRL */
+	0x00024020U, 0x00000000U, 0x00000001U, /* FRC.WCNTCMP0..1 */
+	0x00034030U, 0x00000000U, 0x00000000U, 0x00000000U, /* FRC.WHITE* */
+	0x00024040U, 0x00000000U, 0x00004000U, /* FRC RAM addresses */
+	0x00014060U, 0x00000101U, /* FRC.PUNCTCTRL */
+	0x000140A8U, 0x00000007U, /* FRC.AUTOCG */
+	0x000440BCU, 0x00000000U, 0x00000000U, 0x00000000U, 0x00000000U,
+	0x00034108U, 0x00004CFFU, 0x00004DFFU, 0x00004DFFU, /* FRC.FCD1..3 */
+	0x1001C020U, 0x0007F800U, 0x3001C020U, 0x000802F5U, /* AGC.CTRL0 */
+	0x1001C024U, 0x000000FFU, 0x3001C024U, 0x00001300U, /* AGC.CTRL1 */
+	0x0007C028U, 0x83B380ECU, 0x51407543U, 0x48000FA0U, 0x00004030U,
+		0x00000000U, 0x00000000U, 0x0000022EU, /* AGC.CTRL2..MANGAIN */
+	0x0004C050U, 0x04301151U, 0xE6092D0EU, 0x08070654U, 0x0002B6D1U,
+	0x000AC064U, 0x1C003004U, 0x09183040U, 0x2079640DU, 0x01FBFCEBU,
+		0x03E8F67FU, 0x15724BBDU, 0x0518A311U, 0x76543210U,
+		0x00000A98U, 0x00000000U, /* AGC.GAINRANGE..LBT */
+	0x01010008U, 0x00000708U, /* RFCRC.CTRL */
+	0x01010018U, 0x00AAAAAAU, /* RFCRC.INIT */
+	0x01010020U, 0x00DA6000U, /* RFCRC.POLY */
+	0x0101401CU, 0x00000010U, /* MODEM.MIXCTRL */
+	0x0103402CU, 0x00008000U, 0x03000000U, 0x00000000U, /* MODEM.CTRL3..5 */
+	0x01024068U, 0x71764129U, 0x00000000U, /* MODEM.SYNC0..1 */
+	0x010240BCU, 0x00000000U, 0x00000000U, /* MODEM.SHAPING10..11 */
+	0x010240E0U, 0x00000033U, 0x00000000U, /* MODEM.DCCOMP* */
+	0x010240F4U, 0x07830464U, 0x3AC81388U, /* MODEM.DSATHD0..1 */
+	0x01014124U, 0x00000000U, /* MODEM.AUTOCG */
+	0x01024130U, 0x0C660664U, 0x0000010CU, /* MODEM.DSATHD2, DIRECTMODE */
+	0x01014154U, 0x00000101U, /* MODEM.LRFRC */
+	0x01024168U, 0x07830464U, 0x00821388U, /* MODEM.DSATHD3..4 */
+	0x01014230U, 0x00000000U, /* MODEM.BLEIQDSA */
+	0x01024238U, 0x00000000U, 0x00000000U, /* MODEM.SYNCPROPERTIES, DIGIGAINCTRL */
+	0x01014244U, 0x00000000U, /* MODEM.PADEBUG */
+	0x01094254U, 0x00000000U, 0x003C0000U, 0x00000000U, 0x00000000U,
+		0x55555555U, 0x00000017U, 0x00000000U, 0x00000000U, 0x0006AAAAU,
+	0x0102427CU, 0x00000000U, 0x00000000U, /* MODEM.ANTDIVCTRL, BLEIQDSAEXT2 */
+	0x01018010U, 0x00000003U, /* SYNTH.CTRL */
+	0x0101803CU, 0x00000001U, /* SYNTH.DIVCTRL */
+	0x010280B0U, 0x02000300U, 0x01000037U, /* SYNTH.DSMCTRL* */
+	0x02020098U, 0x04000C00U, 0x0000004CU, /* RAC.SYNTHREGCTRL, VCOCTRL */
+	0x020100A4U, 0x00000400U, /* RAC.SYNTHCTRL */
+	0x020200D0U, 0xAA400005U, 0x00000188U, /* RAC.CLKMULTEN* */
+	0x020200F4U, 0x00000000U, 0x1108213DU, /* RAC.LNAMIX* */
+	0x120100FCU, 0x0000003FU, 0x320100FCU, 0x00045400U, /* RAC.LNAMIXTRIM1 */
+	0x02010130U, 0x02510060U, /* RAC.PGACTRL */
+	0x02010168U, 0x00000400U, /* RAC.SYMMDCTRL */
+	EFR32_RADIO_TABLE_END,
+};
+
+static const uint32_t efr32_ble_1m_delta_table[] = {
+	/* The omitted first record is the non-portable SEQ.PHYINFO pointer. */
+	0x00014010U, 0x00004101U, /* FRC.MAXLENGTH */
+	0x0001403CU, 0x00000000U, /* FRC.FECCTRL */
+	0x00014048U, 0x000407A0U, /* FRC.CTRL */
+	0x00014050U, 0x00000000U, /* FRC.TRAILTXDATACTRL */
+	0x0001405CU, 0x00000000U, /* FRC.CONVGENERATOR */
+	0x00014104U, 0x00004CFFU, /* FRC.FCD0 */
+	0x01034020U, 0x86000000U, 0x0001C01FU, 0x00006000U, /* MODEM.CTRL0..2 */
+	0x01014038U, 0x40000000U, /* MODEM.CTRL6 */
+	0x01044058U, 0x00FF04C8U, 0x00000840U, 0x00000001U, 0x00040092U,
+	0x010F4080U, 0x020C008CU, 0x00000000U, 0x002203B6U, 0x00000000U,
+		0x00000000U, 0x0E050200U, 0x53432F1CU, 0x61686962U, 0x04324355U,
+		0x0E0E1016U, 0x080A0C0DU, 0x04050607U, 0x02020303U, 0x01010102U,
+		0x00010101U, /* MODEM.TIMING..SHAPING9 */
+	0x010140ECU, 0x8C2BE890U, /* MODEM.SRCCHF */
+	0x010340FCU, 0x000A2090U, 0x80585B05U, 0x4A413747U, /* MODEM.DSA* */
+	0x0103410CU, 0x005262F5U, 0x2949192AU, 0x40403B89U, /* MODEM.DIGMIX* */
+	0x01014128U, 0x0000DDFFU, /* MODEM.CGCLKSTOP */
+	0x01074138U, 0x00FA53E8U, 0x00000000U, 0x00000000U, 0x00000000U,
+		0x00000000U, 0x00000000U, 0x00000000U, /* MODEM.LONGRANGE* */
+	0x01014170U, 0x000003C1U, /* MODEM.VTBLETIMING */
+	0x01014234U, 0x0E000000U, /* MODEM.BLEIQDSAEXT1 */
+	0x01014248U, 0xC01EAA58U, /* MODEM.REALTIMCFE */
+	0x01014278U, 0x00000000U, /* MODEM.COCURRMODE */
+	0x01018038U, 0x00102555U, /* SYNTH.IFFREQ */
+	0x0103809CU, 0x00000000U, 0x00037870U, 0x000000D0U, /* SYNTH.LPFCTRL1* */
+	0x110180A8U, 0x000001F0U, 0x310180A8U, 0x01CB4205U, /* SYNTH.LPFCTRL2RX */
+	0x110180ACU, 0x000001F0U, 0x310180ACU, 0x00FD3E05U, /* SYNTH.LPFCTRL2TX */
+	0x020100E4U, 0x13512C6EU, /* RAC.IFADCTRIM0 */
+	0x02010154U, 0x00023FC4U, /* RAC.SYTRIM1 */
+	EFR32_RADIO_TABLE_END,
+};
+
+static void efr32_radio_table_apply(const uint32_t *table)
+{
+	for (size_t index = 0U; table[index] != EFR32_RADIO_TABLE_END;) {
+		uint32_t header = table[index++];
+		uint32_t operation = header >> 28;
+		uint32_t block = (header >> 24) & 0xFU;
+		uint32_t count = (header >> 16) & 0xFFU;
+		uintptr_t address = 0xA8000000UL + ((uintptr_t)block << 16) +
+			(header & 0xFFFFU);
+
+		LL_ASSERT(count != 0U);
+		for (uint32_t word = 0U; word < count; word++, address += sizeof(uint32_t)) {
+			uint32_t value = table[index++];
+
+			switch (operation) {
+			case EFR32_RADIO_TABLE_OP_WRITE:
+				*radio_reg32(address) = value;
+				break;
+			case EFR32_RADIO_TABLE_OP_AND:
+				*radio_reg32(address) &= value;
+				break;
+			case EFR32_RADIO_TABLE_OP_OR:
+				*radio_reg32(address) |= value;
+				break;
+			default:
+				LL_ASSERT(false);
+			}
+		}
+	}
+}
+
 static uint32_t bit_reverse24(uint32_t value)
 {
 	uint32_t reversed = 0U;
@@ -173,12 +304,21 @@ void radio_reset(void)
 	EFR32_RADIO_TODO("IRQ routing, block enables and reset sequence");
 }
 
-/* [regs-public] PHY table: sl_rail_ble_config.c modemConfig arrays are public, but the write opcode format and block bases are inferred (docs/radio-tables.md T3) */
+/* [regs-public] Address-independent BLE 1M table; PHYINFO remains intentionally excluded (T3). */
 void radio_phy_set(uint8_t phy, uint8_t flags)
 {
-	ARG_UNUSED(phy);
 	ARG_UNUSED(flags);
-	EFR32_RADIO_TODO("regs-public: PHY table");
+
+	switch (phy) {
+	case PHY_LEGACY:
+	case PHY_1M:
+		efr32_radio_table_apply(efr32_ble_1m_base_table);
+		efr32_radio_table_apply(efr32_ble_1m_delta_table);
+		break;
+	default:
+		EFR32_RADIO_TODO("regs-public: BLE 2M/coded PHY table");
+		break;
+	}
 }
 
 /* [regs] PA registers (rfhal_pa): unknown (T7) */
