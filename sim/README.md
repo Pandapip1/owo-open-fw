@@ -11,6 +11,21 @@
 * `sim/scripts/` — `mkflash.py` composes bootloader + app into a flash image,
   `run-qemu.sh` / `iter.sh` run it, `disasm_stock.py` disassembles the stock image.
 
+## Building and running the simulator
+
+Enter the project environment first:
+
+```sh
+nix develop
+mkdir -p build/qemu
+(cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp)
+ninja -C build/qemu qemu-system-arm
+```
+
+The build directory is deliberately retained as the incremental QEMU cache. The launcher uses
+`build/qemu/qemu-system-arm` by default; set `QEMU_BIN` only to run a different binary. It keeps
+runtime logs and the bridge socket under `build/qemu-runtime/`.
+
 ## Status
 * Stock 7.9.07 boots through the bootloader to its idle loop, feeds WDOG0 and leaves the
   H-bridge off (PB2/PB3 high), matching `docs/stock-stim-path.md`.

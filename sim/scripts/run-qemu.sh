@@ -4,6 +4,7 @@ set -eu
 #   env: FLASH=<image> SRV_ARGS=<server args>; server trace is in build/qemu-runtime/srv.log
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 QEMU_DIR="${QEMU_DIR:-$ROOT/vendor/qemu}"
+QEMU_BIN="${QEMU_BIN:-$ROOT/build/qemu/qemu-system-arm}"
 RUNTIME_DIR="${RUNTIME_DIR:-$ROOT/build/qemu-runtime}"
 mkdir -p "$RUNTIME_DIR"
 T=$1; shift
@@ -14,5 +15,5 @@ python3 "$QEMU_DIR/tools/efr32bg22/server.py" --flash "$FLASH" ${SRV_ARGS:---tra
 SP=$!
 trap 'kill "$SP" 2>/dev/null || true; rm -f "$SOCK"' EXIT
 sleep 1
-timeout "$T" "$QEMU_DIR/build/qemu-system-arm" -M efr32bg22,flash="$FLASH" -display none -monitor none \
+timeout "$T" "$QEMU_BIN" -M efr32bg22,flash="$FLASH" -display none -monitor none \
   -serial unix:"$SOCK",server=off -icount shift=5 -d guest_errors,int -D "$RUNTIME_DIR/qemu.log" "$@"
