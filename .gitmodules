@@ -1,0 +1,9 @@
+[submodule "vendor/qemu"]
+	path = vendor/qemu
+	url = https://gitlab.com/qemu-project/qemu.git
+[submodule "vendor/zephyr"]
+	path = vendor/zephyr
+	url = https://github.com/zephyrproject-rtos/zephyr.git
+[submodule "vendor/zephyr-lang-rust"]
+	path = vendor/zephyr-lang-rust
+	url = https://github.com/zephyrproject-rtos/zephyr-lang-rust.git
