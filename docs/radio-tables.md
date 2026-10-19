@@ -63,6 +63,8 @@ The RAIL archive narrows the `CMD=4` sequence without naming that bit. In `libra
 
 The same header places the four threshold flag/enable bits at `2`, `10`, `18`, and `26` (`efr32bg21_bufc.h:248-329,336-373`), rather than a compact four-bit bitmap. This is corroborated by the stock write `BUFC.IEN = 0x00050000` at `radio-trace.log:52-53`, which enables buffer-2 overflow and threshold positions. QEMU patch 0017 uses the public threshold positions; overflow, underflow, and corruption behavior remains unmodelled.
 
+The same public header defines every buffer's local `STATUS.THRESHOLDFLAG` at bit 20 (`efr32bg21_bufc.h:194-205`), while the corresponding global threshold flags remain sparse at `8*n+2`. QEMU patch 0020 derives that local status bit from the matching sparse global flag; its regression test uses buffer 1 specifically, so this cannot silently regress to a compact global-flag assumption.
+
 ## 4.1 RAC core [F]
 The public Simplicity SDK generated revB2 register model
 (`platform/radio/efr32_multiphy_configurator/host_py_rm_studio_internal/full/efr32xg22/revB2/RAC_S_{register,field}.py`)
