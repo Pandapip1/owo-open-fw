@@ -40,7 +40,7 @@ cargo test --manifest-path crates/owo-core/Cargo.toml      # protocol + schedule
 ./scripts/test-native-sim.sh                               # output stage on native_sim, no hardware (see tests/native-sim)
 cargo test --manifest-path modules/owo-stim/rust/Cargo.toml --workspace   # supervisor + part crates; or: nix flake check
 ```
-`flake.lock` is not included (see "Not validated"); `nix` creates it on first use.
+`flake.lock` is tracked and pins the development-shell inputs used by this project.
 `bg22_ek4108a` is a stand-in dev kit (EFR32BG22, the same family as the suit; the firmware's peripheral
 addresses and vector table match xG22). The suit's exact part number is unknown.
 
@@ -173,13 +173,6 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
   `west blobs fetch hal_silabs` was refused (HTTP 403) where this was built.
 - No on-air behaviour: pairing, attribute permissions, advertising, or whether the official apps
   accept it. Attribute handles differ from stock (apps look up by UUID).
-- `flake.lock` is omitted: GitHub tarball downloads were refused in the build environment, so the
-  flake was evaluated against local clones of nixpkgs, flake-parts and rust-overlay instead.
-  The nixpkgs default `gcc-arm-embedded` (15.3) segfaulted in that sandbox, so the flake pins
-  `gcc-arm-embedded-13`; even that exact package from the newer nixpkgs revision segfaulted there,
-  while the same version from an older revision ran, so the final build above used the older one.
-  I don't know whether that is the sandbox or the package; check `arm-none-eabi-gcc --version` in
-  your shell.
 - The `BINDGEN_EXTRA_CLANG_ARGS` workaround in `flake.nix` (skip GCC's `arm_acle.h`, which clang
   rejects) was needed with both toolchains tried; it is a workaround, not a fix.
 - **The output stage (`owo-suit`, the overlay and the Rust DAC driver) is unvalidated on hardware.** The overlay targets the stand-in explorer kit, not the suit's board; the SPI clock for the channel switch is the Zephyr USART driver's, not the stock bit rate. Open issues: expander P2/P3 and PA6 purpose; whether the SPI switch tolerates the slower bit-banged clock; sense calibration; the real pulse width (2x question); pin states between reset and `Suit::new`; whether `critical()` (PRIMASK off for <= ~0.5 ms) disturbs the BLE controller.
