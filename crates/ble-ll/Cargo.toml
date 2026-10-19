@@ -1,12 +1,12 @@
 [package]
-name = "owo-ble-ll"
+name = "ble-ll"
 version = "0.1.0"
 edition = "2021"
 description = "Hardware-agnostic Bluetooth LE link layer (peripheral role) for the open radio firmware: no_std, no allocation"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-name = "owo_ble_ll"
+name = "ble_ll"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "owo-ble-ll"
+name = "ble-ll"
 version = "0.1.0"

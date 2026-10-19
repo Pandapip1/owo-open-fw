@@ -1,10 +1,10 @@
 //! End-to-end behaviour of the peripheral driver against a scripted central and a mock radio.
 //! Timing numbers are checked against the formulas of Vol 6 Part B §4.2.2 / §4.5 (see conn.rs).
 
-use owo_ble_ll::conn::{EVENT_JITTER_US, UNIT_US};
-use owo_ble_ll::pdu::{AdvHeader, AdvType, DataHeader};
-use owo_ble_ll::peripheral::{Config, Notify, Peripheral, ADV_ACCESS_ADDRESS};
-use owo_ble_ll::radio::{Radio, RadioEvent, RxPacket, MAX_PDU, T_IFS_US};
+use ble_ll::conn::{EVENT_JITTER_US, UNIT_US};
+use ble_ll::pdu::{AdvHeader, AdvType, DataHeader};
+use ble_ll::peripheral::{Config, Notify, Peripheral, ADV_ACCESS_ADDRESS};
+use ble_ll::radio::{Radio, RadioEvent, RxPacket, MAX_PDU, T_IFS_US};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq)]

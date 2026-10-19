@@ -1,6 +1,6 @@
 # Open radio firmware: inventory, plan, status
 
-**Unvalidated on hardware. Nothing in this document or in `crates/owo-ble-ll` has run on a real radio or been seen on air. Any output stage built on it must be bench-tested on a dummy load first.**
+**Unvalidated on hardware. Nothing in this document or in `crates/ble-ll` has run on a real radio or been seen on air. Any output stage built on it must be bench-tested on a dummy load first.**
 
 Goal (user-confirmed): replace the Silicon Labs radio blobs on the EFR32BG22 with open code: an open BLE link layer, and eventually the radio sequencer firmware. This file records what was found, what is possible without undocumented hardware knowledge, and the order to do it in. Facts are tagged **[F]** (observed in a file or trace, source given), **[I]** (inferred), **[?]** (unknown).
 
@@ -36,7 +36,7 @@ Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, s
 |---|---|---|---|
 | Host | Zephyr, open | nothing | none |
 | HCI driver | `hci_silabs_efr32.c` over `sl_btctrl` | new driver over our controller | none |
-| Link layer | `liblinklayer.a` | `crates/owo-ble-ll` (started, §5) plus crypto, DLE/PHY procedures if wanted | none (timing budget aside) |
+| Link layer | `liblinklayer.a` | `crates/ble-ll` (started, §5) plus crypto, DLE/PHY procedures if wanted | none (timing budget aside) |
 | Radio driver (M33) | RAIL | `Radio` trait implementation | RAC/FRC/BUFC/MODEM/SYNTH/AGC/PROTIMER registers |
 | PHY configuration | `sl_rail_ble_config.c` tables (public) + RAIL calibration | same tables, applied by our driver; calibration routines | meaning of each register, calibration sequence |
 | Sequencer firmware | closed image in SEQRAM | open v6-M firmware | RAC state machine, mailbox, every register it touches |
@@ -50,7 +50,7 @@ BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one c
 
 | Stage | Work | Test that can run now / next |
 |---|---|---|
-| 0 **done** | `crates/owo-ble-ll`: CRC-24, whitening, CSA #1/#2, advertising/connect PDUs, data header, SN/NESN, LL control subset, window widening/transmit window timing, instants, supervision, HCI framing/event builders, `Peripheral<R: Radio>` driver | `cargo test` in the crate: 30 tests (§6) |
+| 0 **done** | `crates/ble-ll`: CRC-24, whitening, CSA #1/#2, advertising/connect PDUs, data header, SN/NESN, LL control subset, window widening/transmit window timing, instants, supervision, HCI framing/event builders, `Peripheral<R: Radio>` driver | `cargo test` in the crate: 30 tests (§6) |
 | 1 | `hci_owo_ll.c` replacing `hci_silabs_efr32.c`; HCI command layer for the commands Zephyr's host sends at init (list below); ACL ↔ `queue_data` flow control | native_sim: Zephyr host + our controller + a software central (the mock radio of `tests/peripheral.rs`, scripted by a second instance of the crate in central role or by pre-recorded PDUs) |
 | 2 | Encryption: LL_ENC_REQ/RSP, START_ENC, AES-CCM per Vol 6 Part B §5.1.3 | sample data from Core Spec Vol 6 Part C (encryption sample data) |
 | 3 | Radio driver v0 *on top of RAIL* (public API) implementing `Radio`; keeps the closed sequencer and RAIL, removes only `liblinklayer.a` | QEMU radio model (sibling task, `docs/radio-block.md`): compare the register traffic of our driver with the stock link layer's for "start advertising" |

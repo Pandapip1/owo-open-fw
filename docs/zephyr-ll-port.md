@@ -2,7 +2,7 @@
 
 **Unvalidated on hardware. Nothing here has transmitted or received a packet; the radio hooks are stubs.**
 Decision (user, task #27): use Zephyr's open split controller (`BT_LL_SW_SPLIT`, ULL/LLL) instead of
-`crates/owo-ble-ll` or the Silicon Labs `liblinklayer.a`. All paths are relative to the Zephyr tree used
+`crates/ble-ll` or the Silicon Labs `liblinklayer.a`. All paths are relative to the Zephyr tree used
 in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/` unless stated.
 
 ## 1. How the controller is built, and the seam
