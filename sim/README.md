@@ -25,9 +25,20 @@ The build directory is deliberately retained as the incremental QEMU cache. The 
 `build/qemu/qemu-system-arm` by default; set `QEMU_BIN` only to run a different binary. It writes
 QEMU's own transient runtime log under `build/qemu-runtime/`; remove that directory after inspection.
 
+For native RAC command diagnostics, enable QEMU's built-in trace event (not an external
+peripheral server):
+
+```sh
+build/qemu/qemu-system-arm -trace efr32bg22_rac_command,file=build/qemu-runtime/rac.trace ...
+```
+
+It records the written command word and resulting modeled RAC state. The trace file is
+transient and belongs under `build/qemu-runtime/`.
+
 ## Status
 * Stock 7.9.07 boots through the bootloader to its idle loop, feeds WDOG0 and leaves the
   H-bridge off (PB2/PB3 high), matching `docs/stock-stim-path.md`.
-* Radio blocks (0xA8000000..) are undocumented in the public SDK; they are plain register
-  files plus one inferred busy flag. BLE traffic cannot be simulated, so stimulation on the
-  stock firmware cannot yet be triggered from the outside.
+* Radio blocks have an in-process native register model with source- and trace-backed RAC,
+  BUFC, PROTIMER, FRC, MODEM, AGC, SYNTH, and RFCRC register handling. BLE packet traffic,
+  sequencer behavior, and air delivery remain unmodelled, so stock-firmware stimulation cannot
+  yet be triggered from the outside.
