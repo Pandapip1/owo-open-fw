@@ -52,6 +52,11 @@ static uint8_t MALIGN(4) pkt_empty[PDU_EM_LL_SIZE_MAX];
 /* Largest data PDU the controller can be configured to receive, plus MIC; or an advertising PDU. */
 static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_SIZE_MAX + 4,
 					 PDU_AC_LL_SIZE_MAX)];
+/*
+ * RAIL encodes a 512-byte BUFC TX FIFO as control value three. Staging keeps
+ * that declared allocation real even when OpenISA hands us a short PDU.
+ */
+static uint8_t MALIGN(4) efr32_tx_fifo[512];
 
 #define BLE_CCM_MIC_SIZE 4U
 #define BLE_CCM_NONCE_SIZE 13U
@@ -87,6 +92,16 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_RAC_CMD_TXEN (1U << 0)
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
+
+#define EFR32_BUFC_BASE 0xBA000000UL
+#define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
+#define EFR32_BUFC_CFG_OFFSET 0x000U
+#define EFR32_BUFC_ADDR_OFFSET 0x004U
+#define EFR32_BUFC_WRITEOFFSET 0x008U
+#define EFR32_BUFC_CMD_OFFSET 0x028U
+#define EFR32_BUFC_CMD_CLEAR 1U
+#define EFR32_BUFC_CMD_PREFETCH 2U
+#define EFR32_BUFC_FIFO_512_CONFIG 3U
 
 #define EFR32_RADIO_EN_OFFSET 0x004U
 
@@ -507,18 +522,37 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 	EFR32_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
 }
 
-/* [regs-partial] BUFC layout is known (T6, [F]); FRC descriptors that feed it are not (T5) */
+/* [regs-partial] BUFC RX setup and FRC handoff remain unproven (T5/T6). */
 void radio_pkt_rx_set(void *rx_packet)
 {
 	ARG_UNUSED(rx_packet);
 	EFR32_RADIO_TODO("regs-partial: BUFC layout is known (T6, [F]); FRC descriptors th");
 }
 
-/* [regs-partial] BUFC layout is known (T6, [F]); FRC descriptors that feed it are not (T5) */
+/*
+ * [regs-partial] Configure only the source-backed BUFC TX staging FIFO.
+ * FRC's consumption of that FIFO and sequencer handoff remain unproven (T5).
+ */
 void radio_pkt_tx_set(void *tx_packet)
 {
-	ARG_UNUSED(tx_packet);
-	EFR32_RADIO_TODO("regs-partial: BUFC layout is known (T6, [F]); FRC descriptors th");
+	const uint8_t *pdu = tx_packet;
+	uint32_t bytes = (uint32_t)pdu[1] + 2U;
+	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
+
+	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
+	LL_ASSERT(bytes <= sizeof(efr32_tx_fifo));
+	LL_ASSERT(((uintptr_t)efr32_tx_fifo & 3U) == 0U);
+	memcpy(efr32_tx_fifo, pdu, bytes);
+
+	/*
+	 * Exact RAIL SetTxFifo order for a 512-byte FIFO: CLEAR, configuration
+	 * value log2(512)-6, address, initial byte count, then PREFETCH.
+	 */
+	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_tx_fifo;
+	*radio_reg32(base + EFR32_BUFC_WRITEOFFSET) = bytes;
+	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_PREFETCH;
 }
 
 /* [software] software (no register access needed); not implemented yet */
