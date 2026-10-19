@@ -1,0 +1,66 @@
+# Reusable stimulation-output subsystem for EFR32xG22 EMS/haptic hardware.
+
+menuconfig OWO_STIM
+	bool "OWO stimulation output subsystem (xG22)"
+	depends on SOC_FAMILY_SILABS_S2
+	select SILABS_SISDK_GPIO
+	select SILABS_SISDK_TIMER
+	select SILABS_SISDK_IADC
+	select SILABS_SISDK_CLOCK_MANAGER
+	help
+	  Drives the DAC, channel switch, H-bridge, boost converter and feedback ADC
+	  found on the OWO suit, behind the safety supervisor in the owo-stim crate.
+	  The crate itself lives in rust/ and is used as a Cargo path dependency.
+
+if OWO_STIM
+
+config OWO_STIM_UNVALIDATED_HARDWARE
+	bool "I understand: this output driver has never run on hardware"
+	help
+	  The pin map and sequencing come from reverse engineering the stock firmware
+	  and have NOT been validated on a device. Leave this off to get a driver that
+	  never energises the output stage. Turn it on only for bench testing into a
+	  dummy load with a current-limited supply.
+
+config OWO_STIM_HARD_MAX_LEVEL
+	int "Hard ceiling on commanded level (0..126)"
+	default 40
+	range 0 126
+	help
+	  Enforced inside the driver regardless of what the protocol layer asks for.
+	  The stock firmware allows 126.
+
+config OWO_STIM_DEADMAN_MS
+	int "Stop stimulating if no frame arrives for this long (ms)"
+	default 1500
+	range 100 60000
+
+config OWO_STIM_MAX_PHASE_US
+	int "Longest permitted single phase (us)"
+	default 400
+	range 20 1000
+
+config OWO_STIM_SOFT_START_MS
+	int "Soft-start ramp after arming (ms)"
+	default 500
+	range 0 5000
+
+config OWO_STIM_MAX_DUTY_PERMILLE
+	int "Max average on-time per channel (permille)"
+	default 40
+	range 1 1000
+
+config OWO_STIM_WIDTH_SCALE_PERCENT
+	int "Scale applied to the protocol's pulse-width table (%)"
+	default 100
+	range 25 200
+	help
+	  Unit of the width table is unconfirmed. The stock sequencer ticks at 50 us and
+	  divides the table value by 25, which suggests 200 %. 100 % is the conservative choice.
+
+config OWO_STIM_FAULT_LOCKOUT
+	int "Faults before the whole output locks out until reset"
+	default 3
+	range 1 20
+
+endif # OWO_STIM

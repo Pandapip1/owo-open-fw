@@ -17,7 +17,7 @@ pub const LEVEL_CAP: u8 = 80;
 
 /// Spacing between channels inside one pulse period (unverified; the stock
 /// firmware's channel sequencing was not traced).
-pub const CHANNEL_STAGGER_US: u64 = 400;
+pub const CHANNEL_STAGGER_US: u64 = 1000;
 
 /// Frame timing fields are in 100 ms units.
 const UNITS_US: u64 = 100_000;

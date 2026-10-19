@@ -14,8 +14,10 @@ zephyr = "0.1.0"
 zephyr-panic = "0.1.0"
 log = "0.4.22"
 owo-core = { path = "crates/owo-core" }
+owo-stim = { path = "modules/owo-stim/rust", features = ["xg22"] }
 
 [build-dependencies]
+zephyr-build = "0.1.0"
 # Same version zephyr-sys uses.
 bindgen = { version = "0.72.1", features = ["experimental"] }
 

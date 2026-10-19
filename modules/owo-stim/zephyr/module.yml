@@ -1,0 +1,4 @@
+name: owo_stim
+build:
+  cmake: .
+  kconfig: Kconfig

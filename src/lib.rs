@@ -26,7 +26,7 @@ const SERIAL: &str = match option_env!("OWO_SERIAL") {
 pub(crate) struct State {
     engine: Engine,
     cfg: Config,
-    out: hal::DryRun,
+    out: hal::Output,
     /// Last-written values, returned on read (the stock firmware keeps them in RAM).
     pub v_widths: [u8; proto::WIDTHS_LEN],
     pub v_frame: [u8; proto::FRAME_LEN],
@@ -50,7 +50,7 @@ pub(crate) static STATE: Mutex<State> = Mutex::new(State {
         aux7: 0,
         aux8: 0,
     },
-    out: hal::DryRun::new(),
+    out: hal::Output::new(),
     v_widths: [0; proto::WIDTHS_LEN],
     v_frame: [0; proto::FRAME_LEN],
     v_power: [0; proto::POWER_LEN],
@@ -78,7 +78,9 @@ pub(crate) fn passkey() -> u32 {
 pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
     let f = Frame::parse(buf)?;
     let mut s = STATE.lock().unwrap();
-    s.engine.push(&f, now_us()).map_err(|_| proto::Error::Range)?; // queue full
+    let now = now_us();
+    s.out.frame_received(now, f.total as u64 * 100_000, f.first);
+    s.engine.push(&f, now).map_err(|_| proto::Error::Range)?; // queue full
     drop(s);
     WAKE.give();
     Ok(())
@@ -113,7 +115,10 @@ pub(crate) fn on_run(cmd: u8) -> Result<(), ()> {
         // Stock apps send 0x25 on connect; the stock firmware treats it as "ready"
         // and (per the app) answers on Extra 2. Record shape is from the app
         // decode, not verified on air.
-        run::START | run::RESTART => ble::notify_extra2(&[0, 0, 0, 1, 0, 0, 0, 0, 2, 0]),
+        run::START | run::RESTART => {
+            STATE.lock().unwrap().out.user_start(now_us());
+            ble::notify_extra2(&[0, 0, 0, 1, 0, 0, 0, 0, 2, 0])
+        }
         run::STATE9 => {}
         _ => return Err(()),
     }
@@ -145,17 +150,31 @@ extern "C" fn rust_main() {
     // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
     // queued, sleep until a GATT write gives the semaphore. No periodic timer.
     loop {
-        let wake = {
+        let (wake, poll) = {
             let mut s = STATE.lock().unwrap();
-            loop {
-                match s.engine.next(now_us()) {
-                    Next::Pulse(p) => s.out.pulse(&p),
+            let wake = loop {
+                let now = now_us();
+                match s.engine.next(now) {
+                    Next::Pulse(p) => s.out.pulse(&p, now),
                     Next::Wake(t) => break Some(t),
-                    Next::Idle => break None,
+                    Next::Idle => {
+                        s.out.idle();
+                        break None;
+                    }
                 }
-            }
+            };
+            s.out.poll(now_us());
+            (wake, s.out.poll_interval_us())
         };
-        match wake {
+        // Sleep until the next pulse, but never longer than the supervision interval while
+        // the output is armed (the dead-man must be able to fire without any BLE traffic).
+        let until = match (wake, poll) {
+            (Some(t), Some(p)) => Some(t.min(now_us() + p)),
+            (Some(t), None) => Some(t),
+            (None, Some(p)) => Some(now_us() + p),
+            (None, None) => None,
+        };
+        match until {
             None => {
                 let _ = WAKE.take(Forever);
             }

@@ -16,6 +16,9 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Make `CONFIG_*=y` Kconfig booleans usable as `#[cfg(CONFIG_...)]` in this crate.
+    zephyr_build::export_kconfig_bool_options();
+    println!("cargo::rustc-check-cfg=cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)");
     println!("cargo:rerun-if-env-changed=OWO_SERIAL");
     println!("cargo:rerun-if-changed=owo_wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");

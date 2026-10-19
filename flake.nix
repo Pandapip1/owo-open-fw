@@ -107,8 +107,9 @@
               # West wants the Zephyr tree; `west init -l . && west update` puts it next to this repo.
               echo "OWO open firmware dev shell"
               echo "  first time:  west init -l . && west update && west blobs fetch hal_silabs"
-              echo "  build:       west build -b xg24_dk2601b ."
+              echo "  build:       west build -b bg22_ek4108a ."
               echo "  host tests:  cargo test --manifest-path crates/owo-core/Cargo.toml"
+              echo "               cargo test --manifest-path modules/owo-stim/rust/Cargo.toml"
             '';
           };
 
@@ -118,6 +119,13 @@
             version = "0.1.0";
             src = ./crates/owo-core;
             cargoLock.lockFile = ./crates/owo-core/Cargo.lock;
+            doCheck = true;
+          };
+          checks.owo-stim = pkgs.rustPlatform.buildRustPackage {
+            pname = "owo-stim";
+            version = "0.1.0";
+            src = ./modules/owo-stim/rust;
+            cargoLock.lockFile = ./modules/owo-stim/rust/Cargo.lock;
             doCheck = true;
           };
         };
