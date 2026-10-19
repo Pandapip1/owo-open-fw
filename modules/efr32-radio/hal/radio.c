@@ -302,6 +302,10 @@ void radio_rx_enable(void)
 /* [regs-public] RAC.CMD.TXEN is a write-only command bit (T2). */
 void radio_tx_enable(void)
 {
+	/* Match the OpenISA radio contract: do not start a new TX while active. */
+	while (!radio_is_idle()) {
+	}
+
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
 
