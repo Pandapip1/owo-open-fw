@@ -61,9 +61,28 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 #define EFR32_SYNTH_CHCTRL_OFFSET 0x040U
 #define EFR32_SYNTH_CHCTRL_CHNO_MASK 0x3FU
 
+#define EFR32_RFCRC_BASE 0xA8010000UL
+#define EFR32_RFCRC_EN_OFFSET 0x004U
+#define EFR32_RFCRC_CTRL_OFFSET 0x008U
+#define EFR32_RFCRC_INIT_OFFSET 0x018U
+#define EFR32_RFCRC_POLY_OFFSET 0x020U
+#define EFR32_RFCRC_BLE_CTRL 0x00000708U
+
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
 	return (volatile uint32_t *)address;
+}
+
+static uint32_t bit_reverse24(uint32_t value)
+{
+	uint32_t reversed = 0U;
+
+	for (uint32_t bit = 0U; bit < 24U; bit++) {
+		reversed = (reversed << 1) | (value & 1U);
+		value >>= 1;
+	}
+
+	return reversed;
 }
 
 static struct {
@@ -293,12 +312,15 @@ uint32_t radio_is_idle(void)
 	return 0;
 }
 
-/* [regs] FRC/CRC/whitening/sync-word registers: unknown (T3, T5) */
+/* [regs-public] RFCRC values match BLE's 24-bit CRC after bit reversal (T5). */
 void radio_crc_configure(uint32_t polynomial, uint32_t iv)
 {
-	ARG_UNUSED(polynomial);
-	ARG_UNUSED(iv);
-	OWO_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
+	LL_ASSERT((polynomial & ~0x00FFFFFFU) == 0U);
+	LL_ASSERT((iv & ~0x00FFFFFFU) == 0U);
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_CTRL_OFFSET) = EFR32_RFCRC_BLE_CTRL;
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_INIT_OFFSET) = bit_reverse24(iv);
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_POLY_OFFSET) = bit_reverse24(polynomial);
 }
 
 /* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
