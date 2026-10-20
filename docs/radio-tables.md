@@ -421,6 +421,20 @@ BUFC hardware (possibly together with the sequencer) as the descriptor
 producer, while the observed CPU paths configure, select, hold, and release
 entries. It does not identify the producer's record encoding or time boundary.
 
+The channel distinction is source-backed rather than a modelling convention.
+The compatible public BUFC layout has its first buffer at `+0x00c` and a
+`0x40` stride (`efr32mg21_bufc.h:45-58`), placing channel 2 at `+0x08c` and
+its command/threshold registers at `+0x0b4/+0x0b0`. The initializer above
+therefore configures channel 2 as the descriptor ring. In contrast, the
+captured sequencer PIO target `0xAA000064` is channel 1 `WRITEDATA`
+(`+0x04c + 0x018`), the separate payload-byte FIFO. The vendor FRC handler
+routes BUFC bit 18 (`0x40000`) to the descriptor helper; the compatible public
+header names it `BUF2THR` (`efr32mg21_bufc.h:290-309`). It later clears only
+the sparse threshold positions `2,10,18,26` together. QEMU consequently
+keeps channel-1 payload storage and channel-2 descriptor-ring register latches
+separate, with a focused regression for the documented channel-2 setup; it
+does not fabricate hardware descriptor production.
+
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
 The OpenISA LLL supplies the API meaning and byte order that the archive alone does not: its advertising preparation creates `uint32_t aa = sys_cpu_to_le32(PDU_AC_ACCESS_ADDR)` at `lll_adv.c:321`, then calls `radio_aa_set((uint8_t *)&aa)` at `:359`; scan uses the same conversion at `lll_scan.c:127,170`. The reference OpenISA HAL treats its argument as the access address (`hal/RV32M1/radio/radio.c:687-704`). Together these public sources justify `radio_aa_set` writing the four supplied bytes, little-endian, to `MODEM.SYNC0`. The EFR32 HAL assembles the word byte-wise so that it does not impose an unadvertised alignment requirement on this byte-pointer API. This establishes only the configuration write; it does not establish when the sequencer consumes it or any sync/demodulation behavior.
