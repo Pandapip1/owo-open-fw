@@ -566,6 +566,19 @@ the RAIL non-secure `CTRL`/`CMD` path and observes `CTRL` through both windows.
 This preserves the observed alias behavior without claiming timer progression,
 compare, capture, IRQ, or command semantics.
 
+The archive also directly constrains the interrupt dispatch path. In
+`rfhal_protimer_shared.o`, `.text.PROTIMER_IRQHandler` has an
+`R_ARM_THM_JUMP24` relocation to `FRC_IRQHandler` (the member is in
+`librail_efr32xg22_gcc_release.a`, alongside `rfhal_protimer.o` whose member
+data begins at archive offset `0x3bf34`). That is a direct branch, not evidence
+for a particular expiry source or flag. The target handler reads and
+acknowledges `FRC.IF/IEN` at `0xB8018068/+0x06c`, then reads BUFC pending/enable
+at `0xBA000114/+0x118`, before processing radio state. Thus any eventual native
+PROTIMER event model must join the shared FRC-facing event path rather than
+invent a timer-only guest callback. It remains unknown which PROTIMER status
+condition, if any, produces which FRC-visible event, so QEMU deliberately does
+not yet synthesize an IRQ36 assertion or compare expiry from this fact.
+
 The public xG2x RAIL header documents `RAIL_TimerTick_t` as a counter whose
 tick is roughly 0.5 microseconds and whose wrap range is about 17 minutes
 (`rail_chip_specific.h:272-328`). The locally retained xG22 RAIL archive's
