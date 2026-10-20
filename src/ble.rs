@@ -554,10 +554,24 @@ unsafe extern "C" fn connected(conn: *mut bt_conn, err: u8) {
 
 unsafe extern "C" fn disconnected(_conn: *mut bt_conn, reason: u8) {
     info!("disconnected (0x{:02x})", reason);
+    if crate::resetting() {
+        return;
+    }
     // Never leave anything playing without a controller attached.
     crate::stop_all();
     if let Err(e) = adv_start() {
         warn!("adv restart failed ({})", e);
+    }
+}
+
+/// Stop Bluetooth before an intentional reset. Called from the pump, never a
+/// GATT callback. A failure is logged and the still-running watchdog bounds a
+/// controller/transport teardown that does not return.
+pub(crate) fn shutdown() {
+    // SAFETY: the pump calls this only after synchronous `bt_enable` succeeded.
+    let e = unsafe { bt_disable() };
+    if e != 0 {
+        warn!("Bluetooth shutdown failed ({})", e);
     }
 }
 

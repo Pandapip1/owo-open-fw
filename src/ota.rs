@@ -42,7 +42,18 @@ pub(crate) fn reboot_if_requested() {
             REQUESTED.store(false, Ordering::SeqCst);
             return;
         }
-        zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
+    }
+
+    // The ATT handler has returned by now. Keep the radio alive only for the
+    // response settling window, with output already de-energised; shutdown then
+    // runs in the pump's thread context. If Bluetooth teardown wedges, the
+    // watchdog remains armed and resets the SoC.
+    crate::prepare_reset();
+    zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
+    crate::ble::shutdown();
+
+    // SAFETY: reset preparation has put the output stage in its safe state.
+    unsafe {
         sys_reboot(REBOOT_COLD)
     }
 }

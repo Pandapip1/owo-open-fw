@@ -20,12 +20,25 @@ const TIMEOUT_MS: u32 = 2000;
 /// Feed at half the period at the latest.
 pub(crate) const FEED_EVERY_US: u64 = 1_000_000;
 
-pub(crate) fn start() {
+/// Start the watchdog and report whether it is actually supervising the SoC.
+///
+/// A real-output build treats a failure as fatal before the output stage is
+/// initialised; continuing without this last-resort containment would be unsafe.
+pub(crate) fn start() -> bool {
     // SAFETY: plain Zephyr calls through the C shim; called once from the main thread.
     match unsafe { owo_wdt_start(TIMEOUT_MS) } {
-        0 => info!("watchdog started ({} ms)", TIMEOUT_MS),
-        -19 => info!("no watchdog on this board"), // -ENODEV
-        e => error!("watchdog not started: {}", e),
+        0 => {
+            info!("watchdog started ({} ms)", TIMEOUT_MS);
+            true
+        }
+        -19 => {
+            info!("no watchdog on this board"); // -ENODEV
+            false
+        }
+        e => {
+            error!("watchdog not started: {}", e);
+            false
+        }
     }
 }
 

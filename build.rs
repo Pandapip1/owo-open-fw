@@ -60,6 +60,7 @@ fn main() {
     }
 
     for f in [
+        "bt_disable",
         "bt_conn_auth_cb_register",
         "bt_conn_cb_register",
         "bt_conn_set_security",

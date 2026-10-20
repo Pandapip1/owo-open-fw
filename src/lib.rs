@@ -70,6 +70,14 @@ static WAKE: Semaphore = Semaphore::new(0, 1);
 // initialized the output backend. It must be completely inert until then.
 static STIM_MONITOR_READY: AtomicBool = AtomicBool::new(false);
 
+// Once reset preparation starts, no callback may re-arm the supervisor or restart
+// advertising while the pump is tearing the system down.
+static RESETTING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn resetting() -> bool {
+    RESETTING.load(Ordering::Acquire)
+}
+
 fn now_us() -> u64 {
     // SAFETY: plain kernel query.
     let ticks = unsafe { zephyr::raw::k_uptime_ticks() } as u64;
@@ -103,6 +111,9 @@ pub(crate) fn passkey() -> u32 {
 // ---- application hooks called from the GATT layer -------------------------
 
 pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
+    if resetting() {
+        return Err(proto::Error::Range);
+    }
     let f = Frame::parse(buf)?;
     let mut s = STATE.lock().unwrap();
     let now = now_us();
@@ -137,6 +148,9 @@ pub(crate) fn on_widths(buf: &[u8]) -> Result<(), proto::Error> {
 
 /// `Err(())` for an unknown command.
 pub(crate) fn on_run(cmd: u8) -> Result<(), ()> {
+    if resetting() {
+        return Err(());
+    }
     match cmd {
         run::STOP | run::ABORT => stop_all(),
         // Stock apps send 0x25 on connect; the stock firmware treats it as "ready"
@@ -166,6 +180,32 @@ pub(crate) fn stop_all() {
     s.out.all_off();
 }
 
+/// Establish the application safety baseline after every reset, before starting services.
+///
+/// This is deliberately separate from an operational Stop: a reset can leave external output
+/// components powered while the MCU is only just becoming able to control them.  `init` puts the
+/// backend's pins/peripherals in their known state, and the immediately following `all_off` runs
+/// the normal, ordered bridge/DAC/routing/supply shutdown as well.  Keep this before BLE startup
+/// (and before the watchdog is armed) so no normal service can accept work first.
+fn early_boot_baseline() {
+    let mut s = STATE.lock().unwrap();
+    s.engine.stop();
+    s.out.init();
+    s.out.all_off();
+}
+
+/// Quiesce the application before an intentional reset.
+///
+/// This is deliberately called only by the pump: regulator, GPIO, and Bluetooth
+/// teardown may sleep, so neither a GATT callback nor the safety-monitor thread
+/// is a suitable context. A monitor poll already in progress shares `STATE` and
+/// must finish its bounded critical section before this obtains the lock.
+pub(crate) fn prepare_reset() {
+    RESETTING.store(true, Ordering::Release);
+    STIM_MONITOR_READY.store(false, Ordering::Release);
+    stop_all();
+}
+
 // ---- entry point -----------------------------------------------------------
 
 #[no_mangle]
@@ -174,7 +214,21 @@ extern "C" fn rust_main() {
     unsafe {
         zephyr::set_logger().unwrap();
     }
-    STATE.lock().unwrap().out.init();
+    // Start containment before the hardware backend obtains any live handles.
+    // Dry-run/native builds may legitimately have no watchdog, but real output
+    // must never be initialised without one.
+    let watchdog_running = wdt::start();
+    #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+    if !watchdog_running {
+        error!("real stimulation disabled: watchdog is unavailable");
+        return;
+    }
+    #[cfg(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE))]
+    let _ = watchdog_running;
+
+    // Every application start, including a watchdog or cold reboot, begins by actively driving
+    // the output stage to its safe state before enabling any service that could receive work.
+    early_boot_baseline();
     // The statically-created monitor may now take the same mutex as the pump.
     STIM_MONITOR_READY.store(true, Ordering::Release);
 
@@ -183,8 +237,6 @@ extern "C" fn rust_main() {
         return;
     }
     info!("pairing passkey for serial '{}': {:06}", SERIAL, passkey());
-
-    wdt::start();
 
     // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
     // queued, sleep until a GATT write gives the semaphore, but never longer than the watchdog

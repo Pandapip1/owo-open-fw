@@ -282,6 +282,53 @@ static const struct device *const phase_timer = DEVICE_DT_GET(DT_PHANDLE(SUIT, p
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
+/*
+ * Reset baseline.  This runs on every normal boot after the device drivers have
+ * initialised but before APPLICATION main (and therefore before Rust, Bluetooth,
+ * or the output backend).  Do not rely on a pre-reset callback: a watchdog or
+ * brown-out reset cannot run one.  Every operation is best effort so a missing
+ * peripheral cannot prevent the remaining independent safe-off operations.
+ */
+static int owo_suit_reset_safe_off(void)
+{
+	struct dac_channel_cfg dac_cfg = {
+		.channel_id = DT_PHA_BY_NAME(SUIT, io_channels, amplitude, output),
+		.resolution = DT_PROP(SUIT, amplitude_resolution),
+	};
+	uint32_t switch_mask = 0;
+	size_t i;
+
+	/* Same order as Stimulator::safe_off: bridge, amplitude, routing, supply. */
+	for (i = 0; i < ARRAY_SIZE(bridge); ++i) {
+		(void)gpio_pin_configure_dt(&bridge[i],
+			(i < 2) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE);
+	}
+	if (device_is_ready(dac_dev)) {
+		(void)dac_channel_setup(dac_dev, &dac_cfg);
+		(void)dac_write_value(dac_dev, dac_cfg.channel_id, 0);
+	}
+	for (i = 0; i < ARRAY_SIZE(switch_routes); ++i) {
+		switch_mask |= switch_routes[i];
+	}
+	if (device_is_ready(switch_dev)) {
+		(void)gpio_port_set_masked_raw(switch_dev, switch_mask, 0);
+	}
+	if (device_is_ready(boost.dev)) {
+		(void)pwm_set_dt(&boost, boost.period, 0);
+	}
+	if (device_is_ready(phase_timer)) {
+		(void)counter_stop(phase_timer);
+	}
+	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
+		if (device_is_ready(supplies[i])) {
+			(void)regulator_disable(supplies[i]);
+		}
+	}
+	return 0;
+}
+
+SYS_INIT(owo_suit_reset_safe_off, APPLICATION, 0);
+
 /* Board parameters. Kinds: see zephyr-io. */
 uint32_t owo_suit_param(int kind)
 {

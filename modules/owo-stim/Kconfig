@@ -31,10 +31,11 @@ config DAC_LTC2634_INIT_PRIORITY
 config OWO_STIM_UNVALIDATED_HARDWARE
 	bool "Drive the real output stage (UNVALIDATED, never run on hardware)"
 	depends on DT_HAS_OWO_SUIT_OUTPUT_ENABLED
+	select WATCHDOG
 	help
 	  Off: the application only logs what it would stimulate. On: the application drives the
-	  output stage through the owo-stim supervisor. Read docs/stock-stim-path.md and run the
-	  bench checklist in the README first.
+	  output stage through the owo-stim supervisor and requires the hardware watchdog. Read
+	  docs/stock-stim-path.md and run the bench checklist in the README first.
 
 config OWO_STIM_HARD_MAX_LEVEL
 	int "Hard level ceiling (stock range is 0..126)"
