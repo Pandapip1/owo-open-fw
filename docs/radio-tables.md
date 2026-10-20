@@ -524,6 +524,25 @@ records its first four writes (`+0x008 = 0x00011102`, `+0x030 = 0x00001233`,
 public-layout facts. They do not prove CMU latency or gating, PROTIMER command
 semantics, or any RAC transition timing/gating relationship.
 
+Direct stock control flow further bounds the early command helpers. At
+`flash-stock.bin:0x29a3a..0x29a50`, the enable helper clears and enables NVIC
+bank 1 bit 4 through `0xe000e284`/`0xe000e104`, then writes `1` to
+`PROTIMER +0x00c`; external IRQ 36 is that bank/bit according to
+`efr32bg22c224f512im40.h:99-101`. The matching stop helper at
+`0x29a52..0x29a72` clears/disables the same NVIC bit before writing `4` to
+`+0x00c`. This proves the vendor pairs those command values with IRQ36
+masking, not which command enables, clears, or causes an interrupt.
+
+The stock scheduler at `flash-stock.bin:0x29ab4..0x29b9c` also proves the
+layout of four indexed 16-byte slots: it writes a computed time to
+`0xa801c100 + 0x10*index + 0x0c` and `0x11` at `+0x0`; its conditional helper
+at `0x29a92..0x29ab0` writes `1` at the associated
+`0xa801c300 + 0x10*index` word. The initialization caller at
+`0x27f84..0x27f98` configures slots 0 and 1 only. Neither path reads a
+completion/status register or demonstrates that a slot match raises IRQ36,
+starts RAC/FRC, or has a particular field meaning. The model therefore keeps
+these as latches/slots rather than inventing a timer expiry path.
+
 The public xG22 RAIL archive's `rfhal_protimer.o` accesses the non-secure
 window at `0xB801C000`, confirming both the base and its alias relationship
 with the trace's secure `0xA801C000` window. The member data starts at archive
