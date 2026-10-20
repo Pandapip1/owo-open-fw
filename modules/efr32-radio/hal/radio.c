@@ -26,6 +26,7 @@
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
+#include "timer_state.h"
 
 #include "util/mem.h"
 
@@ -58,6 +59,12 @@
  * lifecycle.
  */
 static struct efr32_radio_abort_lifecycle efr32_radio_abort;
+/*
+ * This state is intentionally distinct from PROTIMER.  It mirrors only
+ * OpenISA software bookkeeping; it never makes a timer expire or starts a
+ * radio operation.  See timer_state.c for the reference line citations.
+ */
+static struct efr32_radio_timer_state efr32_radio_timer;
 /*
  * OpenISA uses sleep/wake as a reference-counted clock-availability
  * contract.  xG22 radio power sequencing has not been characterized, so
@@ -1183,39 +1190,38 @@ uint32_t radio_bc_has_match(void)
 	return 0;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] OpenISA capture-request bookkeeping; PROTIMER capture remains unknown (T8). */
 void radio_tmr_status_reset(void)
 {
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_timer_state_status_reset(&efr32_radio_timer);
 }
 
-/* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
+/* [software] Retain TIFS requested by the LLL; programming it remains unknown (T2, T8). */
 void radio_tmr_tifs_set(uint32_t tifs)
 {
-	ARG_UNUSED(tifs);
-	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
+	efr32_radio_timer_state_tifs_set(&efr32_radio_timer, tifs);
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software + regs] Retain start tick; scheduling remains unknown (T8). */
 uint32_t radio_tmr_start(uint8_t trx, uint32_t ticks_start, uint32_t remainder)
 {
 	ARG_UNUSED(trx);
-	ARG_UNUSED(ticks_start);
 	ARG_UNUSED(remainder);
+	efr32_radio_timer_state_start_set(&efr32_radio_timer, ticks_start);
 	EFR32_RADIO_AIR_TODO("regs");
 	return 0;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software + regs] Retain start tick; scheduling remains unknown (T8). */
 uint32_t radio_tmr_start_tick(uint8_t trx, uint32_t tick)
 {
 	ARG_UNUSED(trx);
-	ARG_UNUSED(tick);
+	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
 	EFR32_RADIO_AIR_TODO("regs");
 	return 0;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] Return the retained controller tick; no hardware read is implied. */
 void radio_tmr_start_us(uint8_t trx, uint32_t us)
 {
 	ARG_UNUSED(trx);
@@ -1223,7 +1229,7 @@ void radio_tmr_start_us(uint8_t trx, uint32_t us)
 	EFR32_RADIO_AIR_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] Request a later AA capture; capture itself remains unknown (T8). */
 uint32_t radio_tmr_start_now(uint8_t trx)
 {
 	ARG_UNUSED(trx);
@@ -1231,20 +1237,19 @@ uint32_t radio_tmr_start_now(uint8_t trx)
 	return 0;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] Keep LLL-supplied AA timestamp independently of hardware capture (T8). */
 uint32_t radio_tmr_start_get(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return efr32_radio_timer.start_tick;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] Restore LLL-supplied AA timestamp; no hardware read is implied. */
 void radio_tmr_stop(void)
 {
 	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* [software] Request a later end capture; capture itself remains unknown (T8). */
 void radio_tmr_hcto_configure(uint32_t hcto)
 {
 	ARG_UNUSED(hcto);
@@ -1254,7 +1259,7 @@ void radio_tmr_hcto_configure(uint32_t hcto)
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
 void radio_tmr_aa_capture(void)
 {
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_timer_state_aa_capture_request(&efr32_radio_timer);
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
@@ -1267,15 +1272,13 @@ uint32_t radio_tmr_aa_get(void)
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
 void radio_tmr_aa_save(uint32_t aa)
 {
-	ARG_UNUSED(aa);
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_timer_state_aa_save(&efr32_radio_timer, aa);
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
 uint32_t radio_tmr_aa_restore(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return efr32_radio_timer.saved_aa;
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
@@ -1288,7 +1291,7 @@ uint32_t radio_tmr_ready_get(void)
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
 void radio_tmr_end_capture(void)
 {
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_timer_state_end_capture_request(&efr32_radio_timer);
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */

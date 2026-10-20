@@ -105,5 +105,6 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     hal/cntr.c
     hal/ecb.c
     hal/radio.c
+    hal/timer_state.c
   )
 endif()
