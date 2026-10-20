@@ -28,6 +28,12 @@ static inline void efr32_radio_abort_replace(struct efr32_radio_abort_lifecycle 
 	state->pending = false;
 }
 
+/* A reset has no successor event: neither a queued abort nor its handler survives it. */
+static inline void efr32_radio_abort_cancel(struct efr32_radio_abort_lifecycle *state)
+{
+	efr32_radio_abort_replace(state, NULL, NULL);
+}
+
 /* Returns whether the caller must pend the shared FRC IRQ. */
 static inline bool efr32_radio_abort_request(struct efr32_radio_abort_lifecycle *state)
 {

@@ -680,12 +680,30 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 	irq_unlock(key);
 }
 
+/*
+ * A reset/startup boundary has no successor LLL event.  Unlike radio_disable(),
+ * it must not dispatch the preceding event's cleanup callback.  Quiesce the
+ * software callback and both completion-pending paths as one IRQ-atomic
+ * transaction, so a retained FRC completion cannot be delivered to it.
+ */
+static void efr32_radio_completion_quiesce(void)
+{
+	unsigned int key = irq_lock();
+
+	efr32_radio_abort_cancel(&efr32_radio_abort);
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	k_irq_clear_pending(LL_RADIO_IRQn);
+
+	irq_unlock(key);
+}
+
 /* [regs-public] Enable the six blocks whose public xG22 models expose EN.EN. */
 void radio_setup(void)
 {
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
-	efr32_radio_abort.pending = false;
+	efr32_radio_completion_quiesce();
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
@@ -742,7 +760,7 @@ void radio_reset(void)
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
-	efr32_radio_abort.pending = false;
+	efr32_radio_completion_quiesce();
 
 	/*
 	 * Stock RAIL clears the three RAC scratch registers and asserts
@@ -759,9 +777,6 @@ void radio_reset(void)
 	}
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) = 0U;
 
-	/* A completion that predates this reset cannot belong to the next event. */
-	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 }
 
 /* [regs-public] Address-independent BLE 1M table; PHYINFO remains intentionally excluded (T3). */

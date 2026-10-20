@@ -49,6 +49,14 @@ int main(void)
 	assert(new_param == &new_token);
 	assert(!efr32_radio_abort_take(&state, &callback, &param));
 
+	/* Reset drops both a queued abort and its stale LLL callback. */
+	efr32_radio_abort_replace(&state, old_callback, &old_token);
+	assert(efr32_radio_abort_request(&state));
+	efr32_radio_abort_cancel(&state);
+	assert(!efr32_radio_abort_take(&state, &callback, &param));
+	assert(state.callback == NULL);
+	assert(state.param == NULL);
+
 	/* Removing the handler also makes a later disable a no-op. */
 	efr32_radio_abort_replace(&state, NULL, NULL);
 	assert(!efr32_radio_abort_request(&state));
