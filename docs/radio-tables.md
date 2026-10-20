@@ -533,6 +533,21 @@ bank 1 bit 4 through `0xe000e284`/`0xe000e104`, then writes `1` to
 `+0x00c`. This proves the vendor pairs those command values with IRQ36
 masking, not which command enables, clears, or causes an interrupt.
 
+The public BG22 integration sources independently establish only the fixed
+wiring around that interrupt. The xG22 devicetree assigns the radio node's
+`protimer` interrupt name to external IRQ 36
+(`vendor/zephyr/dts/arm/silabs/xg22/efr32xg22.dtsi:11-29`), and the Series-2
+installer connects that vector to `PROTIMER_IRQHandler`
+(`vendor/zephyr/soc/silabs/silabs_s2/soc_radio.c:21-31`). The device header
+names CMU `CLKEN1` bit 4 as the PROTIMER bus-clock gate
+(`efr32bg22_cmu.h:586-590`), while its PRS table names output signals
+`PROTIMERL_CC0..CC4` and `PROTIMER_T0MATCH`/`T1MATCH`
+(`efr32bg22_prs_signals.h:637-651`). These sources establish vector, clock,
+and signal names only. They do not map the observed `+0x100` slots to those
+signals, define an IF/IEN bit, or establish when a compare result asserts
+IRQ36 or reaches RAC/FRC; QEMU must not turn this wiring evidence into an
+expiry model.
+
 The stock scheduler at `flash-stock.bin:0x29ab4..0x29b9c` also proves the
 layout of four indexed 16-byte slots: it writes a computed time to
 `0xa801c100 + 0x10*index + 0x0c` and `0x11` at `+0x0`; its conditional helper
