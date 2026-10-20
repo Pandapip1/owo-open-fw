@@ -88,6 +88,30 @@ Status of every function (all in `modules/efr32-radio/hal/radio.c`, each comment
 
 Functions that would start air activity (`radio_rx_enable`, `radio_tx_enable`, `radio_tmr_start*`) `LL_ASSERT` while `CONFIG_EFR32_RADIO_STUB_REGISTERS=y`.
 
+### Packet-target bounds retained for future RX delivery
+
+**[F]** Every current OpenISA `radio_pkt_configure` call uses an eight-bit length field:
+legacy advertising/scanning pass `PDU_AC_LEG_PAYLOAD_SIZE_MAX` (37) in
+`lll/lll_adv.c:353,356` and `lll/lll_scan.c:160,163`; connection setup passes its
+effective data-length bound (or that bound plus the four-byte MIC) in
+`lll/lll_conn.c:444,450`; and DTM passes 255 in `lll/lll_test.c:195`.
+The current EFR32 packet-stage metadata records those values, and its dormant
+normalized-PDU completion helper accepts only an explicit two-octet LL header
+plus exactly the declared number of payload octets. It is intentionally not an
+FRC/BUFC reader.
+
+**[F]** Current receive targets have sufficient capacity for those configured
+lengths, but this is a call-topology property—not a general `void *` capacity
+contract. Advertising and unencrypted connection paths use `node_rx->pdu`
+after `ull_pdu_rx_alloc_peek()` (`lll_scan.c:166-168`, `lll_conn.c:424-452`);
+the RX pool provisions each element as the maximum of advertising, data, control,
+and user PDU sizes (`ull.c:437-450`). Encrypted connections first target the
+HAL scratch PDU (`lll_conn.c:444-447`), and DTM/advertiser scratch paths use
+`radio_pkt_scratch_get()` (`lll_test.c:308`, `lll_adv.c:534`); that EFR32 buffer
+is sized for maximum data PDU plus MIC (`hal/radio.c:61-64`). A future caller
+outside these paths must supply an explicit destination-capacity contract;
+the generic radio API itself has no size argument.
+
 ## 3. Build integration (done, compile-checked)
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
