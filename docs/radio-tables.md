@@ -125,6 +125,21 @@ power table or independently validated calibration/configuration contract, and
 QEMU should only model the resulting registers once that contract establishes
 their externally visible behavior.
 
+### 3.3 Initialization does not recover reset sequencing [F]
+
+`RAIL_Init` is an 136-byte wrapper at archive file offset `0x149144` in
+`rail_singleprotocol.o` (member data offset `0x148fdc`, object section offset
+`0x168`). It allocates and publishes a RAIL handle, invokes the weak frame-type
+callback and RX-FIFO setup callback, then calls
+`sli_rail_7e61d0565567ab0020244c3cf3f002a7`. That 118-byte RF helper begins
+at `0x14e1a8` in `rail_rf.o` (member data offset `0x14e008`, object section
+offset `0x1a0`). It calls further helpers and conditionally records their
+status in the RAIL handle; it contains neither a peripheral-address literal
+nor an MMIO instruction. These wrappers establish the call graph but do not
+identify an xG22 block-reset order, enable order, or interrupt clear policy.
+`radio_reset()` therefore remains intentionally unimplemented rather than
+duplicating `radio_setup()` and misrepresenting it as hardware reset behavior.
+
 ## 4. BUFC [F]
 The per-buffer field order matches the public xG21 header, but the xG22 trace establishes a different layout: four buffers begin at `+0x00C`, use a `0x40` stride, and have `THRESHOLDCTRL`/`CMD` at buffer-relative `+0x24`/`+0x28`. Global `IF`/`IEN` are at `+0x114`/`+0x118`. For example, stock configures buffer 3 with `CTRL +0x0CC`, `ADDR +0x0D0`, `THRESHOLDCTRL +0x0F0`, then `CMD +0x0F4`; the other three sequences occur at bases `+0x00C`, `+0x04C`, and `+0x08C`. The compatible public field definitions give `CTRL` mask `0x7`, read/write offset masks `0x1FFF`, `THRESHOLDCTRL` mask `0x2FFF`, and `CMD` mask `0xF` (`efr32bg21_bufc.h:124-245`); QEMU applies and regresses those masks at the trace-established xG22 offsets. `ADDR` deliberately remains a full-width latch because the retained xG22 trace uses full SRAM addresses, which the older header's 24-bit encoding does not explain. A future trace-backed native BUFC DMA model can read `BUF.ADDR`; no BUFC DMA trigger or transfer semantics are inferred or modelled yet. Source: the public header and the stock 7.9.07 QEMU trace.
 
