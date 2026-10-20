@@ -329,6 +329,34 @@ static int owo_suit_reset_safe_off(void)
 
 SYS_INIT(owo_suit_reset_safe_off, APPLICATION, 0);
 
+/*
+ * Non-energising POST for the Rust bring-up barrier.  This deliberately
+ * checks every output-owning driver before the application accepts BLE work;
+ * the Rust phase still runs the full forced safe-off sequence even if this
+ * reports failure, so a failed POST cannot skip recovery after a brown-out.
+ */
+int owo_suit_post(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(bridge); ++i) {
+		if (!device_is_ready(bridge[i].port)) {
+			return -ENODEV;
+		}
+	}
+	if (!device_is_ready(switch_dev) || !device_is_ready(dac_dev) ||
+	    !device_is_ready(boost.dev) || !device_is_ready(sense.dev) ||
+	    !device_is_ready(phase_timer)) {
+		return -ENODEV;
+	}
+	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
+		if (!device_is_ready(supplies[i])) {
+			return -ENODEV;
+		}
+	}
+	return 0;
+}
+
 /* Board parameters. Kinds: see zephyr-io. */
 uint32_t owo_suit_param(int kind)
 {
@@ -376,6 +404,11 @@ const void *owo_suit_handle(int kind)
 }
 
 #else
+
+int owo_suit_post(void)
+{
+	return -ENODEV;
+}
 
 const void *owo_suit_handle(int kind)
 {

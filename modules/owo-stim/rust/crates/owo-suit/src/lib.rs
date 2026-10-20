@@ -19,7 +19,7 @@ use owo_hbridge::{HBridge, State};
 use owo_stim::hw::{Bridge, Hw, HwError, Sample};
 use owo_switch::Switch;
 use zephyr_io::{
-    now_us, suit_handle, suit_param, suit_supply_handle, suit_switch_routes, Dac, Gpio, Port, Pwm,
+    now_us, suit_handle, suit_param, suit_post, suit_supply_handle, suit_switch_routes, Dac, Gpio, Port, Pwm,
     FineCounter, Regulator, Sampler, SuitHandle, SuitParam,
 };
 
@@ -119,9 +119,22 @@ fn ok(r: Result<(), i32>) -> Result<(), InitError> {
 }
 
 impl Suit {
+    /// Run the non-energising driver POST, then force every output driver to
+    /// its shutdown state.  The forced sequence runs even if POST fails so a
+    /// brown-out cannot turn a missing acknowledgement into skipped recovery.
+    pub fn post_and_shutdown() -> Result<Self, InitError> {
+        let post = suit_post().map_err(InitError::Errno);
+        let shutdown = Self::new();
+
+        match (post, shutdown) {
+            (Ok(()), Ok(suit)) => Ok(suit),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        }
+    }
+
     /// Bring the output stage up in its safe state: bridge off, switch open, DAC at zero, boost
-    /// off. Call from thread context.
-    pub fn new() -> Result<Self, InitError> {
+    /// off. This is the forced initialization half of [`post_and_shutdown`].
+    fn new() -> Result<Self, InitError> {
         // Bridge first: high sides inactive, low sides active (= Off).
         let mut ha = gpio(SuitHandle::BridgeHighA)?;
         let mut hb = gpio(SuitHandle::BridgeHighB)?;

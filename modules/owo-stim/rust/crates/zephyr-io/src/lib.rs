@@ -33,9 +33,18 @@ extern "C" {
     fn owo_timing_stamp() -> u64;
     fn owo_timing_to_us(cycles: u64) -> u64;
     fn owo_busy_wait_us(us: u32);
+    fn owo_suit_post() -> c_int;
     fn owo_suit_handle(kind: c_int) -> *const c_void;
     fn owo_suit_param(kind: c_int) -> u32;
     fn owo_suit_switch_routes() -> *const u32;
+}
+
+/// Non-energising POST for every driver named by the `owo,suit-output` node.
+/// A successful result means the forced shutdown initializer may safely use
+/// each driver; it does not itself alter any output.
+pub fn suit_post() -> Result<(), Errno> {
+    // SAFETY: pure readiness checks on static devicetree devices.
+    check(unsafe { owo_suit_post() })
 }
 
 fn check(r: c_int) -> Result<(), Errno> {

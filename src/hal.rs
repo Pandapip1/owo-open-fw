@@ -78,7 +78,7 @@ mod real {
         pub fn init(&mut self) -> Result<(), ()> {
             warn!("REAL stimulation backend enabled: UNVALIDATED on hardware; dummy load only");
             self.sup = Stimulator::new(config());
-            let hw = Suit::new().map_err(|e| {
+            let hw = Suit::post_and_shutdown().map_err(|e| {
                 warn!("output-stage shutdown baseline failed ({:?})", e);
             })?;
             self.hw = Some(hw);
