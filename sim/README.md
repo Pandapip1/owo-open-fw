@@ -45,7 +45,9 @@ completion. The trace file is transient and belongs under `build/qemu-runtime/`.
   file offsets `0x5e90..0x5e9c` (`0x0001be90..0x0001be9c` when loaded) enables DCDC control
   through the SET alias and waits for `DCDC.IF.REGULATION`. The public xG22 header names that
   bit 5 (`efr32bg22_dcdc.h:276-279`); the QEMU DCDC shim now presents it after control enable.
-  A subsequent trace reaches the later HFXO setup sequence. This is boot-progress evidence only,
+  A subsequent trace reaches the later HFXO setup sequence. Its read-only ready status is modeled
+  with the public `RDY`, `COREBIASOPTRDY`, `ENS`, `HWREQ`, and `ISWARM` fields
+  (`efr32bg22_hfxo.h:354-380`). This is boot-progress evidence only,
   not a claim that the native model reaches radio configuration or idle operation.
 * Radio blocks have an in-process native register model with source- and trace-backed RAC,
   BUFC, PROTIMER, FRC, MODEM, AGC, SYNTH, and RFCRC register handling. BLE packet traffic,
