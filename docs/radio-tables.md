@@ -573,7 +573,58 @@ radio starts rather than silently substituting one timebase for another.
 
 The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, the correspondence between RAIL timer ticks and the raw PROTIMER counter, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
 
-## 5. Shortest path to advertising in the QEMU radio model
+## 5. RFSENSE / selective OOK (planned capability, not the BLE path)
+
+RFSENSE is retained here as a documented, future capability. It is not part of
+the current QEMU or Zephyr startup/RX/TX priority. The evidence-backed address
+map is:
+
+| item | value | status and evidence |
+|---|---:|---|
+| non-secure base | `0x5009C000` | **[F]** RFSENSE register-window base from the stock/model evidence; keep this separate from the secure alias `0x4009C000`. |
+| secure base | `0x4009C000` | **[F]** secure alias of the same peripheral window. Secure/non-secure selection is an access-policy distinction, not a second detector. |
+| `CTRL` | `+0x000` | **[F]** control register; detector mode and wake behavior belong here. |
+| `CMD` | `+0x004` | **[F]** command register; command effects are not yet characterized. |
+| `STATUS` | `+0x008` | **[F]** status register; no packet/RX interpretation is implied. |
+| `IF` / `IEN` | `+0x00C` / `+0x010` | **[F]** interrupt flag/enable pair; the eventual wake/IRQ policy remains open. |
+
+The BG22 device header assigns `RFSENSE_IRQn = 40` in
+`/Users/gavin/Projects/zephyr-modules/hal/silabs/simplicity_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h:104`;
+the same IRQ ordering is recorded in `docs/zephyr-ll-port.md:40-44`. The clock
+gate is `CMU_CLKEN1_RFSENSE`, bit 14 (`0x4000`), in
+`/Users/gavin/Projects/zephyr-modules/hal/silabs/simplicity_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22_cmu.h:636-640`.
+The generated device header does not provide a BG22 RFSENSE register struct;
+the base/offset table above therefore records the verified address evidence
+without pretending that a complete public register model exists.
+
+RAIL exposes this as a separate feature/API boundary: the public RAIL types
+define `RAIL_RfSenseBand_t` and the selective-OOK configuration in
+`/Users/gavin/Projects/zephyr-modules/hal/silabs/gecko/platform/radio/rail_lib/common/rail_types.h:3770-3825`,
+and the API contract is declared by `RAIL_ConfigRfSenseSelectiveOokWakeupPhy`
+and `RAIL_SetRfSenseSelectiveOokWakeupPayload` in
+`/Users/gavin/Projects/zephyr-modules/hal/silabs/gecko/platform/radio/rail_lib/common/rail.h:4860-4898`.
+The checked-in configurator profile is the 1-kbps OOK profile in
+`/Users/gavin/Projects/silabs-simplicity-sdk/platform/radio/rail_lib/chip/efr32/protocol_config/efr32xg22/rfsense_ook_efr32xg22_configurator_out.h:35-50`.
+These APIs configure low-energy RF detection/wake; they do **not** establish
+BLE packet RX, the Zephyr LLL receive-delivery contract, or ordinary TX.
+
+Energy-mode semantics are also distinct. The BG22 data-sheet description says
+RFSENSE can wake from EM2, EM3, or EM4 and that selective mode performs OOK
+preamble/sync detection (supplemental: [Silicon Labs BG22 data sheet](https://www.silabs.com/documents/public/data-sheets/efr32bg22-datasheet.pdf)).
+An EM4 wake is a reset/restart boundary for the M33 application, not a normal
+RX interrupt that leaves the BLE controller running. Consequently, do not
+model RFSENSE as ordinary packet reception or claim that a wake preserves
+Zephyr controller state.
+
+Non-claims and next scope: no RFSENSE detector thresholds, OOK correlator,
+payload semantics, wake-cause retention, interrupt-clear behavior, or
+secure/non-secure arbitration has been validated on hardware. No QEMU model,
+Zephyr hook, or RAIL call is being added by this note. When this capability is
+scheduled, first add a focused register/IRQ test for the address aliases and
+`CLKEN1` gate, then validate EM4 reset/wake behavior and only afterward decide
+whether a RAIL-facing wake API is needed.
+
+## 6. Shortest path to advertising in the QEMU radio model
 1. **Partially done in QEMU:** BUFC has the trace-corrected programmed-data path and threshold IRQs; RAC uses the public xG22 register/command/state map and distinct RAC_RSM/RAC_SEQ interrupt banks. Focused regressions cover both models. BUFC DMA via `BUF.ADDR`, packet socket/pcap output, and real sequencer timing remain unimplemented.
 2. Let stock firmware run to PHY configuration (BLE advertising start) under the model and log the writes; compare to the public tables to decode `ty` (T3) and to label MODEM/FRC registers (T5).
 3. Implement T1/T2/T6/T8 in `hal/radio.c` for ADV_IND TX only (no RX, no TIFS), drop the `STUB_REGISTERS` asserts for `radio_tx_enable`/`radio_tmr_start`.

@@ -209,7 +209,7 @@ BUFC and RXDONE alone is never described as packet delivery.
   validation only, not an on-device or QEMU radio validation.
 
 ## 4. Known gaps/risks (not resolved)
-1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §5.
+1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §6; RFSENSE is documented separately in §5 and is not on the startup/RX/TX critical path.
 2. **Software TIFS on a Cortex-M33** with unknown RAC latency: if T_IFS (150 us +-2) cannot be met from the interrupt, a hardware path (PRS/PROTIMER -> RAC) is required.
 3. **HFXO / sleep**: `lll_clock_wait` is a no-op; `EVENT_OVERHEAD_XTAL_US` etc. in `lll/lll_vendor.h` are OpenISA placeholders. Interaction with Zephyr PM (EM2) is unexamined.
 4. **Feature set**: legacy 1M only (OpenISA LLL). The stock suit needs LE Secure/legacy pairing with MITM (host side, fine) and encryption (needs CCM above).
