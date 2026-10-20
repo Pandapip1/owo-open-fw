@@ -678,10 +678,13 @@ void radio_status_reset(void)
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/*
+ * [software] OpenISA requires this to remain false while it stages a packet.
+ * The reference RV32M1 HAL deliberately returns false regardless of its
+ * hardware state; RAC state must not be substituted for that API contract.
+ */
 uint32_t radio_is_ready(void)
 {
-	EFR32_RADIO_TODO("regs");
 	return 0;
 }
 
@@ -692,10 +695,9 @@ uint32_t radio_is_done(void)
 		 EFR32_FRC_IF_COMPLETION);
 }
 
-/* [regs] RAC command/state and FRC/BUFC status/IF bits: unknown (T2) */
+/* [software] Unused by the OpenISA LLL; matches the reference HAL. */
 uint32_t radio_has_disabled(void)
 {
-	EFR32_RADIO_TODO("regs");
 	return 0;
 }
 
