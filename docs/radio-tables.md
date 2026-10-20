@@ -590,10 +590,11 @@ CLR alias at `0xB801E100 + 0x10*index`. The latter is an alias access to the
 same `+0x100` slot word, not evidence for an independently named activation
 register. That same clear path writes `0x100 << index` through the CLR alias
 at `0xB801E064`; this records an additional slot-indexed mask access, not an
-IF/IEN interpretation. These are exact accesses and values only: the function
-also calls unresolved helpers and touches FRC/RAC/sequencer state, so it does
-not prove the timer comparison condition, a command meaning, an expiry flag,
-or an IRQ side effect.
+IF/IEN interpretation. These are exact accesses and values only: this helper
+has no relocation or call to FRC, RAC, or an IRQ handler (only local
+arithmetic, critical/atomic, and PTI support), so it does not prove the timer
+comparison condition, a command meaning, an expiry flag, or an IRQ side
+effect.
 
 The archive also directly constrains the interrupt dispatch path. In
 `generic_phy.o`, whose ELF begins at archive offset `0x518c8`,
