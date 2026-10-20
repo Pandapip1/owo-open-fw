@@ -21,9 +21,10 @@
   indefinitely. OTA teardown holds a temporary lease to bound a wedged Bluetooth shutdown.
 * Same configuration as stock 7.9.07: its first WDOG0 write is `CFG = 0x00080000` (PERSEL 8, EM2RUN/EM3RUN 0),
   seen in the QEMU trace (`sim/README.md`), and it feeds from its main loop.
-* OTA reset preparation disarms the output stage in the pump thread, waits for the ATT response, then calls
-  `bt_disable()` before `sys_reboot`. The watchdog intentionally stays armed across that teardown, so a stuck
-  controller shutdown is reset-bounded with the output already off.
+* OTA and safety-reset preparation acquire a temporary lease before disarming the output stage in the pump
+  thread. This keeps watchdog containment continuous through the ordered safe-off, optional OTA ATT-response
+  settling period, and `bt_disable()` before `sys_reboot`; a stuck teardown is reset-bounded with the output
+  already off.
 * Not verified: behaviour across the OTA reboot (`sys_reboot` → bootloader). The Gecko Bootloader does not
   start the watchdog in the sources used for the simulator (`sim/bootloader`), but whether WDOG0 is reset by a
   SYSRESETREQ must be confirmed against the EFR32xG22 reference manual (RM) before relying on it.

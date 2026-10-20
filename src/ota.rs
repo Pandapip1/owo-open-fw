@@ -57,14 +57,16 @@ pub(crate) fn reboot_if_requested() {
         }
     }
 
+    // Take this before stopping the session.  It keeps watchdog containment
+    // continuous while prepare_reset() drops that session's lease and runs the
+    // ordered output safe-off sequence; otherwise a wedged safe-off could land
+    // in the interval before a replacement timeout was installed.
+    let _teardown_watchdog = crate::wdt::Lease::acquire(None).ok();
     // The ATT handler has returned by now. Keep the radio alive only for the
     // response settling window, with output already de-energised; shutdown then
     // runs in the pump's thread context. If Bluetooth teardown wedges, the
     // watchdog remains armed and resets the SoC.
     crate::prepare_reset();
-    // Output is already off, but teardown can still wedge before reset.  This
-    // local lease keeps reset containment active until sys_reboot() consumes it.
-    let _teardown_watchdog = crate::wdt::Lease::acquire(None).ok();
     if bootloader {
         zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
     }
