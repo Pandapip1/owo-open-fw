@@ -357,6 +357,41 @@ queue record and BUFC state; its completed-packet path reads BUFC around
 of circular buffer availability, not that any of those fields is a BLE PDU
 length, a CRC result, a frame boundary, or a sequencer-produced record format.
 
+The archive resolves the relationship between that descriptor and release more
+tightly. `RAIL_GetRxPacketInfo` at `rail_data.o` archive
+`[0x15be30, 0x15be34)` tail-branches to 356-byte
+`rfhal_bufc.o:sli_rail_052f8b2565813079f19c931bac48db51`, archive
+`[0x33a5c, 0x33bc0)` (member `0x332f4`, section file offset `0x768`).  Its
+completed-record path rejects a descriptor whose first `u16` is at least
+`0x4000`, uses that field's low 13 bits with BUFC `READOFFSET`/`STATUS`
+(`0xBA000058`/`0xBA0000AC`) to locate bytes in the separate data buffer, and
+uses descriptor byte `+2` low three bits and byte `+3` for output bytes `+0`
+and `+16`.  It constructs the one- or two-span pointers and lengths at output
+offsets `+4..+12`; it does not parse a BLE header or CRC.  Separately,
+`RAIL_ReleaseRxPacket` at archive `[0x15bef0, 0x15bef4)` tail-branches to
+`sli_rail_f921a6fdde390c986016ab0c8bf49fae`, the same local helper reached by
+the deferred FRC/BUFC path above.  Thus the eight-byte object is an RX
+descriptor for data-buffer presentation and release, not a normalized PDU;
+the descriptor's proven fields still do not establish on-air framing or CRC
+metadata.
+
+The installed public RAIL headers corroborate the API-side layout without
+filling that hardware gap: `rail_types.h:6172-6231` names the fields as
+`packetStatus`, `packetBytes`, two portion lengths/pointers, and `filterMask`,
+and `rail.h:4400-4432` says `RAIL_CopyRxPacket` copies exactly `packetBytes`
+through those portions.  They also make direct use as a BLE PDU unsafe:
+`rail.h:4345-4355,4382-4391` warns that incoming information can be pre-CRC
+and include radio-appended detail, while `rail_types.h:5753-5767` documents
+that appended-info configuration changes whether those bytes are interpreted
+as packet data.  The hold/release lifecycle is likewise software state rather
+than descriptor framing: `RAIL_HoldRxPacket` tail-branches to
+`sli_rail_d9e…` at `[0x33850, 0x33868)`, which sets bit zero in the shared
+candidate pointer; the deferred helper tests that tag before releasing the
+entry.  This is a hold marker on the pointer, not bit zero of a hardware
+descriptor.  Consequently an eventual Zephyr RX extractor must first prove
+the active RAIL appended-info and completed-status configuration, rather than
+passing `packetBytes` or the descriptor bytes to the LLL as a normalized PDU.
+
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
 The OpenISA LLL supplies the API meaning and byte order that the archive alone does not: its advertising preparation creates `uint32_t aa = sys_cpu_to_le32(PDU_AC_ACCESS_ADDR)` at `lll_adv.c:321`, then calls `radio_aa_set((uint8_t *)&aa)` at `:359`; scan uses the same conversion at `lll_scan.c:127,170`. The reference OpenISA HAL treats its argument as the access address (`hal/RV32M1/radio/radio.c:687-704`). Together these public sources justify `radio_aa_set` writing the four supplied bytes, little-endian, to `MODEM.SYNC0`. The EFR32 HAL assembles the word byte-wise so that it does not impose an unadvertised alignment requirement on this byte-pointer API. This establishes only the configuration write; it does not establish when the sequencer consumes it or any sync/demodulation behavior.
