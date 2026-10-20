@@ -1297,13 +1297,13 @@ void radio_tmr_tifs_set(uint32_t tifs)
 	efr32_radio_timer_state_tifs_set(&efr32_radio_timer, tifs);
 }
 
-/* [software + regs] Retain start tick; scheduling remains unknown (T8). */
+/* [software] Schedule the normal TX/RX enable path through the shared BURTC job bridge. */
 uint32_t radio_tmr_start(uint8_t trx, uint32_t ticks_start, uint32_t remainder)
 {
 	return efr32_radio_launch_schedule(trx, ticks_start, remainder);
 }
 
-/* [software + regs] Retain start tick; scheduling remains unknown (T8). */
+/* [software] Schedule a whole-tick TX/RX launch through the shared BURTC job bridge. */
 uint32_t radio_tmr_start_tick(uint8_t trx, uint32_t tick)
 {
 	return efr32_radio_launch_schedule(trx, tick, 1000000UL);

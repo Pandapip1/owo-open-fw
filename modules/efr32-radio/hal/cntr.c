@@ -19,6 +19,7 @@
 #include "hal/swi.h"
 #include "hal/efr32/cntr_efr32.h"
 #include "hal/debug.h"
+#include "cntr_mux.h"
 
 #define LL_CNTR_NODE DT_ALIAS(ll_counter)
 BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(LL_CNTR_NODE), "alias ll-counter must be an enabled counter");
@@ -41,17 +42,18 @@ static void cmp_program_locked(void)
 		.callback = alarm_cb,
 		.flags = COUNTER_ALARM_CFG_ABSOLUTE | COUNTER_ALARM_CFG_EXPIRE_WHEN_LATE,
 	};
+	struct efr32_cntr_mux mux = {
+		.ticker_deadline = ticker_compare, .radio_deadline = radio_compare,
+		.radio_generation = radio_generation, .radio_trx = radio_trx,
+		.ticker_armed = ticker_armed, .radio_armed = radio_armed,
+	};
+	uint32_t deadline;
 
 	(void)counter_cancel_channel_alarm(cntr_dev, 0);
-	if (!ticker_armed && !radio_armed) {
+	if (!efr32_cntr_mux_next(&mux, &deadline)) {
 		return;
 	}
-	if (!ticker_armed || (radio_armed &&
-		(int32_t)(radio_compare - ticker_compare) < 0)) {
-		cfg.ticks = radio_compare;
-	} else {
-		cfg.ticks = ticker_compare;
-	}
+	cfg.ticks = deadline;
 	LL_ASSERT(counter_set_channel_alarm(cntr_dev, 0, &cfg) == 0);
 }
 
@@ -66,25 +68,21 @@ static void alarm_cb(const struct device *dev, uint8_t chan, uint32_t ticks, voi
 	ARG_UNUSED(ticks);
 	ARG_UNUSED(user_data);
 	LL_ASSERT(chan == 0U);
-	uint32_t now = cntr_cnt_get();
-	bool ticker_due = ticker_armed && (int32_t)(ticker_compare - now) <= 0;
-	bool radio_due = radio_armed && (int32_t)(radio_compare - now) <= 0;
-	uint8_t trx = radio_trx;
-	uint32_t generation = radio_generation;
-
-	if (ticker_due) {
-		ticker_armed = false;
-	}
-	if (radio_due) {
-		radio_armed = false;
-	}
+	struct efr32_cntr_mux mux = {
+		.ticker_deadline = ticker_compare, .radio_deadline = radio_compare,
+		.radio_generation = radio_generation, .radio_trx = radio_trx,
+		.ticker_armed = ticker_armed, .radio_armed = radio_armed,
+	};
+	struct efr32_cntr_mux_due due = efr32_cntr_mux_take_due(&mux, cntr_cnt_get());
+	ticker_armed = mux.ticker_armed;
+	radio_armed = mux.radio_armed;
 	cmp_program_locked();
-	if (ticker_due) {
+	if (due.ticker) {
 		atomic_set(&cmp_fired, 1);
 		hal_swi_worker_pend();
 	}
-	if (radio_due) {
-		efr32_radio_launch_wake(trx, generation);
+	if (due.radio) {
+		efr32_radio_launch_wake(due.radio_trx, due.radio_generation);
 	}
 }
 
