@@ -137,8 +137,18 @@ offset `0x1a0`). It calls further helpers and conditionally records their
 status in the RAIL handle; it contains neither a peripheral-address literal
 nor an MMIO instruction. These wrappers establish the call graph but do not
 identify an xG22 block-reset order, enable order, or interrupt clear policy.
-`radio_reset()` therefore remains intentionally unimplemented rather than
-duplicating `radio_setup()` and misrepresenting it as hardware reset behavior.
+Its first target is `sli_rail_f70cad743ef3526a2ef7ac090e6c385a`, a 188-byte
+helper at `0x13880` in `rail_rf_hal.o` (member data offset `0x10dd4`, object
+section offset `0x27ac`). Unlike the wrappers, it has concrete writes: it
+writes `0x60` to non-secure `FRC.RXCTRL` (`0xB8004000 + 0x04c`) and clears
+`0x40` through the non-secure `RAC.SR0` clear alias
+(`0xB8022000 + 0x040`). The generated public models name and permit both
+register accesses. `radio_setup()` performs exactly those two writes after
+enabling the six public radio blocks, and QEMU's focused regression retains
+their latch/alias behavior. Their field effects remain uncharacterized, so
+they do not establish a complete reset protocol; `radio_reset()` remains
+intentionally unimplemented rather than duplicating setup and misrepresenting
+it as hardware reset behavior.
 
 ## 4. BUFC [F]
 The per-buffer field order matches the public xG21 header, but the xG22 trace establishes a different layout: four buffers begin at `+0x00C`, use a `0x40` stride, and have `THRESHOLDCTRL`/`CMD` at buffer-relative `+0x24`/`+0x28`. Global `IF`/`IEN` are at `+0x114`/`+0x118`. For example, stock configures buffer 3 with `CTRL +0x0CC`, `ADDR +0x0D0`, `THRESHOLDCTRL +0x0F0`, then `CMD +0x0F4`; the other three sequences occur at bases `+0x00C`, `+0x04C`, and `+0x08C`. The compatible public field definitions give `CTRL` mask `0x7`, read/write offset masks `0x1FFF`, `THRESHOLDCTRL` mask `0x2FFF`, and `CMD` mask `0xF` (`efr32bg21_bufc.h:124-245`); QEMU applies and regresses those masks at the trace-established xG22 offsets. `ADDR` deliberately remains a full-width latch because the retained xG22 trace uses full SRAM addresses, which the older header's 24-bit encoding does not explain. A future trace-backed native BUFC DMA model can read `BUF.ADDR`; no BUFC DMA trigger or transfer semantics are inferred or modelled yet. Source: the public header and the stock 7.9.07 QEMU trace.

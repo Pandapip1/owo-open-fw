@@ -89,6 +89,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_AGC_BASE 0xB800C000UL
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
+#define EFR32_FRC_RXCTRL_OFFSET 0x04CU
 #define EFR32_FRC_TRAILRXDATA_OFFSET 0x054U
 #define EFR32_FRC_IF_OFFSET 0x068U
 #define EFR32_FRC_IEN_OFFSET 0x06CU
@@ -113,6 +114,8 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_AGC_RSSI_OFFSET_QUARTER_DB 200
 
 #define EFR32_RAC_BASE 0xB8020000UL
+#define EFR32_RAC_SR0_OFFSET 0x040U
+#define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
 #define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
@@ -457,6 +460,15 @@ void radio_setup(void)
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+
+	/*
+	 * [RAIL init] The xG22 RF initializer writes RXCTRL=0x60, then clears
+	 * RAC.SR0 bit 6 through its CLR alias (radio-tables.md §3.3). These
+	 * are exact initialization writes; they do not assert a packet policy.
+	 */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_RXCTRL_OFFSET) = 0x60U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_SR0_OFFSET) = EFR32_RAC_SR0_INIT_CLEAR;
 
 	/*
 	 * The LLL connects its radio ISR to FRC_IRQn.  Enable only the two
