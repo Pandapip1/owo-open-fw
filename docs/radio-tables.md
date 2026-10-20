@@ -263,6 +263,15 @@ Two adjacent OpenISA helpers have a deliberately narrower contract than their na
 
 The public FRC completion latches make a narrow status implementation safe: `IF.TXDONE` is bit 0 and `IF.RXDONE` bit 4 (`revB2/FRC_S_field.py:1197-1254`). `radio_is_done()` consequently observes either latch, while `radio_status_reset()` acknowledges exactly those two bits through the standard CLR alias; this does not decide which IRQ should invoke the LLL callback or how receive completion is produced. QEMU's 150-us TX timer remains a simulator abstraction, but on expiry it now raises the public `FRC.IF.TXDONE` latch and returns RAC to OFF; `TXDIS`/`RXDIS` cancel that pending synthetic completion. Its regression verifies the visible latch and final RAC state.
 
+Both latches share `FRC_IRQn`, but OpenISA TX callbacks advance their state
+machine without independently testing `radio_is_done()` (`lll_adv.c:511-542`).
+The EFR32 HAL therefore records TX or RX direction before arming its respective
+RAC source and dispatches the installed LLL callback only for the matching
+named completion bit; it clears mismatched or stale completion flags so they
+cannot leave the IRQ asserted or turn an RX boundary into a TX callback. This
+is software IRQ attribution over the two public latches, not a claim about how
+either latch is produced or a substitute for RX delivery.
+
 `FRC.TRAILRXDATA` has a public field named `CRCOK`, but its complete receive
 semantics remain unproven: the non-secure register is at `+0x054`, reset zero,
 and read-write with mask `0x0000003f`; `CRCOK` is bit 1

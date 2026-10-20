@@ -488,8 +488,33 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
 /* [software] lll_init() connects LL_RADIO_IRQn (FRC_IRQn) to this entry. */
 void isr_radio(void *arg)
 {
+	uint32_t pending;
+	uint32_t expected = 0U;
+
 	ARG_UNUSED(arg);
-	if (isr_cb) {
+	pending = *radio_reg32(EFR32_FRC_BASE + EFR32_FRC_IF_OFFSET) &
+		  EFR32_FRC_IF_COMPLETION;
+
+	/*
+	 * TXDONE and RXDONE share FRC_IRQn, but their OpenISA callbacks have
+	 * different contracts. The LLL TX callbacks do not re-check radio_is_done(),
+	 * so never let an RX completion advance a TX state machine (or converse).
+	 * active_direction is a software routing label; it does not assign how the
+	 * hardware produces either latch.
+	 */
+	if (efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_TX) {
+		expected = EFR32_FRC_IF_TXDONE;
+	} else if (efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_RX) {
+		expected = EFR32_FRC_IF_RXDONE;
+	}
+
+	/* A stale or wrong-direction completion must not leave FRC_IRQn asserted. */
+	if ((pending & ~expected) || (!isr_cb && pending)) {
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_FRC_IF_OFFSET) = !isr_cb ? pending : pending & ~expected;
+	}
+
+	if (isr_cb && (pending & expected)) {
 		isr_cb(isr_cb_param);
 	}
 }
@@ -828,10 +853,10 @@ void radio_rx_enable(void)
 	while (!radio_is_idle()) {
 	}
 
+	/* Label a completion before arming the hardware source. */
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_RX;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
-	/* No transfer happens here; this only labels the later FRC completion. */
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_RX;
 }
 
 /*
@@ -845,9 +870,9 @@ void radio_tx_enable(void)
 	while (!radio_is_idle()) {
 	}
 
-	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
-	/* No new MMIO protocol is implied by retaining this software direction. */
+	/* Label a completion before arming the hardware source. */
 	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_TX;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
 
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
@@ -858,9 +883,9 @@ void radio_disable(void)
 	 * unverified. The retained stock trace issues RXDIS before TXDIS
 	 * (docs/radio-tables.md §4.1), so preserve that observed order.
 	 */
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
 }
 
 /* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */
