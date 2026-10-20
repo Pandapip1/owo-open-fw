@@ -588,19 +588,21 @@ The 432-byte archive helper at `rfhal_protimer.o:0x3c140`
 `0xB801C100 + 0x10*index`; on one branch it writes `1` through the standard
 CLR alias at `0xB801E100 + 0x10*index`. The latter is an alias access to the
 same `+0x100` slot word, not evidence for an independently named activation
-register. These are exact accesses and values only: the function also calls
-unresolved helpers and touches FRC/RAC/sequencer state, so it does not prove
-the timer comparison condition, a command meaning, an expiry flag, or an IRQ
-side effect.
+register. That same clear path writes `0x100 << index` through the CLR alias
+at `0xB801E064`; this records an additional slot-indexed mask access, not an
+IF/IEN interpretation. These are exact accesses and values only: the function
+also calls unresolved helpers and touches FRC/RAC/sequencer state, so it does
+not prove the timer comparison condition, a command meaning, an expiry flag,
+or an IRQ side effect.
 
 The archive also directly constrains the interrupt dispatch path. In
-`rfhal_protimer_shared.o`, `.text.PROTIMER_IRQHandler` has an
-`R_ARM_THM_JUMP24` relocation to `FRC_IRQHandler` (the member is in
-`librail_efr32xg22_gcc_release.a`, alongside `rfhal_protimer.o` whose member
-data begins at archive offset `0x3bf34`). That is a direct branch, not evidence
-for a particular expiry source or flag. The target handler reads and
-acknowledges `FRC.IF/IEN` at `0xB8018068/+0x06c`, then reads BUFC pending/enable
-at `0xBA000114/+0x118`, before processing radio state. Thus any eventual native
+`generic_phy.o`, whose ELF begins at archive offset `0x518c8`,
+`.text.PROTIMER_IRQHandler` is the four-byte payload at `0x52f44..0x52f47`
+and has an `R_ARM_THM_JUMP24` relocation to `FRC_IRQHandler`; the target
+handler begins at `0x52760`. That is a direct branch, not evidence for a
+particular expiry source or flag. The target handler reads and acknowledges
+`FRC.IF/IEN` at `0xB8018068/+0x06c`, then reads BUFC pending/enable at
+`0xBA000114/+0x118`, before processing radio state. Thus any eventual native
 PROTIMER event model must join the shared FRC-facing event path rather than
 invent a timer-only guest callback. It remains unknown which PROTIMER status
 condition, if any, produces which FRC-visible event, so QEMU deliberately does
