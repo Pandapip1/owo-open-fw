@@ -57,7 +57,17 @@ pub(crate) struct Lease(usize);
 
 impl Lease {
     /// Acquire a watchdog lease before making the output supervisor live.
+    ///
+    /// A supplied safety check is an admission condition, not merely a later
+    /// feeding condition: unsafe work must not acquire supervision at all.
     pub(crate) fn acquire(safety_check: Option<SafetyCheck>) -> Result<Self, ()> {
+        if let Some(check) = safety_check {
+            if !check() {
+                error!("watchdog safety check failed; refusing lease");
+                return Err(());
+            }
+        }
+
         let mut state = STATE.lock().unwrap();
         let slot = state
             .leases
