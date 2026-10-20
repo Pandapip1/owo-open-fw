@@ -41,6 +41,12 @@ completion. The trace file is transient and belongs under `build/qemu-runtime/`.
   initialization. The retained `evidence/stock/radio-trace.log` is useful historical register
   evidence, but its first line identifies an older external socket bridge rather than this native
   QEMU device; it must not be treated as end-to-end validation of the current model.
+* Native CPU tracing found and cleared one early boot dependency: stock application code at image
+  file offsets `0x5e90..0x5e9c` (`0x0001be90..0x0001be9c` when loaded) enables DCDC control
+  through the SET alias and waits for `DCDC.IF.REGULATION`. The public xG22 header names that
+  bit 5 (`efr32bg22_dcdc.h:276-279`); the QEMU DCDC shim now presents it after control enable.
+  A subsequent trace reaches the later HFXO setup sequence. This is boot-progress evidence only,
+  not a claim that the native model reaches radio configuration or idle operation.
 * Radio blocks have an in-process native register model with source- and trace-backed RAC,
   BUFC, PROTIMER, FRC, MODEM, AGC, SYNTH, and RFCRC register handling. BLE packet traffic,
   sequencer behavior, and air delivery remain unmodelled, so stock-firmware stimulation cannot
