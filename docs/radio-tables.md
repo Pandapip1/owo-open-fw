@@ -566,6 +566,18 @@ the RAIL non-secure `CTRL`/`CMD` path and observes `CTRL` through both windows.
 This preserves the observed alias behavior without claiming timer progression,
 compare, capture, IRQ, or command semantics.
 
+The 432-byte archive helper at `rfhal_protimer.o:0x3c140`
+(`.text.sli_rail_30b95b9e98ec0997b2a8f05421916f4a`, object section offset
+`0x20c`) makes the slot access pattern more specific. For `index` 0 through
+3 it stores a computed value at `0xB801C10C + 0x10*index` and `0x11` at
+`0xB801C100 + 0x10*index`; on one branch it writes `1` through the standard
+CLR alias at `0xB801E100 + 0x10*index`. The latter is an alias access to the
+same `+0x100` slot word, not evidence for an independently named activation
+register. These are exact accesses and values only: the function also calls
+unresolved helpers and touches FRC/RAC/sequencer state, so it does not prove
+the timer comparison condition, a command meaning, an expiry flag, or an IRQ
+side effect.
+
 The archive also directly constrains the interrupt dispatch path. In
 `rfhal_protimer_shared.o`, `.text.PROTIMER_IRQHandler` has an
 `R_ARM_THM_JUMP24` relocation to `FRC_IRQHandler` (the member is in
