@@ -392,6 +392,21 @@ descriptor.  Consequently an eventual Zephyr RX extractor must first prove
 the active RAIL appended-info and completed-status configuration, rather than
 passing `packetBytes` or the descriptor bytes to the LLL as a normalized PDU.
 
+The descriptor-ring initializer distinguishes the CPU's lifecycle work from
+record production. `rfhal_bufc.o:sli_rail_6281eecc9c4ea6e1ecc523be2e1d48d2`
+is archive `[0x33740, 0x337c8)` (member `0x332f4`, section file offset
+`0x44c`). It locks the active handle, derives a `log2(size)-6` encoding from
+handle `+0x38`, gives BUFC the ring base from `+0x18`, and writes channel-2
+registers `0xBA0000B4 = 1`, `+0x08c = log2(size)-6`, `+0x090 = ring_base`,
+and `+0x0b0 = 7`; it clears BUFC flags `0x50000` and resets the software
+indices at `+0x3a` and `+0x3c`. Static accesses in this object only read slot
+fields `+0`, `+2`, and `+3`, except that the release helper writes slot `+0`
+to reclaim it; the initializer writes no individual eight-byte slot, and no
+sequencer-image static write to those fields has been located. This supports
+BUFC hardware (possibly together with the sequencer) as the descriptor
+producer, while the observed CPU paths configure, select, hold, and release
+entries. It does not identify the producer's record encoding or time boundary.
+
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
 The OpenISA LLL supplies the API meaning and byte order that the archive alone does not: its advertising preparation creates `uint32_t aa = sys_cpu_to_le32(PDU_AC_ACCESS_ADDR)` at `lll_adv.c:321`, then calls `radio_aa_set((uint8_t *)&aa)` at `:359`; scan uses the same conversion at `lll_scan.c:127,170`. The reference OpenISA HAL treats its argument as the access address (`hal/RV32M1/radio/radio.c:687-704`). Together these public sources justify `radio_aa_set` writing the four supplied bytes, little-endian, to `MODEM.SYNC0`. The EFR32 HAL assembles the word byte-wise so that it does not impose an unadvertised alignment requirement on this byte-pointer API. This establishes only the configuration write; it does not establish when the sequencer consumes it or any sync/demodulation behavior.
