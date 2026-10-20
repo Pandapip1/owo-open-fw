@@ -181,6 +181,18 @@ bounded PDU and a separate CRC outcome before raising RXDONE.  Until that
 producer is evidenced, the dormant copy helper is not connected to FRC or
 BUFC and RXDONE alone is never described as packet delivery.
 
+The FRC hard IRQ is only a publication boundary: it captures the installed
+OpenISA callback in a generation-guarded mailbox and wakes a persistent
+scheduler-owned completion job. That job invokes the LLL callback after IRQ
+return while RXDONE/TXDONE remains visible for the callback's normal
+`radio_is_done()`/`radio_status_reset()` sequence. It temporarily masks those
+level-sensitive sources so an asserted latch cannot starve the scheduler;
+callback replacement invalidates predecessor work and re-enables them. This
+is software scheduling policy, not a radio-timing claim. The raw model fact
+remains limited to the archived sequencer's `FRC.RXRAWDATA` byte lanes written
+to BUFC channel 1, documented in `docs/radio-tables.md` §4 at capture offsets
+`0x0ce4` and `0x0d5a..0x0d6a`.
+
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.

@@ -37,17 +37,17 @@ config EFR32_RADIO_STUB_REGISTERS
 	  keeps software state and asserts when the controller tries to put a packet on the air.
 
 config EFR32_RADIO_SCHEDULER_PRIO
-	int "Persistent radio launch job priority"
+	int "Persistent radio scheduler job priority"
 	range -16 -1
 	default -2
 	help
-	  Priority for the persistent TX and RX launch jobs. These cooperative
-	  threads are woken by BURTC expiry and are intentionally scheduler-owned,
-	  never ISR-owned. This is best-effort scheduling, not a hardware launch
-	  deadline guarantee.
+	  Priority for persistent TX/RX launch and completion jobs. Launch jobs are
+	  woken by BURTC expiry; FRC completion work is woken by its IRQ. All are
+	  intentionally scheduler-owned, never ISR-owned. This is best-effort
+	  scheduling, not a hardware launch deadline guarantee.
 
 config EFR32_RADIO_SCHEDULER_STACK_SIZE
-	int "Persistent radio launch job stack size"
+	int "Persistent radio scheduler job stack size"
 	default 512
 
 endif # BT_LLL_VENDOR_EFR32

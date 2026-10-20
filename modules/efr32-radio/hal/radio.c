@@ -26,6 +26,7 @@
 #include "hal/efr32/cntr_efr32.h"
 #include "hal/efr32/ticker.h"
 #include "abort_lifecycle.h"
+#include "completion_dispatch.h"
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
@@ -77,6 +78,17 @@ static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
 K_SEM_DEFINE(efr32_radio_tx_sem, 0, 1);
 K_SEM_DEFINE(efr32_radio_rx_sem, 0, 1);
+K_SEM_DEFINE(efr32_radio_completion_sem, 0, 1);
+
+/* The FRC vector publishes this mailbox; only the persistent job calls LLL. */
+static struct {
+	radio_isr_cb_t callback;
+	void *param;
+	bool abort;
+} efr32_radio_completion_work;
+static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
+
+static void efr32_radio_completion_job(void *a, void *b, void *c);
 
 static void efr32_radio_tx_job(void *a, void *b, void *c)
 {
@@ -119,6 +131,10 @@ K_THREAD_DEFINE(efr32_radio_tx_job_thread,
 K_THREAD_DEFINE(efr32_radio_rx_job_thread,
 		CONFIG_EFR32_RADIO_SCHEDULER_STACK_SIZE,
 		efr32_radio_rx_job, NULL, NULL, NULL,
+		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+K_THREAD_DEFINE(efr32_radio_completion_job_thread,
+		CONFIG_EFR32_RADIO_SCHEDULER_STACK_SIZE,
+		efr32_radio_completion_job, NULL, NULL, NULL,
 		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
@@ -608,6 +624,65 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
 	return id;
 }
 
+/*
+ * The FRC line is level-sensitive while IF.RXDONE/TXDONE remains set.  Mask
+ * only those two sources after publishing their callback so IRQ exit does not
+ * starve the scheduler job.  The job leaves the status visible to the OpenISA
+ * callback, then re-enables the sources after that callback has had its
+ * normal radio_status_reset() opportunity.
+ */
+static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
+						   bool abort)
+{
+	if (!efr32_radio_completion_dispatch_queue(&efr32_radio_completion_dispatch,
+						      efr32_radio_completion_dispatch.generation)) {
+		return;
+	}
+
+	efr32_radio_completion_work.callback = callback;
+	efr32_radio_completion_work.param = param;
+	efr32_radio_completion_work.abort = abort;
+	k_sem_give(&efr32_radio_completion_sem);
+}
+
+static void efr32_radio_completion_job(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (;;) {
+		radio_isr_cb_t callback = NULL;
+		void *param = NULL;
+		bool abort = false;
+		unsigned int key;
+
+		k_sem_take(&efr32_radio_completion_sem, K_FOREVER);
+		key = irq_lock();
+		if (efr32_radio_completion_dispatch_take(&efr32_radio_completion_dispatch)) {
+			callback = efr32_radio_completion_work.callback;
+			param = efr32_radio_completion_work.param;
+			abort = efr32_radio_completion_work.abort;
+		}
+		irq_unlock(key);
+
+		if (!callback) {
+			continue;
+		}
+
+		callback(param);
+		if (abort) {
+			key = irq_lock();
+			efr32_radio_abort_finish(&efr32_radio_abort);
+			irq_unlock(key);
+		} else {
+			/* A queued RXDONE/TXDONE is still visible until the LLL consumes it. */
+			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		}
+	}
+}
+
 
 /* [software] lll_init() connects LL_RADIO_IRQn (FRC_IRQn) to this entry. */
 void isr_radio(void *arg)
@@ -636,8 +711,7 @@ void isr_radio(void *arg)
 		 */
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
-		abort_callback(abort_param);
-		efr32_radio_abort_finish(&efr32_radio_abort);
+		efr32_radio_completion_publish(abort_callback, abort_param, true);
 		return;
 	}
 
@@ -673,7 +747,11 @@ void isr_radio(void *arg)
 		 */
 		LL_ASSERT(efr32_packet_lifecycle_latch_completion(
 			&efr32_packet_stage.lifecycle, completion_direction));
-		efr32_radio_abort.callback(efr32_radio_abort.param);
+		/* Do not run an LLL state machine on the hardware interrupt stack. */
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		efr32_radio_completion_publish(efr32_radio_abort.callback,
+					       efr32_radio_abort.param, false);
 	}
 }
 
@@ -689,10 +767,14 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 {
 	unsigned int key = irq_lock();
 
+	(void)efr32_radio_completion_dispatch_replace(&efr32_radio_completion_dispatch);
 	efr32_radio_abort_replace(&efr32_radio_abort, cb, param);
 	efr32_packet_lifecycle_forget_completion(&efr32_packet_stage.lifecycle);
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	/* Replacement also cancels a deferred callback that had masked this line. */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	/* FRC's line can remain pended after its source was acknowledged. */
 	k_irq_clear_pending(LL_RADIO_IRQn);
 
@@ -710,6 +792,9 @@ static void efr32_radio_completion_quiesce(void)
 	unsigned int key = irq_lock();
 
 	efr32_radio_abort_cancel(&efr32_radio_abort);
+	(void)efr32_radio_completion_dispatch_replace(&efr32_radio_completion_dispatch);
+	efr32_radio_completion_work.callback = NULL;
+	efr32_radio_completion_work.param = NULL;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	k_irq_clear_pending(LL_RADIO_IRQn);
