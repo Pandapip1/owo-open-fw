@@ -103,6 +103,8 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
 
+#define EFR32_PROTIMER_BASE 0xB801C000UL
+
 #define EFR32_AGC_FRAMERSSI_OFFSET 0x01CU
 #define EFR32_AGC_IF_OFFSET 0x044U
 #define EFR32_AGC_CMD_OFFSET 0x04CU
@@ -464,6 +466,15 @@ void radio_setup(void)
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+
+	/*
+	 * The stock setup helper also writes one at +0x004 in the BUFC and
+	 * PROTIMER windows (flash-stock.bin offsets 0x26de4 and 0x26dfc).
+	 * Mirror those exact non-secure-alias writes because this HAL uses both
+	 * blocks below. Their field semantics and ordering remain uncharacterized.
+	 */
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_PROTIMER_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 
 	/*
 	 * [RAIL init] The xG22 RF initializer writes RXCTRL=0x60, then clears
