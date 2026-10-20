@@ -227,7 +227,28 @@ For BLE 1M, the public table writes `RFCRC.CTRL = 0x708`, `RFCRC.INIT = 0xAAAAAA
 AGC's live `RSSI +0x018` and latched `FRAMERSSI +0x01C` have reset raw value `0x8000` and a public read-only mask of `0x0000FFC0` (`revB2/AGC_NS_register.py:116-149`). The generated fields supply the bit positions but not units. The vendor resolves both the conversion and the appropriate packet-time source: `RAIL_GetRxIncomingPacketRssi` branches to `sli_rail_40a4a663e9540c5b085d11f994ab5fe0` in `rfhal_radio.o`, whose 32-byte section begins at archive file offset `0x3fd4c`; it reads `FRAMERSSI` at `0xB800C01C`, masks `0xFF00`, and calls `sli_rail_d0c1b6aa0db6742c099aa9a06dbabf70` at archive file offset `0x3fc7e`. That helper sign-extends the 10-bit field at bits 6..15, treats `-512` as invalid, subtracts 200 quarter-dB, and clamps at `-511`; the caller rounds negative values by adding three before extracting the signed dB result. The HAL follows that conversion and returns its positive magnitude, matching OpenISA's reference `radio_rssi_get()` contract (`hal/RV32M1/radio/radio.c:957-960`) and its `0x7f` unavailable RSSI convention (`lll_scan.c:1122-1126`). The public AGC model names write-only `CMD.RSSISTART` at `+0x04C`, bit 0 (`AGC_NS_register.py:458-472`, `AGC_NS_field.py:997-1005`), so `radio_rssi_measure()` now emits exactly that command. It also names bit 0 of read-write `IF +0x044` as `RSSIVALID`, with the same bit in `IEN +0x048` (`AGC_NS_register.py:398-439`, `AGC_NS_field.py:837-924`); the HAL polls and clears that latch for OpenISA's readiness/status API. QEMU accepts and discards the write-only command and retains both public latches and their aliases, but does not synthesize an RSSI sample or assertion of `RSSIVALID` without an RF input.
 
 ## 4.3 PROTIMER access pattern [F]
-The public xG22 RAIL archive's `rfhal_protimer.o` accesses the secure alias of `0xA801C000`, confirming the base. It writes command values including `1`, `4`, `0x20`, `0x40`, `0x80`, and `0x10000` to `+0x00C`; uses `+0x030` and `+0x038` as timer state/period inputs; and accesses four 16-byte compare slots starting at `+0x100` (with associated control words at `+0x200`). The object also drives `RAC_RSM_IRQHandler`, so timer behavior is part of the event path. Locators in `librail_efr32xg22_gcc_release.a(rfhal_protimer.o)` are `.text.sli_rail_2867cf…` file offset `0x11c` (enable/command), `.text.sli_rail_daa5e20…` offset `0x138` (command `4`), `.text.sli_rail_18d8f930…` offset `0x180` (commands `0x20`/`0x80`), `.text.sli_rail_4aff3cd…` offset `0x558` (command `0x10000`), and `.text.sli_rail_30b95b…` offset `0x20c` (compare-bank accesses).
+The public xG22 RAIL archive's `rfhal_protimer.o` accesses the non-secure
+window at `0xB801C000`, confirming both the base and its alias relationship
+with the trace's secure `0xA801C000` window. The member data starts at archive
+file offset `0x3bf34`. Its 28-byte
+`.text.sli_rail_2867cf1f7327fd002fccf5d8ded311be` section starts at
+`0x3c050` (object offset `0x11c`) and writes command `1` to `+0x00c`; the
+36-byte `.text.sli_rail_daa5e20a02fa3083d34766f4d0c794f3` at `0x3c06c`
+(object offset `0x138`) writes command `4`. Both first program the NVIC before
+the command write. The 20-byte `.text.sli_rail_18d8f9306bac0be367395437e84b7c36`
+at `0x3c0b4` writes either `0x20` or `0x80` to that same command register,
+and the 24-byte `.text.sli_rail_4aff3cd2f4ff81ffa9da09f59bb74c75` at
+`0x3c48c` writes `0x10000` after its PTI auxiliary-data call. This identifies
+the command values and vendor-visible window, not their names or effects.
+
+The object uses `+0x030` and `+0x038` as timer state/period inputs; and
+accesses four 16-byte compare slots starting at `+0x100` (with associated
+control words at `+0x200`). It also drives `RAC_RSM_IRQHandler`, so timer
+behavior is part of the event path. QEMU maps the secure and non-secure
+PROTIMER windows to a shared named latch state; its focused regression writes
+the RAIL non-secure `CTRL`/`CMD` path and observes `CTRL` through both windows.
+This preserves the observed alias behavior without claiming timer progression,
+compare, capture, IRQ, or command semantics.
 
 The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, counter unit, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
 
