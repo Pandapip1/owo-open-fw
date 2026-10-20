@@ -112,6 +112,13 @@ abort cannot be followed by accidental reuse of a stale target. These checks
 are scaffolding for a future proven producer; they do not claim FRC/BUFC packet
 delivery today.
 
+A new `radio_pkt_configure()` generation additionally invalidates both prior
+direction-specific FIFO setups and targets. This makes the configured framing
+part of the TX staging contract: `radio_pkt_tx_set()` requires an octet-sized
+configured length field and rejects a PDU whose declared payload is over that
+generation's bound before it alters BUFC. It prevents accidental reuse of a
+FIFO staged under an older format; it does not assign an FRC framing layout.
+
 **[F]** Current receive targets have sufficient capacity for those configured
 lengths, but this is a call-topology property—not a general `void *` capacity
 contract. Advertising and unencrypted connection paths use `node_rx->pdu`

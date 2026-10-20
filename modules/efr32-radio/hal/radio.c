@@ -733,6 +733,19 @@ void radio_aa_set(const uint8_t *aa)
  */
 void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 {
+	/*
+	 * A new framing contract invalidates both direction-specific FIFO setups.
+	 * In particular, do not let a later TXEN reuse bytes staged for an older
+	 * maximum length or header representation.  OpenISA configures a packet
+	 * while no packet operation is active; retain that ordering as an explicit
+	 * controller contract rather than trying to reconfigure an active FRC.
+	 */
+	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+	efr32_packet_stage.rx_target = NULL;
+	efr32_packet_stage.rx_fifo_configured = false;
+	efr32_packet_stage.tx_source = NULL;
+	efr32_packet_stage.tx_bytes = 0U;
+	efr32_packet_stage.tx_fifo_configured = false;
 	efr32_packet_stage.bits_len = bits_len;
 	efr32_packet_stage.max_len = max_len;
 	efr32_packet_stage.flags = flags;
@@ -748,6 +761,7 @@ void radio_pkt_rx_set(void *rx_packet)
 {
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 
+	LL_ASSERT(efr32_packet_stage.packet_configured);
 	LL_ASSERT(rx_packet != NULL);
 	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
 
@@ -819,9 +833,13 @@ void radio_pkt_tx_set(void *tx_packet)
 	uint32_t bytes;
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
 
+	LL_ASSERT(efr32_packet_stage.packet_configured);
+	/* All current OpenISA TX callers use the octet-sized LL length field. */
+	LL_ASSERT(efr32_packet_stage.bits_len == 8U);
 	LL_ASSERT(pdu != NULL);
 	bytes = (uint32_t)pdu[1] + 2U;
 	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
+	LL_ASSERT(pdu[1] <= efr32_packet_stage.max_len);
 	LL_ASSERT(bytes <= sizeof(efr32_tx_fifo));
 	LL_ASSERT(((uintptr_t)efr32_tx_fifo & 3U) == 0U);
 	memcpy(efr32_tx_fifo, pdu, bytes);
