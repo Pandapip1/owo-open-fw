@@ -50,8 +50,20 @@ config EFR32_RADIO_SCHEDULER_PRIO
 	  intentionally scheduler-owned, never ISR-owned. This is best-effort
 	  scheduling, not a hardware launch deadline guarantee.
 
-config EFR32_RADIO_SCHEDULER_STACK_SIZE
-	int "Persistent radio scheduler job stack size"
+config EFR32_RADIO_LAUNCH_STACK_SIZE
+	int "Persistent radio TX/RX launch job stack size"
+	default 320
+	help
+	  TX and RX launch jobs only wait for a semaphore, claim their generation,
+	  and perform the bounded radio arm write. They deliberately do not invoke
+	  controller callbacks. Keep their stacks separate from the completion job
+	  so its callback budget does not reserve RAM for both launch paths.
+
+config EFR32_RADIO_COMPLETION_STACK_SIZE
+	int "Persistent radio completion job stack size"
 	default 512
+	help
+	  FRC completion work invokes the controller callback after leaving the
+	  interrupt context, so it retains a larger, independent stack budget.
 
 endif # BT_LLL_VENDOR_EFR32
