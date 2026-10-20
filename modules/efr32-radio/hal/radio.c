@@ -70,6 +70,48 @@ static uint8_t MALIGN(4) efr32_tx_fifo[512];
 /* RAIL configures the RX BUFC channel as a 512-byte power-of-two FIFO too. */
 static uint8_t MALIGN(4) efr32_rx_fifo[512];
 
+/*
+ * Packet buffers have two distinct ownership domains on this part:
+ *
+ * - the controller owns the PDU passed to radio_pkt_{rx,tx}_set(); and
+ * - BUFC owns efr32_{rx,tx}_fifo while the peripheral is active.
+ *
+ * Keep the relationship explicit now, before a later FRC handoff teaches us
+ * how to transfer an RX frame out of BUFC.  In particular, RX must not be
+ * copied speculatively: the FRC framing and BUFC read-pointer semantics are
+ * not yet evidenced.  The stored RX target is the eventual completion target,
+ * not a claim that BUFC already writes directly to it.
+ */
+enum efr32_radio_packet_direction {
+	EFR32_RADIO_PACKET_IDLE,
+	EFR32_RADIO_PACKET_RX,
+	EFR32_RADIO_PACKET_TX,
+};
+
+static struct {
+	void *rx_target;
+	const void *tx_source;
+	uint16_t tx_bytes;
+	/*
+	 * The OpenISA LLL supplies these immediately before packet setup.  They
+	 * describe the on-air PDU, not the number of bytes currently in BUFC:
+	 * FRC's FIFO framing is still unknown.  Retain them so an eventual RX
+	 * completion path can reject an impossible length before it copies data.
+	 */
+	uint8_t bits_len;
+	uint8_t max_len;
+	uint8_t flags;
+	bool packet_configured;
+	bool rx_fifo_configured;
+	bool tx_fifo_configured;
+	enum efr32_radio_packet_direction active_direction;
+} efr32_packet_stage;
+
+static void efr32_packet_stage_reset(void)
+{
+	memset(&efr32_packet_stage, 0, sizeof(efr32_packet_stage));
+}
+
 #define BLE_CCM_MIC_SIZE 4U
 #define BLE_CCM_NONCE_SIZE 13U
 #define BLE_CCM_AAD_MASK 0xE3U
@@ -445,16 +487,31 @@ void isr_radio(void *arg)
 	}
 }
 
-/* [software] The generic OpenISA LLL owns the FRC_IRQn connection and enable. */
+/*
+ * The generic OpenISA LLL owns the FRC_IRQn connection and enable.  It can
+ * replace the callback while it advances a radio event, so make the callback
+ * and its parameter an interrupt-atomic pair and discard a completion that
+ * belonged to the old handler.  This is the single-IRQ equivalent of the
+ * RV32M1 HAL's IRQ disable, callback update, pending-event clear, and IRQ
+ * restore sequence.
+ */
 void radio_isr_set(radio_isr_cb_t cb, void *param)
 {
-	isr_cb = cb;
+	unsigned int key = irq_lock();
+
 	isr_cb_param = param;
+	isr_cb = cb;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+
+	irq_unlock(key);
 }
 
 /* [regs-public] Enable the six blocks whose public xG22 models expose EN.EN. */
 void radio_setup(void)
 {
+	efr32_packet_stage_reset();
+
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
 	 * the sole writable field EN.EN at bit zero. This deliberately does not
@@ -500,6 +557,9 @@ void radio_setup(void)
 /* [regs-vendor] Retain the source-backed reset prefix; see radio-tables.md §4.1. */
 void radio_reset(void)
 {
+	/* A hardware reset invalidates both BUFC channel configurations. */
+	efr32_packet_stage_reset();
+
 	/*
 	 * Stock RAIL clears the three RAC scratch registers and asserts
 	 * CTRL.FORCEDISABLE before it observes STATUS.  Its following sequencer
@@ -599,12 +659,15 @@ void radio_aa_set(const uint8_t *aa)
 
 /* [regs-partial] FRC length/header configuration remains unproven (T5;
  * docs/radio-tables.md §4.2). CRC, whitening, and access-address
- * configuration are implemented above. */
+ * configuration are implemented above.  Preserve the LLL's framing bounds
+ * for a later evidenced RX completion path, without inferring an FRC layout.
+ */
 void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 {
-	ARG_UNUSED(bits_len);
-	ARG_UNUSED(max_len);
-	ARG_UNUSED(flags);
+	efr32_packet_stage.bits_len = bits_len;
+	efr32_packet_stage.max_len = max_len;
+	efr32_packet_stage.flags = flags;
+	efr32_packet_stage.packet_configured = true;
 	EFR32_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
 }
 
@@ -616,7 +679,7 @@ void radio_pkt_rx_set(void *rx_packet)
 {
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 
-	ARG_UNUSED(rx_packet);
+	LL_ASSERT(rx_packet != NULL);
 	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
 
 	/*
@@ -629,6 +692,10 @@ void radio_pkt_rx_set(void *rx_packet)
 	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
 	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_rx_fifo;
 	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
+
+	/* Retain the controller's target for the eventual proven RX copy-out. */
+	efr32_packet_stage.rx_target = rx_packet;
+	efr32_packet_stage.rx_fifo_configured = true;
 }
 
 /*
@@ -638,9 +705,11 @@ void radio_pkt_rx_set(void *rx_packet)
 void radio_pkt_tx_set(void *tx_packet)
 {
 	const uint8_t *pdu = tx_packet;
-	uint32_t bytes = (uint32_t)pdu[1] + 2U;
+	uint32_t bytes;
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
 
+	LL_ASSERT(pdu != NULL);
+	bytes = (uint32_t)pdu[1] + 2U;
 	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
 	LL_ASSERT(bytes <= sizeof(efr32_tx_fifo));
 	LL_ASSERT(((uintptr_t)efr32_tx_fifo & 3U) == 0U);
@@ -655,6 +724,11 @@ void radio_pkt_tx_set(void *tx_packet)
 	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_tx_fifo;
 	*radio_reg32(base + EFR32_BUFC_WRITEOFFSET) = bytes;
 	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_PREFETCH;
+
+	/* Keep source and length for a future FRC/BUFC completion diagnostic. */
+	efr32_packet_stage.tx_source = tx_packet;
+	efr32_packet_stage.tx_bytes = bytes;
+	efr32_packet_stage.tx_fifo_configured = true;
 }
 
 /* [software] software (no register access needed); not implemented yet */
@@ -705,6 +779,8 @@ void radio_rx_enable(void)
 
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+	/* No transfer happens here; this only labels the later FRC completion. */
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_RX;
 }
 
 /*
@@ -719,6 +795,8 @@ void radio_tx_enable(void)
 	}
 
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
+	/* No new MMIO protocol is implied by retaining this software direction. */
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_TX;
 }
 
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
@@ -731,6 +809,7 @@ void radio_disable(void)
 	 */
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
 }
 
 /* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */

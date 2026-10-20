@@ -297,10 +297,12 @@ tick is roughly 0.5 microseconds and whose wrap range is about 17 minutes
 (`rail_chip_specific.h:272-328`). The locally retained xG22 RAIL archive's
 `RAIL_GetTime` path reads non-secure `PROTIMER +0x020`: its shared helper is
 at archive byte offset `0x3c5c8` and calls the atomic counter reader at
-`0x3c598`. QEMU consequently exposes a resettable 32-bit virtual counter at
-that offset, shared with the secure window and advancing at an explicitly
-approximate 2 MHz; its regression advances QEMU virtual time by 1000 ns and
-observes two ticks. This is an emulator timebase approximation only. It is not interchangeable with the
+`0x3c598`. QEMU consequently exposes a resettable 32-bit counter at that
+offset, shared with the secure window.  It is driven by its own modeled 2 MHz
+`PROTIMERCLK` input and QEMU's `ptimer` (rather than the CPU clock or host
+time); its regression advances virtual time just beyond 1000 ns and observes
+two ticks, then verifies reset returns it to zero. This is an emulator
+timebase approximation only. It is not interchangeable with the
 OpenISA HAL's `radio_tmr_start(trx, ticks_start, remainder)`: the reference
 port first adjusts a coarse RTC tick and a microsecond remainder, then
 programs its own RTC comparator (`hal/RV32M1/radio/radio.c:1026-1126`). The
