@@ -82,6 +82,15 @@ pub(crate) fn resetting() -> bool {
     RESETTING.load(Ordering::Acquire)
 }
 
+/*
+ * The stimulation lease is feedable only while its supervisor is still armed
+ * and reset teardown has not begun. It deliberately rechecks shared output
+ * state every feed rather than trusting the earlier acquisition.
+ */
+fn stim_watchdog_safe() -> bool {
+    !resetting() && STATE.lock().unwrap().out.monitoring_required()
+}
+
 fn now_us() -> u64 {
     // SAFETY: plain kernel query.
     let ticks = unsafe { zephyr::raw::k_uptime_ticks() } as u64;
@@ -131,7 +140,7 @@ pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
     // monitor lease exists first.  Dry-run builds deliberately have no WDT.
     #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
     if s.stim_watchdog.is_none() {
-        s.stim_watchdog = Some(wdt::Lease::acquire().map_err(|_| {
+        s.stim_watchdog = Some(wdt::Lease::acquire(Some(stim_watchdog_safe)).map_err(|_| {
             error!("refusing stimulation frame: watchdog unavailable");
             proto::Error::Range
         })?);
