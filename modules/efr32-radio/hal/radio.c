@@ -415,7 +415,7 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
 }
 
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [software] lll_init() connects LL_RADIO_IRQn (FRC_IRQn) to this entry. */
 void isr_radio(void *arg)
 {
 	ARG_UNUSED(arg);
@@ -424,12 +424,11 @@ void isr_radio(void *arg)
 	}
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [software] The generic OpenISA LLL owns the FRC_IRQn connection and enable. */
 void radio_isr_set(radio_isr_cb_t cb, void *param)
 {
 	isr_cb = cb;
 	isr_cb_param = param;
-	EFR32_RADIO_TODO("IRQ routing (T1)");
 }
 
 /* [regs-public] Enable the six blocks whose public xG22 models expose EN.EN. */
