@@ -85,6 +85,7 @@ pub(crate) fn resetting() -> bool {
  * a frame acquires its lease while holding that mutex, and the predicate must
  * be usable as an acquire-time race gate.
  */
+#[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
 fn stim_watchdog_safe() -> bool {
     !resetting()
 }
