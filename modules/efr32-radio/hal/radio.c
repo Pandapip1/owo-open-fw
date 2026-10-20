@@ -22,6 +22,7 @@
 #include <psa/crypto.h>
 
 #include "hal/ccm.h"
+#include "abort_lifecycle.h"
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
@@ -49,8 +50,6 @@
 			      "radio register map unknown"); \
 	} while (0)
 
-static radio_isr_cb_t isr_cb;
-static void *isr_cb_param;
 /*
  * OpenISA's abort paths install a cleanup callback and then call
  * radio_disable().  The RV32M1 HAL completes that sequence with a timer IRQ;
@@ -58,7 +57,7 @@ static void *isr_cb_param;
  * retain an explicit, non-PDU completion reason for the same controller
  * lifecycle.
  */
-static bool efr32_radio_abort_pending;
+static struct efr32_radio_abort_lifecycle efr32_radio_abort;
 /*
  * OpenISA uses sleep/wake as a reference-counted clock-availability
  * contract.  xG22 radio power sequencing has not been characterized, so
@@ -534,7 +533,8 @@ void isr_radio(void *arg)
 {
 	uint32_t pending;
 	uint32_t expected = 0U;
-	bool abort_pending;
+	radio_isr_cb_t abort_callback;
+	void *abort_param;
 
 	ARG_UNUSED(arg);
 	/*
@@ -543,12 +543,8 @@ void isr_radio(void *arg)
 	 * radio_isr_set() clears this flag together with a pended FRC IRQ, so this
 	 * cannot be delivered to a handler installed for a later event.
 	 */
-	abort_pending = efr32_radio_abort_pending;
-	efr32_radio_abort_pending = false;
-	if (abort_pending) {
-		if (isr_cb) {
-			isr_cb(isr_cb_param);
-		}
+	if (efr32_radio_abort_take(&efr32_radio_abort, &abort_callback, &abort_param)) {
+		abort_callback(abort_param);
 		return;
 	}
 
@@ -569,13 +565,13 @@ void isr_radio(void *arg)
 	}
 
 	/* A stale or wrong-direction completion must not leave FRC_IRQn asserted. */
-	if ((pending & ~expected) || (!isr_cb && pending)) {
+	if ((pending & ~expected) || (!efr32_radio_abort.callback && pending)) {
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-			     EFR32_FRC_IF_OFFSET) = !isr_cb ? pending : pending & ~expected;
+			     EFR32_FRC_IF_OFFSET) = !efr32_radio_abort.callback ? pending : pending & ~expected;
 	}
 
-	if (isr_cb && (pending & expected)) {
-		isr_cb(isr_cb_param);
+	if (efr32_radio_abort.callback && (pending & expected)) {
+		efr32_radio_abort.callback(efr32_radio_abort.param);
 	}
 }
 
@@ -591,9 +587,7 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 {
 	unsigned int key = irq_lock();
 
-	isr_cb_param = param;
-	isr_cb = cb;
-	efr32_radio_abort_pending = false;
+	efr32_radio_abort_replace(&efr32_radio_abort, cb, param);
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	/* FRC's line can remain pended after its source was acknowledged. */
@@ -607,7 +601,7 @@ void radio_setup(void)
 {
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
-	efr32_radio_abort_pending = false;
+	efr32_radio_abort.pending = false;
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
@@ -657,7 +651,7 @@ void radio_reset(void)
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
-	efr32_radio_abort_pending = false;
+	efr32_radio_abort.pending = false;
 
 	/*
 	 * Stock RAIL clears the three RAC scratch registers and asserts
@@ -987,8 +981,7 @@ void radio_disable(void)
 	 * IRQ as a software event and make isr_radio() distinguish it from a PDU
 	 * completion above.
 	 */
-	efr32_radio_abort_pending = isr_cb != NULL;
-	if (efr32_radio_abort_pending) {
+	if (efr32_radio_abort_request(&efr32_radio_abort)) {
 		k_irq_set_pending(LL_RADIO_IRQn);
 	}
 	irq_unlock(key);

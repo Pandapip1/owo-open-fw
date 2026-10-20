@@ -201,6 +201,15 @@ BUFC and RXDONE alone is never described as packet delivery.
   nix develop . -c cmake --build build/radio-port-contract-check
   ```
 
+  The abort callback ownership rule has a separate host-only regression test;
+  it needs neither QEMU nor radio MMIO and verifies that replacing an OpenISA
+  callback cancels a previously pended abort before that abort can reach the
+  new event:
+
+  ```sh
+  sh tests/efr32-radio-contract/run.sh
+  ```
+
   On 2026-10-20 it built and linked the real ULL (`ll_adv_enable`, `lll_init`,
   ...) with the module at 147,340 B flash (28.10%) and 26,632 B RAM (81.27%),
   before any application payload. It cannot run: the radio hooks are stubs and

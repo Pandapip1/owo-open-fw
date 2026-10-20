@@ -43,6 +43,17 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   efr32_radio_patch(lll/lll_conn.c "\tp->resv = 0U;\n" "\t/* p->resv does not exist in current pdu.h */\n"
             "struct pdu_data has no resv member")
 
+  # OpenISA's lll_adv.c declares its advertising-PDU pool, stale-PDU FIFO,
+  # and semaphore, but its init_reset() is an empty stub.  Consequently the
+  # first lll_adv_data_init() sees an empty free list; ull_adv.c does not
+  # propagate that allocation failure before init_set() dereferences pdu[0].
+  # The current Nordic LLL initializes these same three objects in its
+  # init_reset().  Keep this small, exact patch beside the other upstream
+  # compatibility patches rather than carrying a fork of the LLL source.
+  efr32_radio_patch(lll/lll_adv.c "static int init_reset(void)\n{\n\treturn 0;\n}"
+            "static int init_reset(void)\n{\n\tmem_init(mem_pdu.pool, PDU_MEM_SIZE,\n\t\t (sizeof(mem_pdu.pool) / PDU_MEM_SIZE), &mem_pdu.free);\n\tMFIFO_INIT(pdu_free);\n\tk_sem_init(&sem_pdu_free, 0, PDU_MEM_FIFO_COUNT);\n\n\treturn 0;\n}"
+            "OpenISA advertising PDU pool is declared but never initialized")
+
   # The one RV32M1-specific spot in the LLL: the tick-counter ISR reads the LPTMR1 compare flag.
   # Replaced by a flag set from the counter alarm callback (hal/cntr.c).
   file(READ ${GEN}/lll/lll.c _c)
