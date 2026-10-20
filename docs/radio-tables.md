@@ -392,6 +392,20 @@ descriptor.  Consequently an eventual Zephyr RX extractor must first prove
 the active RAIL appended-info and completed-status configuration, rather than
 passing `packetBytes` or the descriptor bytes to the LLL as a normalized PDU.
 
+One concrete appended-info control is located, but the stock selection is not.
+The public `RAIL_RX_OPTION_REMOVE_APPENDED_INFO` is bit 4
+(`rail_types.h:5629-5767`). `RAIL_ConfigRxOptions` tail-branches to
+`rail_rf_hal.o:sli_rail_c1ee…`, archive `[0x11bd8, 0x11d04)` (member
+`0x10dd4`, section file offset `0xe04`); when its option mask includes bit 4,
+it updates active-handle `+0x90` and writes FRC `+0x054` with zero when that
+option is selected or 27 when it is clear. This proves the current RAIL
+library's hardware-observable option handling, not the stock firmware's
+choice. The currently located stock `FRC+0x054` literals at file offsets
+`0x1f7dc`, `0x28d68`, and `0x298a8` are read sites only; no literal-backed
+stock store or `RAIL_ConfigRxOptions` call has been established. Computed
+address writes remain possible, so absence of a located store is not evidence
+for either option state.
+
 The descriptor-ring initializer distinguishes the CPU's lifecycle work from
 record production. `rfhal_bufc.o:sli_rail_6281eecc9c4ea6e1ecc523be2e1d48d2`
 is archive `[0x33740, 0x337c8)` (member `0x332f4`, section file offset
