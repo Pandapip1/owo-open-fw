@@ -37,10 +37,12 @@ completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
 ## Status
 * The current in-process model cleanly transfers from the bootloader reset vector to the stock
-  application's reset vector. Bounded native-QEMU runs have not yet reached radio
-  initialization. The retained `evidence/stock/radio-trace.log` is useful historical register
-  evidence, but its first line identifies an older external socket bridge rather than this native
-  QEMU device; it must not be treated as end-to-end validation of the current model.
+  application's reset vector. A bounded native-QEMU capture reached early radio initialization:
+  it recorded 19 radio writes, including the eight `+0x004 = 1` setup accesses documented in
+  `docs/radio-firmware-plan.md`. This does not establish sequencer loading, a RAC command, or a
+  radio transaction. The retained `evidence/stock/radio-trace.log` remains historical register
+  evidence from an older external socket bridge and must not be treated as native-model
+  end-to-end validation.
 * Native CPU tracing found and cleared one early boot dependency: stock application code at image
   file offsets `0x5e90..0x5e9c` (`0x0001be90..0x0001be9c` when loaded) enables DCDC control
   through the SET alias and waits for `DCDC.IF.REGULATION`. The public xG22 header names that
@@ -48,9 +50,10 @@ completion. The trace file is transient and belongs under `build/qemu-runtime/`.
   A subsequent trace reaches the later HFXO setup sequence. Its read-only ready status is modeled
   with the public `RDY`, `COREBIASOPTRDY`, `ENS`, `HWREQ`, and `ISWARM` fields
   (`efr32bg22_hfxo.h:354-380`). This is boot-progress evidence only,
-  not a claim that the native model reaches radio configuration or idle operation.
+  not a claim that the native model reaches radio configuration beyond the bounded early setup
+  capture or completes a radio transaction.
 * Radio blocks have an in-process native register model with source- and trace-backed RAC,
   BUFC, PROTIMER, FRC, MODEM, AGC, SYNTH, and RFCRC register handling. BLE packet traffic,
   sequencer behavior, and air delivery remain unmodelled, so stock-firmware stimulation cannot
-  yet be triggered from the outside. Completing the boot path and reproducing the retained radio
-  configuration with the native model are separate validation work items.
+  yet be triggered from the outside. Identifying the on-chip dependency between native early
+  setup and the historical extended RAIL configuration remains a separate validation item.
