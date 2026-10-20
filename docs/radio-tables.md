@@ -205,6 +205,19 @@ The same public header defines identical global `IF` and `IEN` masks, `0x8F0F0F0
 
 The downloaded stock sequencer-RAM capture adds a distinct programmed-I/O fact. In the untracked `scratch-radio.tgz(radioram.dump)`, Thumb code at RAM offset `0x0ce4` (`0xA0000CE4`) loads the literal at member offset `0x0e30`, `0xA8004090` (`FRC.RXRAWDATA`), then at `0x0d5a`, `0x0d60`, `0x0d66`, and `0x0d6a` stores its four byte lanes to the literal at member offset `0x0e34`, `0xAA000064`. The public revB2 model identifies the former as read-only `FRC_S.RXRAWDATA` (`FRC_S_register.py:871-885`); the trace-established xG22 layout identifies the latter as secure buffer 1 `WRITEDATA` (`0xAA000000 + 0x04c + 0x018`). This proves that the captured sequencer feeds that port with programmed I/O from FRC raw RX data; it does not establish packet framing, FIFO ownership, or DMA behavior. QEMU aliases secure and non-secure BUFC windows to the same data-port state and mirrors each port write into the configured guest-RAM backing address: the public RAIL contract defines that address as a circular FIFO buffer receiving incoming packet data (`rail.h:1817-1821`). Its data-port regression verifies both the secure-buffer-1/non-secure-alias read and the resulting guest-RAM byte. It also makes the source register read-only to guest writes, matching the public model; a future internal receive producer may supply it.
 
+The capture's SHA-256 is `acd72f8e…ed100847`, and the same FRC literal occurs
+in the shipped sequencer image: `generic_efr32xg22_release_seq.o`, member
+data `0x13f048`, contains it at archive file offset `0x140ab4` (the large
+`.rodata.sli_rail_6c7715…` section begins at relative `0x980`; image-relative
+offset `0x10ec`). Thus the PIO sequence is evidence from the shipped image,
+not an ad hoc RAM program. Conversely, M33 `generic_phy.o:FRC_IRQHandler`
+starts at archive offset `0x52758` (length `0x7e4`): it snapshots and
+acknowledges enabled FRC `IF/IEN` (`0xB8004068/0xB800406c`) and BUFC
+`IF/IEN` (`0xBA000114/0xBA000118`) before dispatch, but has neither literal.
+The sequencer is therefore the observed raw-byte producer, and the M33 handler
+is downstream bookkeeping. Neither establishes packet records, metadata,
+`TRAILRXDATA.CRCOK`, or their ordering with RXDONE.
+
 The same public header defines every buffer's local `STATUS.THRESHOLDFLAG` at bit 20 (`efr32bg21_bufc.h:194-205`), while the corresponding global threshold flags remain sparse at `8*n+2`. QEMU derives that local status bit from the matching sparse global flag; its regression test uses buffer 1 specifically, so this cannot silently regress to a compact global-flag assumption.
 
 ## 4.1 RAC core [F]
