@@ -67,9 +67,14 @@ count, and `radio_is_off()` reads the RV32M1 DSM power-state bits
 availability contract even before EFR32 power sequencing is known.
 
 The xG22 RAIL archive exports `RAIL_Wake` (24 bytes), `RAIL_Idle` (10 bytes),
-and `RAIL_Sleep` (56 bytes) from its `rail_singleprotocol.o` input according
-to its archive symbol table. Those wrapper sizes alone do not identify the
-underlying RAC, oscillator, or power-manager sequence. Accordingly,
+and `RAIL_Sleep` (56 bytes) from `rail_singleprotocol.o`: their sections begin
+at archive file offsets `0x149266`, `0x1492c4`, and `0x149280`, respectively
+(member data starts at `0x148fdc`; section-relative object offsets are
+`0x28a`, `0x2e8`, and `0x2a4`). Direct disassembly shows each is only a
+wrapper: Wake calls a validation helper then tail-calls another helper, Sleep
+calls validation then a helper with a stack byte, and Idle tail-calls a helper.
+None contains a peripheral-address literal or MMIO access. Those wrappers do
+not identify the underlying RAC, oscillator, or power-manager sequence. Accordingly,
 `hal/radio.c` uses an atomic software reference count: setup begins awake,
 sleep decrements it and reports `-EALREADY` on an unmatched decrement, wake
 increments it, and off means a zero count. This is deliberately immediate and
