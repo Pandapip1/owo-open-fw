@@ -221,11 +221,12 @@ pub(crate) fn stop_all() {
 /// backend's pins/peripherals in their known state, and the immediately following `all_off` runs
 /// the normal, ordered bridge/DAC/routing/supply shutdown as well.  Keep this before BLE startup
 /// (and before the watchdog is armed) so no normal service can accept work first.
-fn early_boot_baseline() {
+fn early_boot_baseline() -> Result<(), ()> {
     let mut s = STATE.lock().unwrap();
     s.engine.stop();
-    s.out.init();
+    s.out.init()?;
     s.out.all_off();
+    Ok(())
 }
 
 /// Quiesce the application before an intentional reset.
@@ -250,7 +251,18 @@ extern "C" fn rust_main() {
     }
     // Every application start, including a watchdog or cold reboot, begins by actively driving
     // the output stage to its safe state before enabling any service that could receive work.
-    early_boot_baseline();
+    if early_boot_baseline().is_err() {
+        /*
+         * A watchdog reset cannot run teardown code.  The C SYS_INIT
+         * best-effort baseline has already attempted every electrical
+         * safe-off action; do not bring up BLE or normal work unless the
+         * reconstructed drivers also acknowledged their shutdown state.
+         */
+        error!("output shutdown baseline unverified; bring-up halted");
+        loop {
+            zephyr::time::sleep(Duration::millis_at_least(1_000));
+        }
+    }
     // The statically-created monitor may now take the same mutex as the pump.
     STIM_MONITOR_READY.store(true, Ordering::Release);
 

@@ -72,13 +72,17 @@ mod real {
             Real { hw: None, sup: Stimulator::new(Config::conservative()), poll_every_us: 250_000 }
         }
 
-        pub fn init(&mut self) {
+        /// Establish and verify the driver's shutdown state before normal
+        /// application bring-up.  Unlike `all_off`, startup must surface a
+        /// rejected driver command instead of merely logging it.
+        pub fn init(&mut self) -> Result<(), ()> {
             warn!("REAL stimulation backend enabled: UNVALIDATED on hardware; dummy load only");
             self.sup = Stimulator::new(config());
-            match Suit::new() {
-                Ok(h) => self.hw = Some(h),
-                Err(e) => warn!("output stage init failed ({:?}); staying inert", e),
-            }
+            let hw = Suit::new().map_err(|e| {
+                warn!("output-stage shutdown baseline failed ({:?})", e);
+            })?;
+            self.hw = Some(hw);
+            Ok(())
         }
 
         pub fn frame_received(&mut self, now_us: u64, covers_us: u64, first: bool) {
@@ -158,11 +162,15 @@ impl Output {
         }
     }
 
-    pub fn init(&mut self) {
+    /// Establish the output driver's verified shutdown baseline.
+    pub fn init(&mut self) -> Result<(), ()> {
         #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
-        self.real.init();
+        return self.real.init();
         #[cfg(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE))]
-        warn!("DRY-RUN stimulation backend: no electrode output exists in this build");
+        {
+            warn!("DRY-RUN stimulation backend: no electrode output exists in this build");
+            Ok(())
+        }
     }
 
     /// A valid frame arrived asking for `covers_us` of output (feeds the coverage window).

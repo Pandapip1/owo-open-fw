@@ -181,8 +181,32 @@ impl Suit {
             boost_duty: suit_param(SuitParam::BoostDutyPercent) as u8,
             supply_on: false,
         };
-        s.switch.select(None).map_err(|_| InitError::Errno(-5))?;
+        s.shutdown()?;
         Ok(s)
+    }
+
+    /// Put every output-owning driver in its known shutdown state and verify
+    /// that its driver call accepted the request.  This is intentionally not
+    /// the best-effort emergency path: startup must not proceed into normal
+    /// service unless every component has acknowledged its safe state.
+    pub fn shutdown(&mut self) -> Result<(), InitError> {
+        let bridge = self.bridge.off().map_err(|_| InitError::Errno(-5));
+        let dac = self
+            .dac
+            .write(self.scale.dac_channel, 0)
+            .map_err(InitError::Errno);
+        let switch = self.switch.select(None).map_err(|_| InitError::Errno(-5));
+
+        // These calls are infallible at the Rust interface, but they must
+        // still run before PWM/regulator shutdown even when an earlier driver
+        // rejected its command.
+        self.sense.stop();
+        self.fine.stop();
+        let boost = self.boost.set_percent(0).map_err(InitError::Errno);
+        let supplies = self.supplies_set(false).map_err(InitError::Errno);
+        self.supply_on = false;
+
+        bridge.or(dac).or(switch).or(boost).or(supplies)
     }
 
     fn supplies_set(&mut self, on: bool) -> Result<(), i32> {
