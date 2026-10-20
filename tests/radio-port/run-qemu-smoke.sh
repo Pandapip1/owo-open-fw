@@ -8,9 +8,9 @@
 #     -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust"
 #   nix develop . -c cmake --build build/radio-port-qemu
 #
-# Output is intentionally bounded: the application marker pair plus QEMU's
-# radio-register and RAC traces. Temporary QEMU logs and trace output are
-# removed on every exit.
+# Output is intentionally bounded: the application marker pair (recorded by
+# the native USART model's tracepoint) plus QEMU's radio-register and RAC
+# traces. Temporary QEMU logs and trace output are removed on every exit.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -41,7 +41,11 @@ set +e
 timeout --kill-after=1s "$RUN_SECONDS" "$QEMU_BIN" -M efr32bg22,flash="$IMAGE" \
     -display none -monitor none -icount shift=5 -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
-    -trace enable=efr32bg22_radio_write,enable=efr32bg22_rac_command,enable=efr32bg22_tx_snapshot,file="$RUNTIME_DIR/radio.trace" \
+    -trace enable=efr32bg22_usart_tx \
+    -trace enable=efr32bg22_radio_write \
+    -trace enable=efr32bg22_rac_command \
+    -trace enable=efr32bg22_tx_snapshot \
+    -trace file="$RUNTIME_DIR/radio.trace" \
     >"$RUNTIME_DIR/guest.log" 2>&1
 status=$?
 set -e
@@ -50,13 +54,15 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     exit "$status"
 fi
 
-grep -E '^(bt_enable|adv_start):' "$RUNTIME_DIR/guest.log" || true
-if ! grep -q '^bt_enable:' "$RUNTIME_DIR/guest.log"; then
-    # The current EFR32 model deliberately accepts USART TX without forwarding
-    # it to a host character device.  Consequently this case is deliberately
-    # *not* labelled "no advertiser queued": the app-side marker is absent.
-    echo "radio-mmio: bt_enable marker unavailable; advertiser queue state is unobserved"
-elif grep -q '^adv_start: 0$' "$RUNTIME_DIR/guest.log"; then
+# The EFR32 model intentionally has no host character device.  Reconstruct
+# printable console bytes only from QEMU's internal native-USART trace, rather
+# than creating a host-I/O shortcut. `xxd` is provided by the Nix shell.
+console=$(sed -n 's/.*USART1 TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
+    "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')
+printf '%s\n' "$console" | grep -E '^(bt_enable|adv_start):' || true
+if ! printf '%s\n' "$console" | grep -q '^bt_enable: 0$'; then
+    echo "radio-mmio: bt_enable did not report success through native USART tracing"
+elif printf '%s\n' "$console" | grep -q '^adv_start: 0$'; then
     if grep -q 'RAC.CMD=' "$RUNTIME_DIR/radio.trace"; then
         echo "radio-mmio: RAC command observed"
         sed -n '1,40p' "$RUNTIME_DIR/radio.trace"
