@@ -218,6 +218,21 @@ rather than a claim that it executes the RAIL transmit pipeline.
 
 This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. In the retained stock trace, `radio-trace.log:201` writes `RXDIS = 0x100`, `:203` reads `STATUS`, `:208` writes `TXDIS = 0x20`, and `:207` is the preceding `STATUS` read. That is an observed ordering fact, not a claim that the two commands are interchangeable. The QEMU model uses this source- and trace-matched RAC map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
+The same trace records the reset prefix independently of a transmit request.
+At byte offsets `0x00000a26`, `0x00000a56`, and `0x00000a86` in
+`evidence/stock/radio-trace.log` (lines 55--57), stock firmware clears
+`RAC.SR0`, `SR1`, and `SR2` (`+0x040`, `+0x044`, and `+0x048`).  At offset
+`0x00000ab6` (line 58) it writes one to `RAC.CTRL` (`+0x014`), which the
+public rev-B2 field model identifies as `CTRL.FORCEDISABLE`; it then reads
+`STATUS` at `0x00000b16` (line 60).  The following write to `SEQIF` and the
+later `CTRL` values `0x04000000` and zero (offsets `0x00000ae6`,
+`0x00000b75`, and `0x00000ba5`) belong to an uncharacterized sequencer
+hand-off, so the open HAL deliberately does not reproduce them.  It retains
+the proven scratch clear and force-disable-to-OFF prefix, then clears the
+force-disable latch.  QEMU gives `CTRL.FORCEDISABLE` this narrow cancellation
+effect, including cancellation of its synthetic TX timer; it does not infer
+the omitted sequencer behavior.
+
 ## 4.2 SYNTH, FRC, and AGC fields [F]
 The same public revB2 model identifies the remaining core data-path fields. SYNTH has 28-bit `FREQ` at `+0x034`, 21-bit `IFFREQ` at `+0x038`, `DIVCTRL` at `+0x03C`, 6-bit `CHCTRL.CHNO` at `+0x040`, and 18-bit `CHSP` at `+0x044`. The public BLE 1M channel config specifies base 2402 MHz, 2 MHz spacing, physical channels 0..39. Zephyr passes MHz relative to 2400 (`2`, `26`, `80` for advertising), so `radio_freq_chan_set` now validates that input and writes `CHNO = (chan - 2) / 2`. QEMU preserves these fields with their public masks. The PHY table remains responsible for `FREQ` and `CHSP`.
 

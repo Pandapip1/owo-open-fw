@@ -115,10 +115,13 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 
 #define EFR32_RAC_BASE 0xB8020000UL
 #define EFR32_RAC_SR0_OFFSET 0x040U
+#define EFR32_RAC_SR1_OFFSET 0x044U
+#define EFR32_RAC_SR2_OFFSET 0x048U
 #define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
 #define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
+#define EFR32_RAC_CTRL_OFFSET 0x014U
 #define EFR32_REGISTER_SET_OFFSET 0x1000U
 #define EFR32_REGISTER_CLEAR_OFFSET 0x2000U
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
@@ -128,6 +131,7 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
 #define EFR32_RAC_RXENSRCEN_SWRXEN (1U << 1)
+#define EFR32_RAC_CTRL_FORCEDISABLE (1U << 0)
 
 #define EFR32_BUFC_BASE 0xBA000000UL
 #define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
@@ -482,10 +486,23 @@ void radio_setup(void)
 	atomic_set(&efr32_radio_power_ref, 1);
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [regs-vendor] Retain the source-backed reset prefix; see radio-tables.md §4.1. */
 void radio_reset(void)
 {
-	EFR32_RADIO_TODO("IRQ routing, block enables and reset sequence");
+	/*
+	 * Stock RAIL clears the three RAC scratch registers and asserts
+	 * CTRL.FORCEDISABLE before it observes STATUS.  Its following sequencer
+	 * hand-off is still unknown, so preserve only this independently useful
+	 * prefix and release the force-disable latch once RAC reports OFF.
+	 */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR0_OFFSET) = 0U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR1_OFFSET) = 0U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR2_OFFSET) = 0U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_FORCEDISABLE;
+	while (!radio_is_idle()) {
+	}
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) = 0U;
 }
 
 /* [regs-public] Address-independent BLE 1M table; PHYINFO remains intentionally excluded (T3). */
