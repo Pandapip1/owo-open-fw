@@ -494,6 +494,20 @@ For BLE 1M, the public table writes `RFCRC.CTRL = 0x708`, `RFCRC.INIT = 0xAAAAAA
 AGC's live `RSSI +0x018` and latched `FRAMERSSI +0x01C` have reset raw value `0x8000` and a public read-only mask of `0x0000FFC0` (`revB2/AGC_NS_register.py:116-149`). The generated fields supply the bit positions but not units. The vendor resolves both the conversion and the appropriate packet-time source: `RAIL_GetRxIncomingPacketRssi` branches to `sli_rail_40a4a663e9540c5b085d11f994ab5fe0` in `rfhal_radio.o`, whose 32-byte section begins at archive file offset `0x3fd4c`; it reads `FRAMERSSI` at `0xB800C01C`, masks `0xFF00`, and calls `sli_rail_d0c1b6aa0db6742c099aa9a06dbabf70` at archive file offset `0x3fc7e`. That helper sign-extends the 10-bit field at bits 6..15, treats `-512` as invalid, subtracts 200 quarter-dB, and clamps at `-511`; the caller rounds negative values by adding three before extracting the signed dB result. The HAL follows that conversion and returns its positive magnitude, matching OpenISA's reference `radio_rssi_get()` contract (`hal/RV32M1/radio/radio.c:957-960`) and its `0x7f` unavailable RSSI convention (`lll_scan.c:1122-1126`). The public AGC model names write-only `CMD.RSSISTART` at `+0x04C`, bit 0 (`AGC_NS_register.py:458-472`, `AGC_NS_field.py:997-1005`), so `radio_rssi_measure()` now emits exactly that command. It also names bit 0 of read-write `IF +0x044` as `RSSIVALID`, with the same bit in `IEN +0x048` (`AGC_NS_register.py:398-439`, `AGC_NS_field.py:837-924`); the HAL polls and clears that latch for OpenISA's readiness/status API. QEMU accepts and discards the write-only command and retains both public latches and their aliases, but does not synthesize an RSSI sample or assertion of `RSSIVALID` without an RF input.
 
 ## 4.3 PROTIMER access pattern [F]
+The stock-image evidence also identifies the immediately preceding CMU path without
+turning it into a radio-state rule. `flash-stock.bin:0x26e0c..0x26e22` reaches the
+clock-source decoder at `0x1baf0..0x1bb10`; its `0x1bb74` literal is
+`0x40008070` (`CMU.SYSCLKCTRL`). That helper separately reads
+`0x27258 = 0xb0004fe0` and tests bit 16. The public BG22 header names
+`SYSCLKCTRL.CLKSEL` bits `0..2` and `RHCLKPRESC` bit 16
+(`efr32bg22_cmu.h:663-708`; the `SYSCLKCTRL` register layout is at `:63`).
+The stock PROTIMER setup itself is at `flash-stock.bin:0x29974..0x29a36` and
+uses literal `0x29d58 = 0xa801c008`; `radio-trace.log:64-67` independently
+records its first four writes (`+0x008 = 0x00011102`, `+0x030 = 0x00001233`,
+`+0x038 = 0x80015558`, `+0x00c = 1`). These are access/control-flow and
+public-layout facts. They do not prove CMU latency or gating, PROTIMER command
+semantics, or any RAC transition timing/gating relationship.
+
 The public xG22 RAIL archive's `rfhal_protimer.o` accesses the non-secure
 window at `0xB801C000`, confirming both the base and its alias relationship
 with the trace's secure `0xA801C000` window. The member data starts at archive
