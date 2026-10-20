@@ -30,6 +30,9 @@ pub(crate) struct State {
     engine: Engine,
     cfg: Config,
     out: hal::Output,
+    /// Held exactly while the stimulation supervisor is armed.  Its Drop
+    /// implementation is the sole normal path that stops the hardware WDT.
+    stim_watchdog: Option<wdt::Lease>,
     /// Last-written values, returned on read (the stock firmware keeps them in RAM).
     pub v_widths: [u8; proto::WIDTHS_LEN],
     pub v_frame: [u8; proto::FRAME_LEN],
@@ -54,6 +57,7 @@ pub(crate) static STATE: Mutex<State> = Mutex::new(State {
         aux8: 0,
     },
     out: hal::Output::new(),
+    stim_watchdog: None,
     v_widths: [0; proto::WIDTHS_LEN],
     v_frame: [0; proto::FRAME_LEN],
     v_power: [0; proto::POWER_LEN],
@@ -101,6 +105,13 @@ pub extern "C" fn owo_stim_monitor_poll() {
         }
         let mut s = STATE.lock().unwrap();
         s.out.poll(now_us());
+        // A dead-man expiry disarms only after Output has run its ordered
+        // safe-off path. Releasing the session lease here permits EM4 again.
+        let watchdog = (!s.out.monitoring_required())
+            .then(|| s.stim_watchdog.take())
+            .flatten();
+        drop(s);
+        drop(watchdog);
     }
 }
 
@@ -116,6 +127,15 @@ pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
     }
     let f = Frame::parse(buf)?;
     let mut s = STATE.lock().unwrap();
+    // Do not arm an electrically live session unless its reset-bounded
+    // monitor lease exists first.  Dry-run builds deliberately have no WDT.
+    #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+    if s.stim_watchdog.is_none() {
+        s.stim_watchdog = Some(wdt::Lease::acquire().map_err(|_| {
+            error!("refusing stimulation frame: watchdog unavailable");
+            proto::Error::Range
+        })?);
+    }
     let now = now_us();
     s.out.frame_received(now, f.total as u64 * 100_000, f.first);
     s.engine.push(&f, now).map_err(|_| proto::Error::Range)?; // queue full
@@ -178,6 +198,9 @@ pub(crate) fn stop_all() {
     let mut s = STATE.lock().unwrap();
     s.engine.stop();
     s.out.all_off();
+    let watchdog = s.stim_watchdog.take();
+    drop(s);
+    drop(watchdog);
 }
 
 /// Establish the application safety baseline after every reset, before starting services.
@@ -214,18 +237,6 @@ extern "C" fn rust_main() {
     unsafe {
         zephyr::set_logger().unwrap();
     }
-    // Start containment before the hardware backend obtains any live handles.
-    // Dry-run/native builds may legitimately have no watchdog, but real output
-    // must never be initialised without one.
-    let watchdog_running = wdt::start();
-    #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
-    if !watchdog_running {
-        error!("real stimulation disabled: watchdog is unavailable");
-        return;
-    }
-    #[cfg(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE))]
-    let _ = watchdog_running;
-
     // Every application start, including a watchdog or cold reboot, begins by actively driving
     // the output stage to its safe state before enabling any service that could receive work.
     early_boot_baseline();
@@ -239,12 +250,12 @@ extern "C" fn rust_main() {
     info!("pairing passkey for serial '{}': {:06}", SERIAL, passkey());
 
     // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
-    // queued, sleep until a GATT write gives the semaphore, but never longer than the watchdog
-    // feed interval (src/wdt.rs).
+    // queued, sleep until a GATT write gives the semaphore. Active stimulation
+    // additionally caps that sleep at the watchdog feed interval (src/wdt.rs).
     loop {
         wdt::feed();
         ota::reboot_if_requested();
-        let (wake, poll) = {
+        let (wake, poll, watchdog) = {
             let mut s = STATE.lock().unwrap();
             let wake = loop {
                 let now = now_us();
@@ -258,8 +269,14 @@ extern "C" fn rust_main() {
                 }
             };
             s.out.poll(now_us());
-            (wake, s.out.poll_interval_us())
+            let watchdog = (!s.out.monitoring_required())
+                .then(|| s.stim_watchdog.take())
+                .flatten();
+            (wake, s.out.poll_interval_us(), watchdog)
         };
+        // The supervisor has already completed its ordered safe-off path.
+        // Releasing this resource can now turn off the watchdog.
+        drop(watchdog);
         // Sleep until the next pulse, but never longer than the supervision interval while
         // the output is armed (the dead-man must be able to fire without any BLE traffic).
         let until = match (wake, poll) {

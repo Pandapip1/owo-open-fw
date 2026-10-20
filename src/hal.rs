@@ -135,6 +135,10 @@ mod real {
         pub fn poll_interval_us(&self) -> Option<u64> {
             self.sup.is_armed().then_some(self.poll_every_us)
         }
+
+        pub fn monitoring_required(&self) -> bool {
+            self.sup.is_armed()
+        }
     }
 }
 
@@ -205,5 +209,14 @@ impl Output {
         return self.real.poll_interval_us();
         #[cfg(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE))]
         None
+    }
+
+    /// Whether an output session is still armed and therefore requires the
+    /// watchdog-backed dead-man supervisor.
+    pub fn monitoring_required(&self) -> bool {
+        #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+        return self.real.monitoring_required();
+        #[cfg(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE))]
+        false
     }
 }

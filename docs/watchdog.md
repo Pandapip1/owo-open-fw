@@ -5,13 +5,16 @@
 * Enabled with `&wdog0 { status = "okay"; }` and the `watchdog0` alias in `boards/bg22_ek4108a.overlay`,
   `CONFIG_WATCHDOG=y`. Zephyr's `drivers/watchdog/wdt_gecko.c` (`silabs,gecko-wdog`) is selected for
   Series 2 by `drivers/watchdog/Kconfig.gecko` (`select SILABS_SISDK_WDOG if SOC_FAMILY_SILABS_S2`).
-* Started from `rust_main` through `owo_wdt_start` (modules/owo-stim/shim/owo_shim.c) with a 2000 ms request,
-  before the real output backend is initialised. A hardware-output build refuses to initialise that backend if
-  the watchdog cannot be started.
+* A stimulation session holds a counted Rust watchdog lease. Acquiring its first lease calls `owo_wdt_start`
+  (modules/owo-stim/shim/owo_shim.c) with a 2000 ms request before a valid frame may arm the real-output
+  supervisor; a hardware-output build rejects that frame if acquisition fails. Dropping the final lease calls
+  Zephyr's supported `wdt_disable()` only after the ordered bridge/DAC/routing/supply safe-off sequence, so
+  idle firmware can enter extended EM4 residency. There is no ambient application on/off switch.
   (`wdt_gecko_get_persel_from_timeout`, period `(8 << PERSEL) + 1` cycles of the 1 kHz ULFRCO → 2049 ms),
   `WDT_FLAG_RESET_SOC`, `WDT_OPT_PAUSE_IN_SLEEP` (the driver then clears `em2Run`/`em3Run`).
-* Fed only by the pump loop (`src/wdt.rs`). The watchdog keeps counting while the CPU idles in EM1, so the
-  pump never sleeps longer than 1 s even with nothing to do (this replaces the earlier "sleep forever" idle).
+* Fed only by the pump loop (`src/wdt.rs`) while monitoring is active. The watchdog keeps counting while the
+  CPU idles in EM1, so the pump never sleeps longer than 1 s during an armed session; otherwise it may sleep
+  indefinitely. OTA teardown holds a temporary lease to bound a wedged Bluetooth shutdown.
 * Same configuration as stock 7.9.07: its first WDOG0 write is `CFG = 0x00080000` (PERSEL 8, EM2RUN/EM3RUN 0),
   seen in the QEMU trace (`sim/README.md`), and it feeds from its main loop.
 * OTA reset preparation disarms the output stage in the pump thread, waits for the ATT response, then calls

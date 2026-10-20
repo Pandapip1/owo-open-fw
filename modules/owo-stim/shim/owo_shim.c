@@ -428,6 +428,28 @@ int owo_wdt_feed(void)
 {
 	return wdt_channel < 0 ? -ENODEV : wdt_feed(wdt_dev, wdt_channel);
 }
+
+/*
+ * The Gecko watchdog is not locked by this application, so Zephyr's driver
+ * can stop it and uninstall its one timeout.  Keep the channel bookkeeping
+ * in step with that driver state: a later monitoring interval may install a
+ * fresh timeout and re-enable the peripheral.
+ */
+int owo_wdt_stop(void)
+{
+	int err;
+
+	if (wdt_channel < 0) {
+		return 0;
+	}
+	err = wdt_disable(wdt_dev);
+	/* The watchdog may already be off after a reset-adjacent transition. */
+	if (err == 0 || err == -EFAULT) {
+		wdt_channel = -1;
+		return 0;
+	}
+	return err;
+}
 #else
 int owo_wdt_start(uint32_t timeout_ms)
 {
@@ -435,6 +457,11 @@ int owo_wdt_start(uint32_t timeout_ms)
 }
 
 int owo_wdt_feed(void)
+{
+	return -ENODEV;
+}
+
+int owo_wdt_stop(void)
 {
 	return -ENODEV;
 }

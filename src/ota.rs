@@ -49,6 +49,9 @@ pub(crate) fn reboot_if_requested() {
     // runs in the pump's thread context. If Bluetooth teardown wedges, the
     // watchdog remains armed and resets the SoC.
     crate::prepare_reset();
+    // Output is already off, but teardown can still wedge before reset.  This
+    // local lease keeps reset containment active until sys_reboot() consumes it.
+    let _teardown_watchdog = crate::wdt::Lease::acquire().ok();
     zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
     crate::ble::shutdown();
 
