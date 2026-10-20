@@ -14,7 +14,7 @@
 
 #![no_std]
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use owo_hal::Switchable as _;
 use owo_hbridge::{HBridge, State};
@@ -43,12 +43,128 @@ static LTC2634_DRIVER: (
 const SENSE_INTERVAL_US: u32 = 100;
 /// Maximum number of supply regulators the binding allows.
 const MAX_SUPPLIES: usize = 4;
-static RESOURCE_REVOKED: AtomicBool = AtomicBool::new(false);
+static RESOURCE_LEASES: ResourceLeaseGate = ResourceLeaseGate::new();
 
-/// Revoke every live suit handle. This is lock-free so a monitor may interrupt
+/// Claim the output resource for one job. A failure prevents future claims
+/// until the owner has shut it down and deliberately recovered it.
+pub fn acquire_lease() -> Result<ResourceLease<'static>, LeaseError> {
+    RESOURCE_LEASES.acquire()
+}
+
+/// Revoke every live suit lease. This is lock-free so a monitor may interrupt
 /// a bounded pulse checkpoint without waiting for the owning job's mutex.
-pub fn revoke() { RESOURCE_REVOKED.store(true, Ordering::Release); }
-pub fn clear_revocation() { RESOURCE_REVOKED.store(false, Ordering::Release); }
+pub fn revoke() { RESOURCE_LEASES.revoke(); }
+
+/// Complete an explicit recovery after acknowledged shutdown. Recovery cannot
+/// race a job that still owns the resource.
+pub fn recover_after_shutdown() -> Result<(), LeaseError> {
+    RESOURCE_LEASES.recover()
+}
+
+/// Lock-free access control for one output-owning resource.
+///
+/// A lease is deliberately small enough for a timing-sensitive job to query at
+/// every bounded checkpoint.  `revoke` is the failure path: it makes all
+/// existing leases observe revocation and prevents any later acquisition.  It
+/// does not run shutdown itself; the resource owner must do that separately
+/// before explicitly recovering the gate.
+///
+/// The low bit is the terminal revoked flag; the remaining bits count live
+/// leases in units of two.  Keeping the count means recovery cannot race a
+/// job which still owns the device.
+pub struct ResourceLeaseGate {
+    state: AtomicUsize,
+}
+
+/// A live claim on a [`ResourceLeaseGate`].  It is intentionally neither
+/// cloneable nor transferable into a new lifetime.  Jobs retain it while they
+/// use the device and call [`Self::revoked`] at their bounded checkpoints.
+pub struct ResourceLease<'a> {
+    gate: &'a ResourceLeaseGate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseError {
+    /// The resource failed and cannot be used until shutdown and explicit
+    /// recovery have completed.
+    Revoked,
+    /// Recovery was requested while a job still held the resource.
+    Busy,
+}
+
+impl ResourceLeaseGate {
+    const REVOKED: usize = 1;
+    const LEASE_UNIT: usize = 2;
+
+    pub const fn new() -> Self {
+        Self { state: AtomicUsize::new(0) }
+    }
+
+    /// Acquire access unless a failure has already revoked the resource.
+    pub fn acquire(&self) -> Result<ResourceLease<'_>, LeaseError> {
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if state & Self::REVOKED != 0 {
+                return Err(LeaseError::Revoked);
+            }
+            let next = state.checked_add(Self::LEASE_UNIT).ok_or(LeaseError::Busy)?;
+            match self.state.compare_exchange_weak(
+                state,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(ResourceLease { gate: self }),
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    /// Atomically make the resource unavailable.  Existing leases become
+    /// revoked immediately; callers must observe that at their next bounded
+    /// checkpoint and take their hardware-safe-off path.
+    pub fn revoke(&self) {
+        self.state.fetch_or(Self::REVOKED, Ordering::Release);
+    }
+
+    /// Re-open the gate only after shutdown is acknowledged and all prior
+    /// holders have released it.  This is explicit recovery, never an
+    /// automatic consequence of a successful shutdown.
+    pub fn recover(&self) -> Result<(), LeaseError> {
+        match self.state.compare_exchange(
+            Self::REVOKED,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(state) if state & !Self::REVOKED != 0 => Err(LeaseError::Busy),
+            Err(_) => Err(LeaseError::Revoked),
+        }
+    }
+
+    pub fn revoked(&self) -> bool {
+        self.state.load(Ordering::Acquire) & Self::REVOKED != 0
+    }
+
+    pub fn live_leases(&self) -> usize {
+        self.state.load(Ordering::Acquire) / Self::LEASE_UNIT
+    }
+}
+
+impl ResourceLease<'_> {
+    /// True once failure has revoked this resource.  Call from every bounded
+    /// work checkpoint; the caller is responsible for promptly safeing off.
+    pub fn revoked(&self) -> bool {
+        self.gate.revoked()
+    }
+}
+
+impl Drop for ResourceLease<'_> {
+    fn drop(&mut self) {
+        self.gate.state.fetch_sub(ResourceLeaseGate::LEASE_UNIT, Ordering::Release);
+    }
+}
 
 /// Safety lifecycle of one output-owning resource. A valid handle is not
 /// evidence that its hardware is usable: every reset begins at `Unknown`.
@@ -318,7 +434,7 @@ impl Suit {
 }
 
 impl Hw for Suit {
-    fn cancelled(&self) -> bool { RESOURCE_REVOKED.load(Ordering::Acquire) }
+    fn cancelled(&self) -> bool { RESOURCE_LEASES.revoked() }
     fn bridge(&mut self, s: Bridge) -> Result<(), HwError> {
         let to = match s {
             Bridge::Off => State::Off,
@@ -464,5 +580,37 @@ mod tests {
         assert_eq!(resource.begin_self_test(), Ok(()));
         assert_eq!(resource.finish_self_test(Err(InitError::NoDevice)), Err(InitError::NoDevice));
         assert_eq!(resource.status(), ResourceStatus::Failed);
+    }
+
+    #[test]
+    fn revocation_reaches_live_leases_and_blocks_new_jobs() {
+        let gate = ResourceLeaseGate::new();
+        let first = gate.acquire().unwrap();
+        let second = gate.acquire().unwrap();
+        assert_eq!(gate.live_leases(), 2);
+        assert!(!first.revoked());
+        assert!(!second.revoked());
+
+        gate.revoke();
+        assert!(first.revoked());
+        assert!(second.revoked());
+        assert!(matches!(gate.acquire(), Err(LeaseError::Revoked)));
+
+        drop(first);
+        drop(second);
+        assert_eq!(gate.live_leases(), 0);
+    }
+
+    #[test]
+    fn recovery_requires_every_revoked_job_to_release() {
+        let gate = ResourceLeaseGate::new();
+        let lease = gate.acquire().unwrap();
+        gate.revoke();
+        assert_eq!(gate.recover(), Err(LeaseError::Busy));
+
+        drop(lease);
+        assert_eq!(gate.recover(), Ok(()));
+        let fresh = gate.acquire().unwrap();
+        assert!(!fresh.revoked());
     }
 }

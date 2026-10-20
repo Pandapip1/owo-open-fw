@@ -40,7 +40,7 @@ impl DryRun {
 mod real {
     use super::*;
     use owo_stim::stim::{Config, Outcome, PulseCmd, Skip, Stimulator};
-    use owo_suit::Suit;
+    use owo_suit::{LeaseError, Suit};
     use zephyr::kconfig as k;
 
     /// `Stimulator` + the suit's output stage. It is created lazily (first `init`) because
@@ -100,6 +100,20 @@ mod real {
 
         pub fn pulse(&mut self, p: &Pulse, now_us: u64) {
             let Some(hw) = self.hw.as_mut() else { return };
+            // Hold a resource lease for the whole bounded pulse. A monitor
+            // failure revokes this lease; `Stimulator::fire` observes that at
+            // its checkpoints and executes the electrical safe-off path.
+            let _lease = match owo_suit::acquire_lease() {
+                Ok(lease) => lease,
+                Err(LeaseError::Revoked) => {
+                    warn!("ch{} skipped: output resource is failed", p.channel);
+                    return;
+                }
+                Err(LeaseError::Busy) => {
+                    warn!("ch{} skipped: output resource lease unavailable", p.channel);
+                    return;
+                }
+            };
             let cmd = PulseCmd {
                 channel: p.channel,
                 level: p.level,

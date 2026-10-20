@@ -214,7 +214,7 @@ pub(crate) fn stop_all() {
     drop(watchdog);
 }
 
-/// Complete stages 1 and 2 of the application safety baseline after every reset.
+/// Establish the application safety baseline after every reset.
 ///
 /// This is deliberately separate from an operational Stop: a reset can leave external output
 /// components powered while the MCU is only just becoming able to control them.  `init` puts the
@@ -250,8 +250,8 @@ extern "C" fn rust_main() {
     unsafe {
         zephyr::set_logger().unwrap();
     }
-    // Stage 0 has already run from C SYS_INIT. Stages 1 and 2 must complete
-    // before enabling any service that could receive work.
+    // C reset safe-off has already run from SYS_INIT. Rust's readiness check
+    // and forced safe-off must complete before enabling work.
     if early_boot_baseline().is_err() {
         /*
          * A watchdog reset cannot run teardown code.  The C SYS_INIT

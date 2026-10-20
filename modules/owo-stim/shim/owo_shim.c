@@ -283,13 +283,13 @@ static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
 /*
- * Stage 0 runs before Rust has an error channel.  Preserve whether every
- * independently safe-off operation was acknowledged, so Stage 1 cannot turn
+ * Reset safe-off runs before Rust has an error channel. Preserve whether every
+ * independently safe-off operation was acknowledged, so later self-test cannot turn
  * a best-effort reset path into a successful POST merely because a device is
  * now ready.  This is deliberately reset-local BSS: every reset must perform
  * and account for this pass again.
  */
-static uint32_t owo_suit_stage0_failures;
+static uint32_t owo_suit_reset_safe_off_failures;
 
 #define STAGE0_BRIDGE(i) BIT(i)
 #define STAGE0_DAC       BIT(4)
@@ -299,12 +299,12 @@ static uint32_t owo_suit_stage0_failures;
 #define STAGE0_SUPPLY(i) BIT(8 + (i))
 
 /*
- * Stage 0 reset shutdown. This runs on every normal boot after the device
+ * Reset shutdown. This runs on every normal boot after the device
  * drivers have initialised but before APPLICATION main (and therefore before
  * Rust, Bluetooth, or the output backend). Do not rely on a pre-reset
  * callback: a watchdog or brown-out reset cannot run one. Every operation is
  * best effort so a missing peripheral cannot prevent the remaining independent
- * safe-off operations. Stages 1 and 2 in Rust subsequently POST and verify a
+ * safe-off operations. Rust subsequently checks readiness and verifies a
  * forced known-off state before any safety-critical service may start.
  */
 static int owo_suit_reset_safe_off(void)
@@ -316,55 +316,55 @@ static int owo_suit_reset_safe_off(void)
 	uint32_t switch_mask = 0;
 	size_t i;
 
-	owo_suit_stage0_failures = 0;
+	owo_suit_reset_safe_off_failures = 0;
 
 	/* Same order as Stimulator::safe_off: bridge, amplitude, routing, supply. */
 	for (i = 0; i < ARRAY_SIZE(bridge); ++i) {
 		if (!gpio_is_ready_dt(&bridge[i]) ||
 		    gpio_pin_configure_dt(&bridge[i],
 			(i < 2) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE) < 0) {
-			owo_suit_stage0_failures |= STAGE0_BRIDGE(i);
+			owo_suit_reset_safe_off_failures |= STAGE0_BRIDGE(i);
 		}
 	}
 	if (device_is_ready(dac_dev)) {
 		if (dac_channel_setup(dac_dev, &dac_cfg) < 0 ||
 		    dac_write_value(dac_dev, dac_cfg.channel_id, 0) < 0) {
-			owo_suit_stage0_failures |= STAGE0_DAC;
+			owo_suit_reset_safe_off_failures |= STAGE0_DAC;
 		}
 	} else {
-		owo_suit_stage0_failures |= STAGE0_DAC;
+		owo_suit_reset_safe_off_failures |= STAGE0_DAC;
 	}
 	for (i = 0; i < ARRAY_SIZE(switch_routes); ++i) {
 		switch_mask |= switch_routes[i];
 	}
 	if (device_is_ready(switch_dev)) {
 		if (gpio_port_set_masked_raw(switch_dev, switch_mask, 0) < 0) {
-			owo_suit_stage0_failures |= STAGE0_SWITCH;
+			owo_suit_reset_safe_off_failures |= STAGE0_SWITCH;
 		}
 	} else {
-		owo_suit_stage0_failures |= STAGE0_SWITCH;
+		owo_suit_reset_safe_off_failures |= STAGE0_SWITCH;
 	}
 	if (device_is_ready(boost.dev)) {
 		if (pwm_set_dt(&boost, boost.period, 0) < 0) {
-			owo_suit_stage0_failures |= STAGE0_BOOST;
+			owo_suit_reset_safe_off_failures |= STAGE0_BOOST;
 		}
 	} else {
-		owo_suit_stage0_failures |= STAGE0_BOOST;
+		owo_suit_reset_safe_off_failures |= STAGE0_BOOST;
 	}
 	if (device_is_ready(phase_timer)) {
 		if (counter_stop(phase_timer) < 0) {
-			owo_suit_stage0_failures |= STAGE0_PHASE;
+			owo_suit_reset_safe_off_failures |= STAGE0_PHASE;
 		}
 	} else {
-		owo_suit_stage0_failures |= STAGE0_PHASE;
+		owo_suit_reset_safe_off_failures |= STAGE0_PHASE;
 	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
 		if (device_is_ready(supplies[i])) {
 			if (regulator_disable(supplies[i]) < 0) {
-				owo_suit_stage0_failures |= STAGE0_SUPPLY(i);
+				owo_suit_reset_safe_off_failures |= STAGE0_SUPPLY(i);
 			}
 		} else {
-			owo_suit_stage0_failures |= STAGE0_SUPPLY(i);
+			owo_suit_reset_safe_off_failures |= STAGE0_SUPPLY(i);
 		}
 	}
 	return 0;
@@ -373,9 +373,9 @@ static int owo_suit_reset_safe_off(void)
 SYS_INIT(owo_suit_reset_safe_off, APPLICATION, 0);
 
 /*
- * Stage 1 non-energising POST for the Rust bring-up barrier. This deliberately
+ * Non-energising POST for the Rust bring-up barrier. This deliberately
  * checks every output-owning driver before the application accepts BLE work.
- * Stage 2 still runs the full forced safe-off sequence even if this reports
+ * Rust still runs the full forced safe-off sequence even if this reports
  * failure, so a failed POST cannot skip recovery after a brown-out.
  */
 int owo_suit_post(void)
@@ -383,7 +383,7 @@ int owo_suit_post(void)
 	size_t i;
 
 	/* A successful readiness check cannot retroactively confirm reset safe-off. */
-	if (owo_suit_stage0_failures != 0) {
+	if (owo_suit_reset_safe_off_failures != 0) {
 		return -EIO;
 	}
 
