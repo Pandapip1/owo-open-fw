@@ -100,6 +100,16 @@ normalized-PDU completion helper accepts only an explicit two-octet LL header
 plus exactly the declared number of payload octets. It is intentionally not an
 FRC/BUFC reader.
 
+Before the HAL arms RAC for RX or TX it now checks this controller contract:
+the format and matching BUFC staging direction must have been configured, RX
+must retain a destination, and TX's staged PDU must fit the configured maximum
+length. It clears old FRC completion latches before—not during—the arm, since
+the OpenISA ISR consumes those latches via `radio_is_done()` and
+`radio_crc_is_valid()`. `radio_disable()` revokes both packet targets, so an
+abort cannot be followed by accidental reuse of a stale target. These checks
+are scaffolding for a future proven producer; they do not claim FRC/BUFC packet
+delivery today.
+
 **[F]** Current receive targets have sufficient capacity for those configured
 lengths, but this is a call-topology property—not a general `void *` capacity
 contract. Advertising and unencrypted connection paths use `node_rx->pdu`

@@ -205,6 +205,41 @@ static inline volatile uint32_t *radio_reg32(uintptr_t address)
 }
 
 /*
+ * The OpenISA LLL programs a packet format and a direction-specific packet
+ * target before it asks the HAL to arm RAC. Keep that ordering as a checked
+ * HAL contract. A completion IRQ without a current RX target cannot be
+ * treated as packet delivery, and TXEN must not consume a stale BUFC FIFO.
+ *
+ * This validates only controller-owned metadata. It does not imply that FRC
+ * has consumed or produced bytes in either BUFC FIFO; that relationship still
+ * needs evidence.
+ */
+static void efr32_packet_stage_arm(enum efr32_radio_packet_direction direction)
+{
+	LL_ASSERT(efr32_packet_stage.packet_configured);
+	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+
+	if (direction == EFR32_RADIO_PACKET_RX) {
+		LL_ASSERT(efr32_packet_stage.rx_target != NULL);
+		LL_ASSERT(efr32_packet_stage.rx_fifo_configured);
+	} else {
+		LL_ASSERT(direction == EFR32_RADIO_PACKET_TX);
+		LL_ASSERT(efr32_packet_stage.tx_source != NULL);
+		LL_ASSERT(efr32_packet_stage.tx_fifo_configured);
+		LL_ASSERT(efr32_packet_stage.tx_bytes >= 2U);
+		LL_ASSERT(efr32_packet_stage.tx_bytes <=
+			  (uint32_t)efr32_packet_stage.max_len + 2U);
+	}
+
+	/* The LLL reads completion state from its ISR callback, so clear only
+	 * before the operation is armed—not from the ISR itself. */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	efr32_rx_delivery_invalid = false;
+	efr32_packet_stage.active_direction = direction;
+}
+
+/*
  * The public RAIL configurator uses this compact, address-independent format
  * for radio tables. Do not put SEQ.PHYINFO records here: their data words are
  * pointers into the vendor image and are not portable to this firmware.
@@ -853,8 +888,8 @@ void radio_rx_enable(void)
 	while (!radio_is_idle()) {
 	}
 
-	/* Label a completion before arming the hardware source. */
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_RX;
+	/* Validate and label a completion before arming the hardware source. */
+	efr32_packet_stage_arm(EFR32_RADIO_PACKET_RX);
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 }
@@ -870,8 +905,8 @@ void radio_tx_enable(void)
 	while (!radio_is_idle()) {
 	}
 
-	/* Label a completion before arming the hardware source. */
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_TX;
+	/* Validate and label a completion before arming the hardware source. */
+	efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
 
@@ -884,6 +919,12 @@ void radio_disable(void)
 	 * (docs/radio-tables.md §4.1), so preserve that observed order.
 	 */
 	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
+	/* An aborted PDU cannot be delivered by a later receive completion. */
+	efr32_packet_stage.rx_target = NULL;
+	efr32_packet_stage.rx_fifo_configured = false;
+	efr32_packet_stage.tx_source = NULL;
+	efr32_packet_stage.tx_bytes = 0U;
+	efr32_packet_stage.tx_fifo_configured = false;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
 }
