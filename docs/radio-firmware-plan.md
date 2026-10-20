@@ -49,6 +49,14 @@ Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, s
 | Sequencer firmware | closed image in SEQRAM | open v6-M firmware | RAC state machine, mailbox, every register it touches |
 | DEVINFO calibration | read by RAIL at boot | same | DEVINFO fields (names in `efr32bg22_devinfo.h`, semantics for radio not documented) |
 
+QEMU currently has no Bluetooth controller, bus, backend, or virtio-BT device
+implementation to reuse: its only Bluetooth-named material is virtio UAPI IDs
+and labels. The native EFR32 model therefore keeps RF exchange internal. A
+future standard host endpoint must model the firmware's actual HCI transport;
+QEMU's `CharBackend` is an appropriate seam for H:4 only if firmware/board
+evidence establishes that HCI-over-that-real-peripheral transport. A generic
+16550 or private bridge would not be a faithful substitute.
+
 ## 4. Minimum viable open radio
 
 BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one connection in the peripheral role, GATT writes in, notifications out, channel selection #1 and #2, supervision timeout, encryption (the suit's firmware enforces MITM pairing: `CONFIG_BT_SMP_ENFORCE_MITM`, so LE encryption is **required** for the real device; it is not in the crate yet). No 2M/coded PHY, no extended advertising, no CTE, one connection.
