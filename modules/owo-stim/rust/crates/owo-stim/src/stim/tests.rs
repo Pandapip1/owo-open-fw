@@ -32,6 +32,7 @@ struct Mock {
     stall_energised: u32,
     fail_select: bool,
     fail_bridge_on: Option<Bridge>,
+    cancel_at: Option<u64>,
     cur_dac: u8,
     energised_us: u64,
 }
@@ -53,6 +54,7 @@ impl Mock {
             stall_energised: 0,
             fail_select: false,
             fail_bridge_on: None,
+            cancel_at: None,
             cur_dac: 0,
             energised_us: 0,
         }
@@ -84,6 +86,9 @@ impl Mock {
 }
 
 impl Hw for Mock {
+    fn cancelled(&self) -> bool {
+        self.cancel_at.is_some_and(|at| self.clock >= at)
+    }
     fn bridge(&mut self, s: Bridge) -> Result<(), HwError> {
         if self.fail_bridge_on == Some(s) {
             // A real driver must leave the bridge off when it reports an error.
@@ -429,4 +434,14 @@ fn overdrive_appearing_mid_phase_trips_before_negative_phase() {
     assert!(matches!(o, Outcome::Faulted(Fault::Overdrive { measured: 70, .. })), "{o:?}");
     assert!(!m.bridge_trace().contains(&Bridge::Negative));
     assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
+}
+
+#[test]
+fn revoked_resource_interrupts_phase_and_shuts_down() {
+    let (mut s, mut m) = armed();
+    m.cancel_at = Some(120);
+    let o = s.fire(&mut m, T0, &cmd(1, 80));
+    assert_eq!(o, Outcome::Faulted(Fault::Cancelled));
+    assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
+    assert!(m.ev.contains(&Ev::Supply(false)));
 }
