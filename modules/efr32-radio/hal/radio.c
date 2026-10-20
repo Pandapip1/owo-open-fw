@@ -628,7 +628,18 @@ void isr_radio(void *arg)
 	 * cannot be delivered to a handler installed for a later event.
 	 */
 	if (efr32_radio_abort_take(&efr32_radio_abort, &abort_callback, &abort_param)) {
+		/*
+		 * A completion can race the RXDIS/TXDIS commands after
+		 * radio_disable() has cleared the pre-abort latches.  The pending
+		 * software abort is terminal for that LLL event, so acknowledge such
+		 * a late completion before handing control to its cleanup callback.
+		 * Otherwise the shared, level-sensitive FRC IRQ can immediately
+		 * re-enter the same callback and make an aborted PDU look completed.
+		 */
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 		abort_callback(abort_param);
+		efr32_radio_abort_finish(&efr32_radio_abort);
 		return;
 	}
 

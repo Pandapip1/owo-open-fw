@@ -48,6 +48,24 @@ int main(void)
 	assert(new_calls == 1U);
 	assert(new_param == &new_token);
 	assert(!efr32_radio_abort_take(&state, &callback, &param));
+	efr32_radio_abort_finish(&state);
+
+	/*
+	 * lll_scan's abort callback defensively calls radio_disable() while the
+	 * first abort dispatch is in progress. It must quiesce hardware without
+	 * queueing that same callback again.
+	 */
+	assert(efr32_radio_abort_request(&state));
+	assert(efr32_radio_abort_take(&state, &callback, &param));
+	assert(!efr32_radio_abort_request(&state));
+	callback(param);
+	efr32_radio_abort_finish(&state);
+	assert(new_calls == 2U);
+
+	/* A later operation can still request an abort after dispatch completes. */
+	assert(efr32_radio_abort_request(&state));
+	assert(efr32_radio_abort_take(&state, &callback, &param));
+	efr32_radio_abort_finish(&state);
 
 	/* Reset drops both a queued abort and its stale LLL callback. */
 	efr32_radio_abort_replace(&state, old_callback, &old_token);
