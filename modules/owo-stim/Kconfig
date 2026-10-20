@@ -79,6 +79,28 @@ config OWO_STIM_SENSE_MAX_AGE_US
 	int "Longest age of the newest ADC conversion while the bridge is closed"
 	default 500
 
+config OWO_STIM_MONITOR_INTERVAL_MS
+	int "Safety-monitor job period"
+	default 10
+	range 1 100
+	help
+	  Period for the dedicated, highest-preemptive Zephyr thread which applies the
+	  stimulation dead-man. Its normal work is only a mutex-protected timestamp
+	  check; after expiry it takes the same safe-off path as Stop. The
+	  worst-case dead-man reaction is this period plus kernel scheduling latency
+	  and a currently executing, bounded pulse. This is not a substitute for the
+	  per-phase feedback and overrun checks, which remain in the pulse thread.
+
+config OWO_STIM_MONITOR_STACK_SIZE
+	int "Safety-monitor job stack size"
+	default 2048
+	range 1024 4096
+	help
+	  Stack for the persistent safety-monitor thread. It must accommodate the
+	  Rust supervisor's safe-off path and the Zephyr driver calls it makes after a
+	  dead-man expiry. Validate this value with stack sentinel/analysis on the
+	  target configuration before enabling hardware output.
+
 config OWO_STIM_FAULT_LOCKOUT
 	int "Faults before the whole output locks out until restart"
 	default 3
