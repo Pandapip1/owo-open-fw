@@ -665,7 +665,11 @@ void radio_rx_enable(void)
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 }
 
-/* [regs-public] RAC.CMD.TXEN is a write-only command bit (T2). */
+/*
+ * [regs-vendor] The generic RAIL TX helper ends by writing one to RAC.CMD.
+ * Its preceding packet/FIFO setup is separate and remains unimplemented;
+ * see docs/radio-tables.md §4.1.
+ */
 void radio_tx_enable(void)
 {
 	/* Match the OpenISA radio contract: do not start a new TX while active. */

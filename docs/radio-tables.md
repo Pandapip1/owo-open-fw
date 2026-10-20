@@ -151,9 +151,15 @@ alias at `0xB8022000 + 0x40`; the public rev-B2 model names the underlying
 register `RAC_NS.SR0` (`RAC_NS_register.py:454-470`). This is a concrete
 vendor start-path fact, but not enough to assign packet/FIFO semantics to
 those writes or reconstruct the called helpers. `radio_tx_enable()` therefore
-continues to issue only the public `RAC.CMD.TXEN` primitive, and QEMU's fixed
-completion remains an explicit simulator abstraction rather than a claim that
-it executes the RAIL transmit pipeline.
+continues to issue only the public `RAC.CMD.TXEN` primitive. This final
+primitive is independently archive-backed: the common helper's successful
+path calls `sli_rail_8a1daf8683aeba05cbb8b1aa7d69b03e` in `generic_phy.o`;
+its 44-byte section starts at archive offset `0x51fb4` (member data offset
+`0x518c8`, section offset `0x6ec`). At section-relative `+0x10..+0x12` it
+writes `1` to the literal `0xB8020000 + 0x10`, which the public rev-B2 model
+names `RAC_NS.CMD`. QEMU models this command and has a focused TX-command
+regression. Its fixed completion remains an explicit simulator abstraction
+rather than a claim that it executes the RAIL transmit pipeline.
 
 This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. In the retained stock trace, `radio-trace.log:201` writes `RXDIS = 0x100`, `:203` reads `STATUS`, `:208` writes `TXDIS = 0x20`, and `:207` is the preceding `STATUS` read. That is an observed ordering fact, not a claim that the two commands are interchangeable. The QEMU model uses this source- and trace-matched RAC map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
