@@ -42,6 +42,74 @@ const SENSE_INTERVAL_US: u32 = 100;
 /// Maximum number of supply regulators the binding allows.
 const MAX_SUPPLIES: usize = 4;
 
+/// Safety lifecycle of one output-owning resource. A valid handle is not
+/// evidence that its hardware is usable: every reset begins at `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceStatus {
+    Unknown,
+    Pending,
+    Ready,
+    Online,
+    /// Online under a resource-owned watchdog-monitor lease. This is not a
+    /// boolean feature bit: only the lease guard may enter or leave it.
+    OnlineMonitored,
+    Failed,
+}
+
+/// State transitions shared by resource wrappers, independent of their lock
+/// or other synchronization primitive. Callers acquire that primitive before
+/// invoking a transition; this type only enforces the electrical lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceLifecycle(ResourceStatus);
+
+impl ResourceLifecycle {
+    pub const fn unknown() -> Self { Self(ResourceStatus::Unknown) }
+    pub const fn status(self) -> ResourceStatus { self.0 }
+
+    pub fn begin_self_test(&mut self) -> Result<(), InitError> {
+        match self.0 {
+            ResourceStatus::Unknown => { self.0 = ResourceStatus::Pending; Ok(()) }
+            _ => Err(InitError::Errno(-16)),
+        }
+    }
+    pub fn finish_self_test(&mut self, result: Result<(), InitError>) -> Result<(), InitError> {
+        if self.0 != ResourceStatus::Pending { return Err(InitError::Errno(-22)); }
+        self.0 = if result.is_ok() { ResourceStatus::Ready } else { ResourceStatus::Failed };
+        result
+    }
+    pub fn begin_online(&mut self) -> Result<(), InitError> {
+        if self.0 == ResourceStatus::Ready { self.0 = ResourceStatus::Online; Ok(()) }
+        else { Err(InitError::Errno(-1)) }
+    }
+    /// Reserve the monitored operating mode. The caller must first acquire
+    /// its watchdog-monitor lease; the eventual resource wrapper keeps that
+    /// lease in the returned guard so it cannot be silently forgotten.
+    pub fn begin_monitored(&mut self) -> Result<(), InitError> {
+        if self.0 == ResourceStatus::Online {
+            self.0 = ResourceStatus::OnlineMonitored;
+            Ok(())
+        } else {
+            Err(InitError::Errno(-1))
+        }
+    }
+    /// Called by the monitor lease when its safety predicate fails.  The
+    /// resource must never remain operational merely because a caller later
+    /// decides not to feed the watchdog; its owner immediately performs the
+    /// unconditional shutdown path after this transition.
+    pub fn safety_check_failed(&mut self) {
+        self.0 = ResourceStatus::Failed;
+    }
+    /// Shutdown is always legal; successful shutdown leaves the resource
+    /// non-energising but does not claim a self-test passed.
+    pub fn finish_shutdown(&mut self, result: Result<(), InitError>) -> Result<(), InitError> {
+        if result.is_err() { self.0 = ResourceStatus::Failed; }
+        else if matches!(self.0, ResourceStatus::Online | ResourceStatus::OnlineMonitored) {
+            self.0 = ResourceStatus::Ready;
+        }
+        result
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitError {
     /// The board has no `owo,suit-output` node (or a device in it is not ready).
@@ -352,5 +420,32 @@ mod tests {
     #[test]
     fn negative_mv_is_zero() {
         assert_eq!(STOCK.level_from_mv(-5), 0);
+    }
+
+    #[test]
+    fn resource_lifecycle_requires_test_and_fails_monitored_resources() {
+        let mut resource = ResourceLifecycle::unknown();
+        assert_eq!(resource.status(), ResourceStatus::Unknown);
+        assert!(resource.begin_online().is_err());
+
+        assert_eq!(resource.begin_self_test(), Ok(()));
+        assert_eq!(resource.status(), ResourceStatus::Pending);
+        assert_eq!(resource.finish_self_test(Ok(())), Ok(()));
+        assert_eq!(resource.status(), ResourceStatus::Ready);
+
+        assert_eq!(resource.begin_online(), Ok(()));
+        assert_eq!(resource.begin_monitored(), Ok(()));
+        assert_eq!(resource.status(), ResourceStatus::OnlineMonitored);
+        resource.safety_check_failed();
+        assert_eq!(resource.status(), ResourceStatus::Failed);
+        assert!(resource.begin_online().is_err());
+    }
+
+    #[test]
+    fn resource_self_test_failure_is_terminal() {
+        let mut resource = ResourceLifecycle::unknown();
+        assert_eq!(resource.begin_self_test(), Ok(()));
+        assert_eq!(resource.finish_self_test(Err(InitError::NoDevice)), Err(InitError::NoDevice));
+        assert_eq!(resource.status(), ResourceStatus::Failed);
     }
 }

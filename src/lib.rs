@@ -278,11 +278,10 @@ extern "C" fn rust_main() {
     // additionally caps that sleep at the watchdog feed interval (src/wdt.rs).
     loop {
         if !wdt::feed() {
-            // Safety predicate failure is handled in this scheduler-owned
-            // context: safe-off first, immediate cold reboot second. The
-            // deliberately un-fed watchdog remains the fallback if either
-            // operation wedges.
-            ota::request_safe_reboot();
+            // A monitored resource whose predicate fails is failed, not
+            // rebooted. Stop every output now; its lifecycle remains failed
+            // until an explicit, separately-authorized recovery path exists.
+            stop_all();
         }
         ota::reboot_if_requested();
         let (wake, poll, watchdog) = {
