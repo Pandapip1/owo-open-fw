@@ -250,7 +250,23 @@ the RAIL non-secure `CTRL`/`CMD` path and observes `CTRL` through both windows.
 This preserves the observed alias behavior without claiming timer progression,
 compare, capture, IRQ, or command semantics.
 
-The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, counter unit, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
+The public xG2x RAIL header documents `RAIL_TimerTick_t` as a counter whose
+tick is roughly 0.5 microseconds and whose wrap range is about 17 minutes
+(`rail_chip_specific.h:272-328`). That is not interchangeable with the
+OpenISA HAL's `radio_tmr_start(trx, ticks_start, remainder)`: the reference
+port first adjusts a coarse RTC tick and a microsecond remainder, then
+programs its own RTC comparator (`hal/RV32M1/radio/radio.c:1026-1126`). The
+vendor's 232-byte PROTIMER setup helper at archive offset `0x3bf68`
+(`.text.sli_rail_a2bb09bbf0f5a66273c06b6551b0acd9`; object offset `0x34`)
+computes several scaled values before writing `CTRL=0x00011102`, `STATE`
+(`+0x030`), and `PERIOD` (`+0x038`) through the non-secure window. Its
+432-byte compare helper begins at `0x3c140` (object offset `0x20c`) and also
+coordinates FRC, sequencer RAM, and RAC accesses. Thus neither helper proves
+a conversion from the OpenISA RTC/remainder pair to PROTIMER ticks, nor a safe
+TIFS comparator sequence. The HAL deliberately continues to reject scheduled
+radio starts rather than silently substituting one timebase for another.
+
+The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, the correspondence between RAIL timer ticks and the raw PROTIMER counter, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
 
 ## 5. Shortest path to advertising in the QEMU radio model
 1. **Partially done in QEMU:** BUFC has the trace-corrected programmed-data path and threshold IRQs; RAC uses the public xG22 register/command/state map and distinct RAC_RSM/RAC_SEQ interrupt banks. Focused regressions cover both models. BUFC DMA via `BUF.ADDR`, packet socket/pcap output, and real sequencer timing remain unimplemented.
