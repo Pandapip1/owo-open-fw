@@ -186,7 +186,8 @@ BUFC and RXDONE alone is never described as packet delivery.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
   (derives the OpenISA LLL/hal files into the build tree with `hal/RV32M1/` -> `hal/efr32/` and the two patches above, then adds the module's own `hal/{cntr,ecb,radio}.c`).
   No Zephyr code is copied into this repository.
-* `tests/radio-port`: minimal Rust app (`bt_enable`) + overlay. It explicitly
+* `tests/radio-port`: minimal Rust app (`bt_enable`, then a genuine legacy
+  `bt_le_adv_start`) + overlay. It explicitly
   selects `CONFIG_RUST=y`; the lockfile is tracked. With the pinned public
   `cmsis_6`, `hal_silabs`, `mbedtls`, `tf-psa-crypto`, and `zephyr-lang-rust`
   submodules, the following direct build is reproducible without creating a
@@ -199,7 +200,24 @@ BUFC and RXDONE alone is never described as packet delivery.
     -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust" \
     -DCONFIG_BUILD_ONLY_NO_BLOBS=y
   nix develop . -c cmake --build build/radio-port-contract-check
-  ```
+```
+
+For the bounded native-QEMU smoke, build into `build/radio-port-qemu` with the
+same command (substituting that build directory), then run:
+
+```sh
+nix develop . -c tests/radio-port/run-qemu-smoke.sh 3
+```
+
+The smoke deliberately uses the non-stub register configuration and starts a
+real legacy advertiser; it does not inject a packet. It reports the two
+app-side API results and native `efr32bg22_radio_write`/RAC traces separately:
+an accepted advertiser plus an empty radio trace is therefore distinct from a
+rejected advertiser. The current QEMU USART model accepts polling-console
+bytes but intentionally does not forward them to a host character device
+(`vendor/qemu/hw/arm/efr32bg22.c:150-153,1074-1079`), so if the markers are not
+available the script reports the queue state as unobserved rather than making
+that distinction falsely. Its repo-local temporary logs are cleaned on exit.
 
   The abort callback ownership rule has a separate host-only regression test;
   it needs neither QEMU nor radio MMIO and verifies that replacing an OpenISA
