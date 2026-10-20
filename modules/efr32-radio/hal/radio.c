@@ -107,6 +107,13 @@ static struct {
 	enum efr32_radio_packet_direction active_direction;
 } efr32_packet_stage;
 
+/*
+ * A future normalized-PDU producer can reject a completed frame before the
+ * LLL callback.  This is deliberately separate from FRC.TRAILRXDATA.CRCOK:
+ * it represents a software delivery failure, not a second hardware CRC.
+ */
+static bool efr32_rx_delivery_invalid;
+
 static void efr32_packet_stage_reset(void)
 {
 	memset(&efr32_packet_stage, 0, sizeof(efr32_packet_stage));
@@ -511,6 +518,7 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 void radio_setup(void)
 {
 	efr32_packet_stage_reset();
+	efr32_rx_delivery_invalid = false;
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
@@ -559,6 +567,7 @@ void radio_reset(void)
 {
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
+	efr32_rx_delivery_invalid = false;
 
 	/*
 	 * Stock RAIL clears the three RAC scratch registers and asserts
@@ -717,16 +726,19 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 	    !efr32_packet_stage.packet_configured ||
 	    !efr32_packet_stage.rx_fifo_configured ||
 	    efr32_packet_stage.active_direction != EFR32_RADIO_PACKET_RX) {
+		efr32_rx_delivery_invalid = true;
 		return -EINVAL;
 	}
 
 	/* All current OpenISA callers configure an octet-sized length field. */
 	if (efr32_packet_stage.bits_len != 8U || bytes < 2U) {
+		efr32_rx_delivery_invalid = true;
 		return -EMSGSIZE;
 	}
 
 	pdu_bytes = (uint16_t)pdu[1] + 2U;
 	if (pdu_bytes != bytes || pdu[1] > efr32_packet_stage.max_len) {
+		efr32_rx_delivery_invalid = true;
 		return -EMSGSIZE;
 	}
 
@@ -856,6 +868,7 @@ void radio_status_reset(void)
 {
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	efr32_rx_delivery_invalid = false;
 }
 
 /*
@@ -900,10 +913,15 @@ void radio_crc_configure(uint32_t polynomial, uint32_t iv)
 	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_POLY_OFFSET) = bit_reverse24(polynomial);
 }
 
-/* [regs-public] FRC.TRAILRXDATA.CRCOK records the completed RX CRC result. */
+/*
+ * FRC.TRAILRXDATA.CRCOK is the hardware CRC result.  Gate it with the
+ * private staging result so a future rejected normalized PDU follows
+ * OpenISA's completed-but-invalid receive path without writing CRCOK.
+ */
 uint32_t radio_crc_is_valid(void)
 {
-	return !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) &
+	return !efr32_rx_delivery_invalid &&
+	       !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) &
 		 EFR32_FRC_TRAILRXDATA_CRCOK);
 }
 
