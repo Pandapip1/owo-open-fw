@@ -218,6 +218,24 @@ The sequencer is therefore the observed raw-byte producer, and the M33 handler
 is downstream bookkeeping. Neither establishes packet records, metadata,
 `TRAILRXDATA.CRCOK`, or their ordering with RXDONE.
 
+One branch of that downstream bookkeeping is now exactly located.  With BUFC
+threshold bit 18 pending, `generic_phy.o:FRC_IRQHandler` calls
+`sli_rail_0906929bba6a17fd8a9605e65064a9f4` at handler-relative `0x240`
+(archive offset `0x52998`).  That 108-byte routine is in
+`rfhal_bufc.o`, archive range `[0x3398c, 0x339f8)` (member starts
+`0x332f4`, ELF section file offset `0x698`).  It derives an eight-byte-aligned
+entry from active-handle fields `+0x18`, `+0x38`, `+0x3a`, and `+0x3c`, advances
+the 16-bit `+0x3c` value by eight, writes it to BUFC `+0x0b0`, acknowledges
+BUFC bit 18 through `0xBA002114`, and writes one to `0xE000E284` (NVIC
+`ICPR1`, clearing pending IRQ 32--not enabling it).  It then retains the entry
+pointer in its private BSS slot.  At handler-relative `0x68a` (archive
+`0x52de2`), the 36-byte companion
+`sli_rail_31258cb71f8a6b9069347d576bc679f0` at `[0x339f8, 0x33a1c)` consumes
+that one retained pointer through a local helper and clears the slot.  This
+directly establishes deferred queue-entry hand-off and release/advance around
+the BUFC threshold route; it does not identify that entry as a BLE PDU or
+define its framing, CRC, metadata, or RXDONE ordering.
+
 The same public header defines every buffer's local `STATUS.THRESHOLDFLAG` at bit 20 (`efr32bg21_bufc.h:194-205`), while the corresponding global threshold flags remain sparse at `8*n+2`. QEMU derives that local status bit from the matching sparse global flag; its regression test uses buffer 1 specifically, so this cannot silently regress to a compact global-flag assumption.
 
 ## 4.1 RAC core [F]
