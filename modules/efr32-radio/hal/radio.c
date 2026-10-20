@@ -871,6 +871,15 @@ void radio_pkt_rx_set(void *rx_packet)
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 
 	LL_ASSERT(efr32_packet_stage.packet_configured);
+	/* The current OpenISA callers use the one-octet BLE length field. */
+	LL_ASSERT(efr32_packet_stage.bits_len == 8U);
+	/*
+	 * The controller hands this target to the HAL before arming RX.  Replacing
+	 * it after RAC is armed could redirect a future, normalized completion to
+	 * a buffer belonging to another LLL event, so make that ordering an
+	 * explicit HAL invariant.
+	 */
+	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(rx_packet != NULL);
 	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
 
@@ -941,6 +950,12 @@ void radio_pkt_tx_set(void *tx_packet)
 	LL_ASSERT(efr32_packet_stage.packet_configured);
 	/* All current OpenISA TX callers use the octet-sized LL length field. */
 	LL_ASSERT(efr32_packet_stage.bits_len == 8U);
+	/*
+	 * BUFC owns the staging FIFO after TX is armed.  Reconfiguring it while
+	 * RAC is active could make that operation consume a mixture of two LLL
+	 * events, so retain the same setup-before-arm contract as the RX path.
+	 */
+	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(pdu != NULL);
 	bytes = (uint32_t)pdu[1] + 2U;
 	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
