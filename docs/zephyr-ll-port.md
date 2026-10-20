@@ -112,6 +112,18 @@ is sized for maximum data PDU plus MIC (`hal/radio.c:61-64`). A future caller
 outside these paths must supply an explicit destination-capacity contract;
 the generic radio API itself has no size argument.
 
+**[F]** The eventual producer ordering is controller-visible even though the
+EFR32 FRC/BUFC producer is still unresolved: after the LLL has configured the
+PDU, target, and callback, it must copy a normalized bounded PDU, expose CRC
+status, and raise RX completion before invoking the installed callback.
+`radio_is_done()` and then `radio_crc_is_valid()` are read at callback entry by
+scan (`lll_scan.c:367-387`), advertising (`lll_adv.c:605-625`), connection
+(`lll_conn.c:137-149`), and DTM (`lll_test.c:136-145`). Invalid or malformed
+frames still require a completion outcome with invalid CRC, not a silent hang;
+timeouts/aborts have no PDU copy and may report no completion. This is an LLL
+contract, not evidence for FRC flag ordering, BUFC framing, or a hardware CRC
+producer.
+
 ## 3. Build integration (done, compile-checked)
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
