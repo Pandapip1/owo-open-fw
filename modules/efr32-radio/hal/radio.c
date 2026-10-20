@@ -721,7 +721,13 @@ void radio_setup(void)
 	 * The LLL connects its radio ISR to FRC_IRQn.  Enable only the two
 	 * completion latches it observes, rather than treating a RAC state change
 	 * or an unrelated FRC condition as an OpenISA radio completion.
+	 * lll_init() enables FRC_IRQn before calling radio_setup(), so discard a
+	 * retained completion before exposing either source through IEN.  This is
+	 * intentionally limited to TXDONE/RXDONE: other FRC pending sources are
+	 * outside the OpenISA completion contract and must retain their state.
 	 */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
 
@@ -752,6 +758,10 @@ void radio_reset(void)
 	while (!radio_is_idle()) {
 	}
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) = 0U;
+
+	/* A completion that predates this reset cannot belong to the next event. */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 }
 
 /* [regs-public] Address-independent BLE 1M table; PHYINFO remains intentionally excluded (T3). */
