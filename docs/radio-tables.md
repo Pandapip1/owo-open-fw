@@ -518,7 +518,7 @@ clock-source decoder at `0x1baf0..0x1bb10`; its `0x1bb74` literal is
 `SYSCLKCTRL.CLKSEL` bits `0..2` and `RHCLKPRESC` bit 16
 (`efr32bg22_cmu.h:663-708`; the `SYSCLKCTRL` register layout is at `:63`).
 The stock PROTIMER setup itself is at `flash-stock.bin:0x29974..0x29a36` and
-uses literal `0x29d58 = 0xa801c008`; `radio-trace.log:64-67` independently
+uses literal `0x29d54 = 0xa801c008`; `radio-trace.log:64-67` independently
 records its first four writes (`+0x008 = 0x00011102`, `+0x030 = 0x00001233`,
 `+0x038 = 0x80015558`, `+0x00c = 1`). These are access/control-flow and
 public-layout facts. They do not prove CMU latency or gating, PROTIMER command
