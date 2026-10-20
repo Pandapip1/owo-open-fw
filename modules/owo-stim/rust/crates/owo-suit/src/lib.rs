@@ -14,6 +14,8 @@
 
 #![no_std]
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use owo_hal::Switchable as _;
 use owo_hbridge::{HBridge, State};
 use owo_stim::hw::{Bridge, Hw, HwError, Sample};
@@ -41,6 +43,12 @@ static LTC2634_DRIVER: (
 const SENSE_INTERVAL_US: u32 = 100;
 /// Maximum number of supply regulators the binding allows.
 const MAX_SUPPLIES: usize = 4;
+static RESOURCE_REVOKED: AtomicBool = AtomicBool::new(false);
+
+/// Revoke every live suit handle. This is lock-free so a monitor may interrupt
+/// a bounded pulse checkpoint without waiting for the owning job's mutex.
+pub fn revoke() { RESOURCE_REVOKED.store(true, Ordering::Release); }
+pub fn clear_revocation() { RESOURCE_REVOKED.store(false, Ordering::Release); }
 
 /// Safety lifecycle of one output-owning resource. A valid handle is not
 /// evidence that its hardware is usable: every reset begins at `Unknown`.
@@ -310,6 +318,7 @@ impl Suit {
 }
 
 impl Hw for Suit {
+    fn cancelled(&self) -> bool { RESOURCE_REVOKED.load(Ordering::Acquire) }
     fn bridge(&mut self, s: Bridge) -> Result<(), HwError> {
         let to = match s {
             Bridge::Off => State::Off,

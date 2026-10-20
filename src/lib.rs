@@ -281,6 +281,8 @@ extern "C" fn rust_main() {
             // A monitored resource whose predicate fails is failed, not
             // rebooted. Stop every output now; its lifecycle remains failed
             // until an explicit, separately-authorized recovery path exists.
+            #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+            owo_suit::revoke();
             stop_all();
         }
         ota::reboot_if_requested();
