@@ -283,6 +283,22 @@ static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
 /*
+ * Stage 0 runs before Rust has an error channel.  Preserve whether every
+ * independently safe-off operation was acknowledged, so Stage 1 cannot turn
+ * a best-effort reset path into a successful POST merely because a device is
+ * now ready.  This is deliberately reset-local BSS: every reset must perform
+ * and account for this pass again.
+ */
+static uint32_t owo_suit_stage0_failures;
+
+#define STAGE0_BRIDGE(i) BIT(i)
+#define STAGE0_DAC       BIT(4)
+#define STAGE0_SWITCH    BIT(5)
+#define STAGE0_BOOST     BIT(6)
+#define STAGE0_PHASE     BIT(7)
+#define STAGE0_SUPPLY(i) BIT(8 + (i))
+
+/*
  * Stage 0 reset shutdown. This runs on every normal boot after the device
  * drivers have initialised but before APPLICATION main (and therefore before
  * Rust, Bluetooth, or the output backend). Do not rely on a pre-reset
@@ -300,30 +316,55 @@ static int owo_suit_reset_safe_off(void)
 	uint32_t switch_mask = 0;
 	size_t i;
 
+	owo_suit_stage0_failures = 0;
+
 	/* Same order as Stimulator::safe_off: bridge, amplitude, routing, supply. */
 	for (i = 0; i < ARRAY_SIZE(bridge); ++i) {
-		(void)gpio_pin_configure_dt(&bridge[i],
-			(i < 2) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE);
+		if (!gpio_is_ready_dt(&bridge[i]) ||
+		    gpio_pin_configure_dt(&bridge[i],
+			(i < 2) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE) < 0) {
+			owo_suit_stage0_failures |= STAGE0_BRIDGE(i);
+		}
 	}
 	if (device_is_ready(dac_dev)) {
-		(void)dac_channel_setup(dac_dev, &dac_cfg);
-		(void)dac_write_value(dac_dev, dac_cfg.channel_id, 0);
+		if (dac_channel_setup(dac_dev, &dac_cfg) < 0 ||
+		    dac_write_value(dac_dev, dac_cfg.channel_id, 0) < 0) {
+			owo_suit_stage0_failures |= STAGE0_DAC;
+		}
+	} else {
+		owo_suit_stage0_failures |= STAGE0_DAC;
 	}
 	for (i = 0; i < ARRAY_SIZE(switch_routes); ++i) {
 		switch_mask |= switch_routes[i];
 	}
 	if (device_is_ready(switch_dev)) {
-		(void)gpio_port_set_masked_raw(switch_dev, switch_mask, 0);
+		if (gpio_port_set_masked_raw(switch_dev, switch_mask, 0) < 0) {
+			owo_suit_stage0_failures |= STAGE0_SWITCH;
+		}
+	} else {
+		owo_suit_stage0_failures |= STAGE0_SWITCH;
 	}
 	if (device_is_ready(boost.dev)) {
-		(void)pwm_set_dt(&boost, boost.period, 0);
+		if (pwm_set_dt(&boost, boost.period, 0) < 0) {
+			owo_suit_stage0_failures |= STAGE0_BOOST;
+		}
+	} else {
+		owo_suit_stage0_failures |= STAGE0_BOOST;
 	}
 	if (device_is_ready(phase_timer)) {
-		(void)counter_stop(phase_timer);
+		if (counter_stop(phase_timer) < 0) {
+			owo_suit_stage0_failures |= STAGE0_PHASE;
+		}
+	} else {
+		owo_suit_stage0_failures |= STAGE0_PHASE;
 	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
 		if (device_is_ready(supplies[i])) {
-			(void)regulator_disable(supplies[i]);
+			if (regulator_disable(supplies[i]) < 0) {
+				owo_suit_stage0_failures |= STAGE0_SUPPLY(i);
+			}
+		} else {
+			owo_suit_stage0_failures |= STAGE0_SUPPLY(i);
 		}
 	}
 	return 0;
@@ -340,6 +381,11 @@ SYS_INIT(owo_suit_reset_safe_off, APPLICATION, 0);
 int owo_suit_post(void)
 {
 	size_t i;
+
+	/* A successful readiness check cannot retroactively confirm reset safe-off. */
+	if (owo_suit_stage0_failures != 0) {
+		return -EIO;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(bridge); ++i) {
 		if (!device_is_ready(bridge[i].port)) {
