@@ -104,6 +104,8 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
 
 #define EFR32_AGC_FRAMERSSI_OFFSET 0x01CU
 #define EFR32_AGC_IF_OFFSET 0x044U
+#define EFR32_AGC_CMD_OFFSET 0x04CU
+#define EFR32_AGC_CMD_RSSISTART (1U << 0)
 #define EFR32_AGC_IF_RSSIVALID (1U << 0)
 #define EFR32_AGC_RSSI_CODE_SHIFT 6U
 #define EFR32_AGC_RSSI_CODE_MASK 0x3FFU
@@ -783,10 +785,11 @@ void radio_switch_complete_and_disable(void)
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
-/* [regs-partial] AGC RSSI/FRAMERSSI fields are public; measurement policy is unknown (T9) */
+/* [regs-public] AGC.CMD.RSSISTART requests a live RSSI measurement (T9). */
 void radio_rssi_measure(void)
 {
-	EFR32_RADIO_TODO("AGC RSSI registers");
+	*radio_reg32(EFR32_AGC_BASE + EFR32_AGC_CMD_OFFSET) =
+		EFR32_AGC_CMD_RSSISTART;
 }
 
 /*
