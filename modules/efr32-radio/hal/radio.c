@@ -22,6 +22,9 @@
 #include <psa/crypto.h>
 
 #include "hal/ccm.h"
+#include "hal/cntr.h"
+#include "hal/efr32/cntr_efr32.h"
+#include "hal/efr32/ticker.h"
 #include "abort_lifecycle.h"
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
@@ -66,6 +69,79 @@ static struct efr32_radio_abort_lifecycle efr32_radio_abort;
  * radio operation.  See timer_state.c for the reference line citations.
  */
 static struct efr32_radio_timer_state efr32_radio_timer;
+static atomic_t efr32_radio_launch_generation;
+static atomic_t efr32_radio_launch_active;
+/* Generation mailboxes pair the coalescing semaphore token with its expiry. */
+static atomic_t efr32_radio_tx_pending_generation;
+static atomic_t efr32_radio_rx_pending_generation;
+K_SEM_DEFINE(efr32_radio_tx_sem, 0, 1);
+K_SEM_DEFINE(efr32_radio_rx_sem, 0, 1);
+
+static void efr32_radio_tx_job(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	for (;;) {
+		atomic_val_t generation;
+
+		k_sem_take(&efr32_radio_tx_sem, K_FOREVER);
+		generation = atomic_get(&efr32_radio_tx_pending_generation);
+		if (atomic_cas(&efr32_radio_launch_active,
+			    generation, 0)) {
+			radio_tx_enable();
+		}
+	}
+}
+
+static void efr32_radio_rx_job(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+	for (;;) {
+		atomic_val_t generation;
+
+		k_sem_take(&efr32_radio_rx_sem, K_FOREVER);
+		generation = atomic_get(&efr32_radio_rx_pending_generation);
+		if (atomic_cas(&efr32_radio_launch_active,
+			    generation, 0)) {
+			radio_rx_enable();
+		}
+	}
+}
+
+K_THREAD_DEFINE(efr32_radio_tx_job_thread,
+		CONFIG_EFR32_RADIO_SCHEDULER_STACK_SIZE,
+		efr32_radio_tx_job, NULL, NULL, NULL,
+		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+K_THREAD_DEFINE(efr32_radio_rx_job_thread,
+		CONFIG_EFR32_RADIO_SCHEDULER_STACK_SIZE,
+		efr32_radio_rx_job, NULL, NULL, NULL,
+		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+
+/* ISR-safe: publish only a generation and wake the pre-created job. */
+void efr32_radio_launch_wake(uint8_t trx, uint32_t generation)
+{
+	if ((uint32_t)atomic_get(&efr32_radio_launch_active) != generation) {
+		return;
+	}
+	if (trx) {
+		atomic_set(&efr32_radio_tx_pending_generation, generation);
+		k_sem_give(&efr32_radio_tx_sem);
+	} else {
+		atomic_set(&efr32_radio_rx_pending_generation, generation);
+		k_sem_give(&efr32_radio_rx_sem);
+	}
+}
+
+/* Teardown never owns the persistent job threads. It only makes any queued
+ * mailbox wake stale and releases the shared BURTC deadline. */
+static void efr32_radio_launch_disarm(void)
+{
+	atomic_set(&efr32_radio_launch_active, 0);
+	cntr_radio_cmp_cancel();
+}
 /*
  * OpenISA uses sleep/wake as a reference-counted clock-availability
  * contract.  xG22 radio power sequencing has not been characterized, so
@@ -656,6 +732,7 @@ void radio_setup(void)
 /* [regs-vendor] Retain the source-backed reset prefix; see radio-tables.md §4.1. */
 void radio_reset(void)
 {
+	efr32_radio_launch_disarm();
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
@@ -961,6 +1038,8 @@ void radio_disable(void)
 {
 	unsigned int key;
 
+	efr32_radio_launch_disarm();
+
 	/*
 	 * Keep independent command writes: their combined hardware semantics are
 	 * unverified. The retained stock trace issues RXDIS before TXDIS
@@ -1187,6 +1266,25 @@ uint32_t radio_bc_has_match(void)
 	return 0;
 }
 
+static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t remainder)
+{
+	uint32_t generation;
+
+	if (!(remainder / 1000000UL) || (remainder & BIT(31))) {
+		tick--;
+		remainder += HAL_TICKER_CNTR_CLK_UNIT_FSEC / 1000UL;
+	}
+	remainder /= 1000000UL;
+	do {
+		generation = (uint32_t)atomic_inc(&efr32_radio_launch_generation) + 1U;
+	} while (!generation);
+	atomic_set(&efr32_radio_launch_active, 0);
+	atomic_set(&efr32_radio_launch_active, generation);
+	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
+	cntr_radio_cmp_set(trx, tick, generation);
+	return remainder;
+}
+
 /* [software] OpenISA capture-request bookkeeping; PROTIMER capture remains unknown (T8). */
 void radio_tmr_status_reset(void)
 {
@@ -1202,20 +1300,13 @@ void radio_tmr_tifs_set(uint32_t tifs)
 /* [software + regs] Retain start tick; scheduling remains unknown (T8). */
 uint32_t radio_tmr_start(uint8_t trx, uint32_t ticks_start, uint32_t remainder)
 {
-	ARG_UNUSED(trx);
-	ARG_UNUSED(remainder);
-	efr32_radio_timer_state_start_set(&efr32_radio_timer, ticks_start);
-	EFR32_RADIO_AIR_TODO("regs");
-	return 0;
+	return efr32_radio_launch_schedule(trx, ticks_start, remainder);
 }
 
 /* [software + regs] Retain start tick; scheduling remains unknown (T8). */
 uint32_t radio_tmr_start_tick(uint8_t trx, uint32_t tick)
 {
-	ARG_UNUSED(trx);
-	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
-	EFR32_RADIO_AIR_TODO("regs");
-	return 0;
+	return efr32_radio_launch_schedule(trx, tick, 1000000UL);
 }
 
 /* [software] Return the retained controller tick; no hardware read is implied. */
@@ -1243,7 +1334,7 @@ uint32_t radio_tmr_start_get(void)
 /* [software] Restore LLL-supplied AA timestamp; no hardware read is implied. */
 void radio_tmr_stop(void)
 {
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_launch_disarm();
 }
 
 /* [software] Request a later end capture; capture itself remains unknown (T8). */

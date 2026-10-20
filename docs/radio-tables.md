@@ -647,8 +647,27 @@ computes several scaled values before writing `CTRL=0x00011102`, `STATE`
 432-byte compare helper begins at `0x3c140` (object offset `0x20c`) and also
 coordinates FRC, sequencer RAM, and RAC accesses. Thus neither helper proves
 a conversion from the OpenISA RTC/remainder pair to PROTIMER ticks, nor a safe
-TIFS comparator sequence. The HAL deliberately continues to reject scheduled
-radio starts rather than silently substituting one timebase for another.
+TIFS comparator sequence.
+
+The archive does prove that scheduled operations are deferred rather than
+started inline by their API wrappers. The scheduled-TX path reaches the common
+compare helper with slot index 3 at archive offset `0x521a8`
+(`generic_phy.o` begins at `0x518c8`); the scheduled-RX path reaches the same
+helper with index 2 at `0x51fe0`. The 432-byte helper at `0x3c140` records the
+target at `PROTIMER +0x10c + 0x10*index`, writes `0x11` at
+`+0x100 + 0x10*index`, and applies an index-derived mask through the `IF` CLR
+alias. Each wrapper then returns. This is evidence for deferred timer-slot
+programming, not for a proven autonomous PROTIMER-to-RAC/FRC launch route.
+
+The Zephyr port consequently uses its existing free-running BURTC ticker
+counter as a single alarm source: the ordinary LLL ticker compare and one
+pending radio-launch compare are multiplexed to the earlier wrap-safe deadline.
+The counter ISR only records the expiry and wakes a pre-created TX or RX
+Zephyr thread. Those persistent threads run the normal radio enable path only
+when selected by the kernel scheduler; disable/reset disarms the deadline and
+invalidates its generation, but does not destroy the workers. This is an
+intentional scheduler integration choice, rather than a claim that it matches
+the unresolved vendor PROTIMER semantics.
 
 The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, the correspondence between RAIL timer ticks and the raw PROTIMER counter, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
 
