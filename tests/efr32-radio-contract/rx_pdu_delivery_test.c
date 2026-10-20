@@ -14,9 +14,11 @@ static void expect_unchanged(const uint8_t *actual, const uint8_t *expected,
 
 int main(void)
 {
+	struct efr32_radio_rx_pdu_delivery delivery;
 	uint8_t target[257];
 	uint8_t before[257];
 	uint8_t short_pdu[] = { 0x01U, 0x02U, 0xa1U, 0xa2U };
+	uint8_t replacement_pdu[] = { 0x01U, 0x02U, 0xb1U, 0xb2U };
 	uint8_t max_pdu[257] = { 0 };
 
 	memset(target, 0x5a, sizeof(target));
@@ -52,6 +54,23 @@ int main(void)
 	assert(efr32_radio_rx_pdu_validate_and_copy(target, max_pdu,
 						     sizeof(max_pdu), 8U, UINT8_MAX) == 0);
 	assert(memcmp(target, max_pdu, sizeof(max_pdu)) == 0);
+
+	/* A valid frame owns the RX stage until its caller resets that stage. */
+	memset(target, 0x5a, sizeof(target));
+	efr32_radio_rx_pdu_delivery_reset(&delivery);
+	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu,
+						  sizeof(short_pdu), 8U, 2U) == 0);
+	memcpy(before, target, sizeof(target));
+	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, replacement_pdu,
+						  sizeof(replacement_pdu), 8U, 2U) == -EALREADY);
+	expect_unchanged(target, before, sizeof(target));
+
+	/* Rejection before a copy leaves the stage available to its real producer. */
+	efr32_radio_rx_pdu_delivery_reset(&delivery);
+	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu, 3U,
+						  8U, 2U) == -EMSGSIZE);
+	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu,
+						  sizeof(short_pdu), 8U, 2U) == 0);
 
 	return 0;
 }

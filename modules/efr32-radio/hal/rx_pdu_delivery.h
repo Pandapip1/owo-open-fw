@@ -10,9 +10,26 @@
 #ifndef EFR32_RADIO_RX_PDU_DELIVERY_H_
 #define EFR32_RADIO_RX_PDU_DELIVERY_H_
 
+#include <stdbool.h>
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+
+/*
+ * A normalized PDU producer may deliver at most one frame for each RX stage.
+ * The LLL owns the target until it samples the completion and calls
+ * radio_status_reset(), so accepting a second frame here would silently
+ * overwrite the PDU the callback is about to consume.
+ */
+struct efr32_radio_rx_pdu_delivery {
+	bool delivered;
+};
+
+static inline void efr32_radio_rx_pdu_delivery_reset(
+	struct efr32_radio_rx_pdu_delivery *delivery)
+{
+	delivery->delivered = false;
+}
 
 /*
  * Validate and copy one normalized PDU.  The current OpenISA contract uses
@@ -42,6 +59,34 @@ static inline int efr32_radio_rx_pdu_validate_and_copy(void *target,
 	memcpy(target, pdu, bytes);
 
 	return 0;
+}
+
+/*
+ * Validate and copy the sole PDU for an RX stage.  A failed validation does
+ * not consume the stage, but a successful copy does; its caller decides
+ * whether an invalid producer result should make the later CRC outcome fail.
+ */
+static inline int efr32_radio_rx_pdu_deliver_once(
+	struct efr32_radio_rx_pdu_delivery *delivery, void *target,
+	const uint8_t *pdu, uint16_t bytes, uint8_t bits_len, uint8_t max_len)
+{
+	int err;
+
+	if (!delivery) {
+		return -EINVAL;
+	}
+
+	if (delivery->delivered) {
+		return -EALREADY;
+	}
+
+	err = efr32_radio_rx_pdu_validate_and_copy(target, pdu, bytes,
+						   bits_len, max_len);
+	if (!err) {
+		delivery->delivered = true;
+	}
+
+	return err;
 }
 
 #endif /* EFR32_RADIO_RX_PDU_DELIVERY_H_ */

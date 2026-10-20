@@ -191,6 +191,7 @@ static struct {
 	bool packet_configured;
 	bool rx_fifo_configured;
 	bool tx_fifo_configured;
+	struct efr32_radio_rx_pdu_delivery rx_delivery;
 	struct efr32_radio_packet_lifecycle lifecycle;
 } efr32_packet_stage;
 
@@ -940,6 +941,7 @@ void radio_pkt_rx_set(void *rx_packet)
 	/* Retain the controller's target for the eventual proven RX copy-out. */
 	efr32_packet_stage.rx_target = rx_packet;
 	efr32_packet_stage.rx_fifo_configured = true;
+	efr32_radio_rx_pdu_delivery_reset(&efr32_packet_stage.rx_delivery);
 }
 
 /*
@@ -965,10 +967,10 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 		return -EINVAL;
 	}
 
-	err = efr32_radio_rx_pdu_validate_and_copy(efr32_packet_stage.rx_target,
-							   pdu, bytes,
-							   efr32_packet_stage.bits_len,
-							   efr32_packet_stage.max_len);
+	err = efr32_radio_rx_pdu_deliver_once(&efr32_packet_stage.rx_delivery,
+						     efr32_packet_stage.rx_target, pdu, bytes,
+						     efr32_packet_stage.bits_len,
+						     efr32_packet_stage.max_len);
 	if (err) {
 		efr32_rx_delivery_invalid = true;
 		return err;
