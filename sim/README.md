@@ -3,7 +3,9 @@
 **Unvalidated on hardware. Bench-test the output stage on a dummy load first.**
 
 * `vendor/qemu/` — pinned QEMU v9.2.0 fork adding the `efr32bg22` machine
-  (Cortex-M33, IDAU, persistent flash, and an in-process native MMIO model).
+  (Cortex-M33, IDAU, a preloaded RAM-backed flash image, and an in-process
+  native MMIO model). Flash contents survive CPU reset in one process but are
+  not written back to the input image or retained across separate QEMU runs.
 * `sim/bootloader/` — hand-configured build of the real Gecko Bootloader main stage
   (sources from gecko_sdk, see `Makefile`; app base moved to 0x16000 to match the suit).
   SHA-256 is a software shim and ECDSA verification is a stub: signatures are NOT checked.
