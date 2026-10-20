@@ -241,6 +241,12 @@ Its Cortex-M33 also advertises the Series-2 16-region MPU configuration, so
 Zephyr's early MPU setup is modelled rather than faulting due to a generic CPU
 default. This dry run has reached RAC `TXEN`; it is a controller-startup
 observation, not evidence of a transmitted packet or a bootloader model.
+With `efr32bg22_tx_snapshot` enabled, the same bounded run records sequence
+zero with 11 staged bytes and first word `0x743a0940`. The little-endian first
+two bytes are `0x40, 0x09`, so the one-octet Link Layer body length agrees with
+the observed total (`2 + 9`). This checks that the HAL's length-bounded BUFC
+staging reaches QEMU's model-defined snapshot boundary; it is still neither
+an RF-air assertion nor an RX-delivery proof.
 
 The smoke deliberately uses the non-stub register configuration and starts a
 real legacy advertiser; it does not inject a packet. It reports the two
