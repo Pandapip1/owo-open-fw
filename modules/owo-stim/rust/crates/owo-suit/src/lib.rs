@@ -53,6 +53,10 @@ pub enum ResourceStatus {
     /// Online under a resource-owned watchdog-monitor lease. This is not a
     /// boolean feature bit: only the lease guard may enter or leave it.
     OnlineMonitored,
+    /// A failure occurred, then unconditional shutdown was acknowledged. This
+    /// is contained, not reusable: only reset or explicit recovery can make
+    /// the resource `Unknown` again.
+    FailedShutdown,
     Failed,
 }
 
@@ -103,7 +107,9 @@ impl ResourceLifecycle {
     /// non-energising but does not claim a self-test passed.
     pub fn finish_shutdown(&mut self, result: Result<(), InitError>) -> Result<(), InitError> {
         if result.is_err() { self.0 = ResourceStatus::Failed; }
-        else if matches!(self.0, ResourceStatus::Online | ResourceStatus::OnlineMonitored) {
+        else if self.0 == ResourceStatus::Failed {
+            self.0 = ResourceStatus::FailedShutdown;
+        } else if matches!(self.0, ResourceStatus::Online | ResourceStatus::OnlineMonitored) {
             self.0 = ResourceStatus::Ready;
         }
         result
@@ -438,6 +444,8 @@ mod tests {
         assert_eq!(resource.status(), ResourceStatus::OnlineMonitored);
         resource.safety_check_failed();
         assert_eq!(resource.status(), ResourceStatus::Failed);
+        assert_eq!(resource.finish_shutdown(Ok(())), Ok(()));
+        assert_eq!(resource.status(), ResourceStatus::FailedShutdown);
         assert!(resource.begin_online().is_err());
     }
 
