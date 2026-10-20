@@ -48,7 +48,7 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded; address-independent BLE base plus 1M/2M/coded S2/S8 deltas imported; PHYINFO remains unresolved** | `radio_phy_set` |
 | T4 | SYNTH channel/frequency registers | **[F] implemented from public BLE channel config and CHCTRL field** | `radio_freq_chan_set` |
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; public BLE 1M FRC baseline and descriptor fields decoded, but sequencer handoff/buffer behavior remains incomplete** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
-| T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; FRC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
+| T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; a dormant normalized-PDU RX copy helper enforces controller bounds, but FRC/BUFC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
 | T7 | PA power registers | **[F] RAIL routes raw and dBm requests through configuration-dependent helpers; a board-safe PA setting remains unresolved** | `radio_tx_power_*` |
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
 | T9 | AGC RSSI read | **[F] live/frame value registers and fixed-point fields known; readiness/measurement policy unknown** | `radio_rssi_*` |
@@ -253,6 +253,25 @@ The vendor TX-FIFO setup provides separate BUFC evidence. `RAIL_SetTxFifo` reach
 `radio_pkt_tx_set` now applies exactly that limited contract. It copies the OpenISA PDU's two-byte header plus its length-byte-selected payload into an aligned 512-byte staging FIFO, then writes `CMD=1`, configuration `3`, its address, the copied byte count, and `CMD=2` in the vendor order. This establishes the BUFC side of TX setup only: neither this change nor the QEMU latch model claims that FRC consumes channel 0, that RAC starts a packet, or that any bytes reach the air.
 
 The corresponding RAIL RX-FIFO helper is directly located at archive file offset `0x3345c` in `librail_efr32xg22_gcc_release.a(rfhal_bufc.o)` (member starts at `0x332f4`, section-relative offset `0x168`, 20 bytes). It writes channel 1 `CMD=1` at `0xBA000074`, then its capacity encoding, backing address, and `THRESHOLDCTRL=0x0FFF` at `0xBA00004C`, `+0x004`, and `+0x024`; it does not issue a prefetch command. The caller derives the same 64–4096-byte power-of-two encoding as the TX path. `radio_pkt_rx_set` therefore initializes an owned aligned 512-byte channel-1 staging buffer using that exact sequence, deliberately leaving the caller PDU untouched until the FRC delivery/descriptor contract is known. QEMU regression coverage retains those four latches. This is FIFO allocation only, not RX enable, packet reception, or a claim that any received bytes become visible to OpenISA.
+
+The archive now also proves the *byte-consumption* half of that FIFO, but not
+packet delivery. `RAIL_ReadRxFifo` is a wrapper in `rail_data.o` at archive
+offset `0x15be2c` (member data `0x15bccc`, section `+0x160`) which tail-calls
+the common reader in `rail_rf_hal.o` at `0x12adc` (member data `0x10dd4`,
+section `+0x1d08`). That reader obtains packet information first, clamps the
+requested byte count to its returned 16-bit availability, then invokes the
+BUFC copy helper with channel 1. The helper in `rfhal_bufc.o` at `0x335fc`
+(member `0x332f4`, section `+0x308`) reads channel-1 `STATUS` low 13-bit
+count at `0xBA00006C` and `READOFFSET` at `0xBA000058`; its callee at
+`0x33328` (section `+0x34`) copies circular bytes from `BUF.ADDR |
+0x20000000` and advances `READOFFSET` when requested. This proves that the
+configured backing RAM is a consumable circular byte buffer. It does not
+recover the prerequisite packet-info layout, an on-air frame boundary, CRC
+policy, or when those bytes become eligible to copy into an OpenISA PDU.
+The sequencer's `RXRAWDATA`-to-channel-1 PIO path and `FRC.RXDONE` remain
+separate observations; a simulator may choose to make all its modeled writes
+visible before its synthetic completion, but must not label that ordering as
+vendor hardware behavior.
 
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 

@@ -699,6 +699,45 @@ void radio_pkt_rx_set(void *rx_packet)
 }
 
 /*
+ * This is deliberately not connected to an FRC interrupt yet.  Its input is
+ * a normalized Bluetooth Link Layer PDU: header octet, length octet, and
+ * exactly that many payload octets.  A future caller must first prove how to
+ * obtain this representation from BUFC/FRC; it must not pass raw BUFC memory
+ * here or infer a frame boundary from an FRC completion interrupt.
+ *
+ * Keeping the controller-facing copy and its bounds check separate from that
+ * unresolved hardware handoff makes the eventual delivery path auditable.
+ */
+static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
+						  uint16_t bytes)
+{
+	uint16_t pdu_bytes;
+
+	if (!pdu || !efr32_packet_stage.rx_target ||
+	    !efr32_packet_stage.packet_configured ||
+	    !efr32_packet_stage.rx_fifo_configured ||
+	    efr32_packet_stage.active_direction != EFR32_RADIO_PACKET_RX) {
+		return -EINVAL;
+	}
+
+	/* All current OpenISA callers configure an octet-sized length field. */
+	if (efr32_packet_stage.bits_len != 8U || bytes < 2U) {
+		return -EMSGSIZE;
+	}
+
+	pdu_bytes = (uint16_t)pdu[1] + 2U;
+	if (pdu_bytes != bytes || pdu[1] > efr32_packet_stage.max_len) {
+		return -EMSGSIZE;
+	}
+
+	memcpy(efr32_packet_stage.rx_target, pdu, bytes);
+	/* A completion is consumed once; another delivery needs a new RX start. */
+	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
+
+	return 0;
+}
+
+/*
  * [regs-partial] Configure only the source-backed BUFC TX staging FIFO.
  * FRC's consumption of that FIFO and sequencer handoff remain unproven (T5).
  */
