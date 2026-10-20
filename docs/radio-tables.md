@@ -406,6 +406,18 @@ stock store or `RAIL_ConfigRxOptions` call has been established. Computed
 address writes remain possible, so absence of a located store is not evidence
 for either option state.
 
+Archive call tracing adds no BLE-specific selection. Aside from the public
+`RAIL_ConfigRxOptions` entry, the only direct archive caller of that helper is
+generic `rail_rf_hal.o:sli_rail_f70cad…` at archive `0x13580`: it passes mask
+`0xffffffff` and the existing handle `+0x90` option value. That path is reached
+through generic `rail_rf.o:sli_rail_7e61…` at `0x14e196` from
+`sl_rail_init`/`RAIL_Init`; no relocation from `rail_ble.o` or
+`rail_ble_rf_hal.o` reaches the helper, and the local xG22 BLE configurator
+source has no RX-option/appended-info entry. Public headers define
+`RAIL_RX_OPTIONS_DEFAULT` as all options disabled (`rail_types.h:5691-5697`),
+but the generic call's existing-handle argument does not prove its initialized
+value or the stock image's setting.
+
 The descriptor-ring initializer distinguishes the CPU's lifecycle work from
 record production. `rfhal_bufc.o:sli_rail_6281eecc9c4ea6e1ecc523be2e1d48d2`
 is archive `[0x33740, 0x337c8)` (member `0x332f4`, section file offset
