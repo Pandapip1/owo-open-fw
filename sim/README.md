@@ -36,9 +36,13 @@ It records written command words and every modeled RAC state transition, includi
 completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
 ## Status
-* Stock 7.9.07 boots through the bootloader to its idle loop, feeds WDOG0 and leaves the
-  H-bridge off (PB2/PB3 high), matching `docs/stock-stim-path.md`.
+* The current in-process model cleanly transfers from the bootloader reset vector to the stock
+  application's reset vector. Bounded native-QEMU runs have not yet reached radio
+  initialization. The retained `evidence/stock/radio-trace.log` is useful historical register
+  evidence, but its first line identifies an older external socket bridge rather than this native
+  QEMU device; it must not be treated as end-to-end validation of the current model.
 * Radio blocks have an in-process native register model with source- and trace-backed RAC,
   BUFC, PROTIMER, FRC, MODEM, AGC, SYNTH, and RFCRC register handling. BLE packet traffic,
   sequencer behavior, and air delivery remain unmodelled, so stock-firmware stimulation cannot
-  yet be triggered from the outside.
+  yet be triggered from the outside. Completing the boot path and reproducing the retained radio
+  configuration with the native model are separate validation work items.
