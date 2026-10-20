@@ -609,6 +609,23 @@ invent a timer-only guest callback. It remains unknown which PROTIMER status
 condition, if any, produces which FRC-visible event, so QEMU deliberately does
 not yet synthesize an IRQ36 assertion or compare expiry from this fact.
 
+Further disassembly makes the PROTIMER half of that shared path concrete. At
+archive offsets `0x527c0..0x527cc`, the handler reads PROTIMER `+0x014`,
+`IF +0x064`, and `IEN +0x070`, then computes `IF & IEN`; at
+`0x527d2..0x527e8` it acknowledges handled timer bits through the standard
+CLR alias at `0xB801E064`. The handler later passes timer-derived aggregate
+masks together with enabled FRC pending bits to its dispatcher at `0x52dda`;
+the callee is at archive `0x51aac` and masks these against registered event
+masks before calling the common RAIL event path. QEMU therefore models the
+observed PROTIMER `IF`/`IEN` latch bank and drives IRQ36 only from their
+intersection, with normal/SET/CLR/TGL aliases shared between secure and
+non-secure windows. It deliberately leaves all flags inert: no counter edge,
+compare slot, FRC flag, RAC command, packet event, or guest callback is
+synthesized. Static code observes timer bits `0x10`, `0x10000`, `0x01000000`,
+`0x02000000`, `0x08000000`, and `0x20000000`, but does not name them or map
+them to slots, so they remain evidence of a pending-bank dispatch—not a timer
+semantics definition.
+
 The public xG2x RAIL header documents `RAIL_TimerTick_t` as a counter whose
 tick is roughly 0.5 microseconds and whose wrap range is about 17 minutes
 (`rail_chip_specific.h:272-328`). The locally retained xG22 RAIL archive's
