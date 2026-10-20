@@ -283,11 +283,13 @@ static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
 /*
- * Reset baseline.  This runs on every normal boot after the device drivers have
- * initialised but before APPLICATION main (and therefore before Rust, Bluetooth,
- * or the output backend).  Do not rely on a pre-reset callback: a watchdog or
- * brown-out reset cannot run one.  Every operation is best effort so a missing
- * peripheral cannot prevent the remaining independent safe-off operations.
+ * Stage 0 reset shutdown. This runs on every normal boot after the device
+ * drivers have initialised but before APPLICATION main (and therefore before
+ * Rust, Bluetooth, or the output backend). Do not rely on a pre-reset
+ * callback: a watchdog or brown-out reset cannot run one. Every operation is
+ * best effort so a missing peripheral cannot prevent the remaining independent
+ * safe-off operations. Stages 1 and 2 in Rust subsequently POST and verify a
+ * forced known-off state before any safety-critical service may start.
  */
 static int owo_suit_reset_safe_off(void)
 {
@@ -330,10 +332,10 @@ static int owo_suit_reset_safe_off(void)
 SYS_INIT(owo_suit_reset_safe_off, APPLICATION, 0);
 
 /*
- * Non-energising POST for the Rust bring-up barrier.  This deliberately
- * checks every output-owning driver before the application accepts BLE work;
- * the Rust phase still runs the full forced safe-off sequence even if this
- * reports failure, so a failed POST cannot skip recovery after a brown-out.
+ * Stage 1 non-energising POST for the Rust bring-up barrier. This deliberately
+ * checks every output-owning driver before the application accepts BLE work.
+ * Stage 2 still runs the full forced safe-off sequence even if this reports
+ * failure, so a failed POST cannot skip recovery after a brown-out.
  */
 int owo_suit_post(void)
 {

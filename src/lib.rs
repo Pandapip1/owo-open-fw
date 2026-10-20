@@ -214,13 +214,14 @@ pub(crate) fn stop_all() {
     drop(watchdog);
 }
 
-/// Establish the application safety baseline after every reset, before starting services.
+/// Complete stages 1 and 2 of the application safety baseline after every reset.
 ///
 /// This is deliberately separate from an operational Stop: a reset can leave external output
 /// components powered while the MCU is only just becoming able to control them.  `init` puts the
-/// backend's pins/peripherals in their known state, and the immediately following `all_off` runs
-/// the normal, ordered bridge/DAC/routing/supply shutdown as well.  Keep this before BLE startup
-/// (and before the watchdog is armed) so no normal service can accept work first.
+/// backend's POST/forced initialization puts its pins and peripherals in their known state, and
+/// the immediately following `all_off` runs the normal, ordered bridge/DAC/routing/supply
+/// shutdown as well. Keep this before BLE startup (and before the watchdog is armed) so no
+/// safety-critical service can accept work first.
 fn early_boot_baseline() -> Result<(), ()> {
     let mut s = STATE.lock().unwrap();
     s.engine.stop();
@@ -249,8 +250,8 @@ extern "C" fn rust_main() {
     unsafe {
         zephyr::set_logger().unwrap();
     }
-    // Every application start, including a watchdog or cold reboot, begins by actively driving
-    // the output stage to its safe state before enabling any service that could receive work.
+    // Stage 0 has already run from C SYS_INIT. Stages 1 and 2 must complete
+    // before enabling any service that could receive work.
     if early_boot_baseline().is_err() {
         /*
          * A watchdog reset cannot run teardown code.  The C SYS_INIT

@@ -119,9 +119,11 @@ fn ok(r: Result<(), i32>) -> Result<(), InitError> {
 }
 
 impl Suit {
-    /// Run the non-energising driver POST, then force every output driver to
-    /// its shutdown state.  The forced sequence runs even if POST fails so a
-    /// brown-out cannot turn a missing acknowledgement into skipped recovery.
+    /// Run stage 1's non-energising driver POST, then stage 2's forced
+    /// shutdown initialization. The forced sequence runs even if POST fails
+    /// so a brown-out cannot turn a missing acknowledgement into skipped
+    /// recovery. Callers must not start safety-critical work unless this
+    /// returns the constructed, known-shutdown driver set.
     pub fn post_and_shutdown() -> Result<Self, InitError> {
         let post = suit_post().map_err(InitError::Errno);
         let shutdown = Self::new();

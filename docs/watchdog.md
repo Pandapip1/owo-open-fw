@@ -2,6 +2,18 @@
 
 **Unvalidated on hardware. Bench-test on a dummy load first.**
 
+## Reset and bring-up phases
+
+1. **Stage 0 — reset shutdown:** C `SYS_INIT` runs after Zephyr has initialized drivers but
+   before Rust, Bluetooth, or the output backend. It makes a best-effort ordered shutdown of
+   bridge GPIOs, DAC, switch routing, boost PWM, phase counter, and supply regulators. This is
+   necessary because watchdog and brown-out reset cannot run a pre-reset callback.
+2. **Stage 1 — POST:** the Rust bring-up barrier performs non-energizing readiness checks for
+   every output-owning dependency.
+3. **Stage 2 — forced known-state initialization:** the Rust driver set performs its complete
+   ordered shutdown sequence even if POST failed. BLE, the stimulation monitor, watchdog-backed
+   sessions, and normal application work start only when both Stage 1 and Stage 2 succeeded.
+
 * Enabled with `&wdog0 { status = "okay"; }` and the `watchdog0` alias in `boards/bg22_ek4108a.overlay`,
   `CONFIG_WATCHDOG=y`. Zephyr's `drivers/watchdog/wdt_gecko.c` (`silabs,gecko-wdog`) is selected for
   Series 2 by `drivers/watchdog/Kconfig.gecko` (`select SILABS_SISDK_WDOG if SOC_FAMILY_SILABS_S2`).
