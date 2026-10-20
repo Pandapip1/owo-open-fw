@@ -124,6 +124,17 @@ timeouts/aborts have no PDU copy and may report no completion. This is an LLL
 contract, not evidence for FRC flag ordering, BUFC framing, or a hardware CRC
 producer.
 
+**[F]** That controller-facing PDU begins at the two-octet Link-Layer header:
+it contains exactly `header[2] + header[1]` payload octets, never the PHY
+preamble, four-byte access address, or three-byte PHY CRC (`pdu.h:12-20`; the
+RV32M1 reference copies two header octets plus its bounded payload at
+`hal/RV32M1/radio/radio.c:233-260,288-297`). Advertising and data PDUs both
+use that shape. Encrypted connection input additionally retains the four-byte
+MIC in the length and lets the HAL's CCM path remove it after decryption
+(`lll_conn.c:441-447`, `hal/radio.c:1288-1332`). A future delivery interface
+therefore needs normalized bytes, exact byte count, and separate CRC status;
+it must not encode an inferred FRC layout.
+
 ## 3. Build integration (done, compile-checked)
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
