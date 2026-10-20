@@ -137,6 +137,24 @@ CRC validity has an independent, directly named status bit: non-secure `FRC.TRAI
 
 `RAIL_StartRx` supplies the corresponding receive-start primitive. It branches from `rail_singleprotocol.o` into `sli_rail_dadf1c52f26190429dcacf7151424c68` in `rail_rf_hal.o`; the 68-byte routine begins at archive file offset `0x11b68` in `librail_efr32xg22_gcc_release.a` (member data offset `0x10dd4`, section offset `0x0d94`). After its setup helpers, it stores `2` at non-secure `RAC.RXENSRCEN.SET` (`0xB8021008`). Public generated fields identify bit 1 as `SWRXEN`, and `SEQIF.STATERXSEARCH` is bit 18 (`revB2/RAC_NS_field.py:727-734`). The open HAL consequently waits for `STATUS.STATE=OFF` and performs exactly that SET-alias write. QEMU latches the public source-enable register, then represents that source-backed request as stable `RXSEARCH` (state 2), including the matching sequencer flag; it deliberately does not claim packet reception, frame transition, or receive completion. Its qtest verifies `SWRXEN` produces `RXSEARCH`, then `RXDIS` produces `OFF`.
 
+The parallel TX API is materially broader than the HAL's current start
+primitive. `RAIL_StartTx` is a four-byte wrapper at archive offset `0x149464`
+in `rail_singleprotocol.o` (member offset `0x148fdc`, section-relative offset
+`0x488`) and tail-calls `sli_rail_0aff8abbb6b0be838a41142fd1c42495` at
+`0x13fb4` in `rail_rf_hal.o`. That wrapper calls the 548-byte common TX helper
+`sli_rail_3d0930b0b28334e352a161a5b4a4cb94`, which begins at `0x13d90`
+(same member; section offset `0x2fbc`). Direct disassembly of that helper
+contains accesses through RAC alias bases, a `0xBA000000` BUFC literal, and a
+sequencer-RAM literal (`0xB0003E00`), as well as calls to further helpers.
+For example, at helper-relative `0x7c` it writes `0x20` through the RAC clear
+alias at `0xB8022000 + 0x40`; the public rev-B2 model names the underlying
+register `RAC_NS.SR0` (`RAC_NS_register.py:454-470`). This is a concrete
+vendor start-path fact, but not enough to assign packet/FIFO semantics to
+those writes or reconstruct the called helpers. `radio_tx_enable()` therefore
+continues to issue only the public `RAC.CMD.TXEN` primitive, and QEMU's fixed
+completion remains an explicit simulator abstraction rather than a claim that
+it executes the RAIL transmit pipeline.
+
 This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. In the retained stock trace, `radio-trace.log:201` writes `RXDIS = 0x100`, `:203` reads `STATUS`, `:208` writes `TXDIS = 0x20`, and `:207` is the preceding `STATUS` read. That is an observed ordering fact, not a claim that the two commands are interchangeable. The QEMU model uses this source- and trace-matched RAC map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
 
 ## 4.2 SYNTH, FRC, and AGC fields [F]
