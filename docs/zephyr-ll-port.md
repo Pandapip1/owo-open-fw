@@ -135,20 +135,32 @@ MIC in the length and lets the HAL's CCM path remove it after decryption
 therefore needs normalized bytes, exact byte count, and separate CRC status;
 it must not encode an inferred FRC layout.
 
-## 3. Build integration (historically compile-checked)
+## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
   (derives the OpenISA LLL/hal files into the build tree with `hal/RV32M1/` -> `hal/efr32/` and the two patches above, then adds the module's own `hal/{cntr,ecb,radio}.c`).
   No Zephyr code is copied into this repository.
-* `tests/radio-port`: minimal app (`bt_enable`) + overlay. `west build -b bg22_ek4108a tests/radio-port -- -DCONFIG_BUILD_ONLY_NO_BLOBS=y`
-  builds and links the real ULL (`ll_adv_enable`, `lll_init`, ...) with the module: 137,280 B flash, 25 KiB RAM (no application on top).
-  It cannot run: the radio hooks are stubs and nothing configures BURTC. The
-  present checkout cannot yet reproduce that configure-only check because it
-  lacks the manifest-pinned source modules `hal_silabs`, `cmsis_6`, `mbedtls`,
-  and PSA crypto; `CONFIG_BUILD_ONLY_NO_BLOBS=y` excludes proprietary binaries,
-  not those modules' Kconfig/source definitions. A project-local direct CMake
-  invocation reaches Kconfig without creating `.west`, but those missing
-  modules make its selected symbols resolve to false and configuration aborts.
+* `tests/radio-port`: minimal Rust app (`bt_enable`) + overlay. It explicitly
+  selects `CONFIG_RUST=y`; the lockfile is tracked. With the pinned public
+  `cmsis_6`, `hal_silabs`, `mbedtls`, `tf-psa-crypto`, and `zephyr-lang-rust`
+  submodules, the following direct build is reproducible without creating a
+  `.west` checkout:
+
+  ```sh
+  nix develop . -c cmake -G Ninja -S tests/radio-port -B build/radio-port-contract-check \
+    -DBOARD=bg22_ek4108a -DZEPHYR_BASE="$PWD/vendor/zephyr" \
+    -DZephyr_DIR="$PWD/vendor/zephyr/share/zephyr-package/cmake" \
+    -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust" \
+    -DCONFIG_BUILD_ONLY_NO_BLOBS=y
+  nix develop . -c cmake --build build/radio-port-contract-check
+  ```
+
+  On 2026-10-20 it built and linked the real ULL (`ll_adv_enable`, `lll_init`,
+  ...) with the module at 147,340 B flash (28.10%) and 26,632 B RAM (81.27%),
+  before any application payload. It cannot run: the radio hooks are stubs and
+  nothing configures BURTC. `CONFIG_BUILD_ONLY_NO_BLOBS=y` excludes proprietary
+  binaries, not the now-present public source dependencies; it is build/CI
+  validation only, not an on-device or QEMU radio validation.
 
 ## 4. Known gaps/risks (not resolved)
 1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §5.
