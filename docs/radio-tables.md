@@ -218,6 +218,17 @@ The sequencer is therefore the observed raw-byte producer, and the M33 handler
 is downstream bookkeeping. Neither establishes packet records, metadata,
 `TRAILRXDATA.CRCOK`, or their ordering with RXDONE.
 
+The 32 KiB capture also provides a bounded literal-search result for the
+descriptor question. Its only little-endian `0xAA0000xx` BUFC literals are at
+capture offsets `0x0dec` (`0xAA000054`), `0x0e34` (`0xAA000064`), `0x15b0`
+(`0xAA0000e4`), `0x1624` (`0xAA00000c`), `0x1858` (`0xAA0000d8`), and
+`0x328c` (`0xAA000018`). They target channel 0, channel 1, or channel 3;
+there is no channel-2 literal in the capture (whose SHA-256 is
+`acd72f8ebb4008e918af059b1ba2383dc64b33c66690871f4343a5bfed100847`).
+This is only a literal-search fact: it does not exclude a computed channel-2
+address, and it is not evidence that any listed access executes. It does rule
+out claiming a plainly encoded sequencer descriptor producer from this image.
+
 One branch of that downstream bookkeeping is now exactly located.  With BUFC
 threshold bit 18 pending, `generic_phy.o:FRC_IRQHandler` calls
 `sli_rail_0906929bba6a17fd8a9605e65064a9f4` at handler-relative `0x240`
