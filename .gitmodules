@@ -7,3 +7,15 @@
 [submodule "vendor/zephyr-lang-rust"]
 	path = vendor/zephyr-lang-rust
 	url = https://github.com/Pandapip1/zephyr-lang-rust.git
+[submodule "vendor/cmsis_6"]
+	path = vendor/cmsis_6
+	url = https://github.com/zephyrproject-rtos/CMSIS_6.git
+[submodule "vendor/hal_silabs"]
+	path = vendor/hal_silabs
+	url = https://github.com/zephyrproject-rtos/hal_silabs.git
+[submodule "vendor/mbedtls"]
+	path = vendor/mbedtls
+	url = https://github.com/zephyrproject-rtos/mbedtls.git
+[submodule "vendor/tf-psa-crypto"]
+	path = vendor/tf-psa-crypto
+	url = https://github.com/zephyrproject-rtos/tf-psa-crypto.git

@@ -60,6 +60,20 @@ Timing constants in `lll/lll_vendor.h` and the `*_delay_get` functions are OpenI
 
 ### 3.1 OpenISA clock-availability contract [F]
 
+The target module is physically marked `BGM220PC22HNA2` (user-provided board
+photograph, inspected 2026-10-20). Silicon Labs' [BGM220P data
+sheet](https://www.silabs.com/documents/public/data-sheets/bgm220p-datasheet.pdf),
+Figure 1.1 / page 1, independently identifies that ordering code as the
+512 kB-flash / 32 kB-RAM EFR32BG22 module and assigns a *lowest operational
+energy mode* to each block. The BLE radio chain—RX/TX front end, synthesizer,
+DEMOD, IFADC, AGC, MOD, CRC, FRC, BUFC RAM, and the M0+ radio controller—is
+EM1 (Sleep) minimum. RFSENSE with OOK detect is the distinct radio-adjacent
+EM4 (Shutoff) exception. This constrains future QEMU power modeling: EM2/EM3
+must not retain a usable BLE radio chain, while EM4 RFSENSE cannot be
+misrepresented as normal packet reception. It does not identify the EMU/CMU
+register transition sequence, so neither the HAL nor QEMU writes a guessed
+power-control register on its basis.
+
 The portable OpenISA reference does not use `radio_is_off()` as a RAC state
 query. Its `radio_sleep()` and `radio_wake()` maintain a `dsm_ref` reference
 count, and `radio_is_off()` reads the RV32M1 DSM power-state bits
