@@ -22,6 +22,7 @@
 #include <psa/crypto.h>
 
 #include "hal/ccm.h"
+#include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
 
@@ -50,6 +51,14 @@
 
 static radio_isr_cb_t isr_cb;
 static void *isr_cb_param;
+/*
+ * OpenISA's abort paths install a cleanup callback and then call
+ * radio_disable().  The RV32M1 HAL completes that sequence with a timer IRQ;
+ * RAC's RXDIS/TXDIS commands do not produce either FRC completion latch, so
+ * retain an explicit, non-PDU completion reason for the same controller
+ * lifecycle.
+ */
+static bool efr32_radio_abort_pending;
 /*
  * OpenISA uses sleep/wake as a reference-counted clock-availability
  * contract.  xG22 radio power sequencing has not been characterized, so
@@ -525,8 +534,24 @@ void isr_radio(void *arg)
 {
 	uint32_t pending;
 	uint32_t expected = 0U;
+	bool abort_pending;
 
 	ARG_UNUSED(arg);
+	/*
+	 * RXDIS/TXDIS do not raise FRC.RXDONE/TXDONE.  Deliver their explicitly
+	 * requested cleanup callback without pretending an aborted PDU completed.
+	 * radio_isr_set() clears this flag together with a pended FRC IRQ, so this
+	 * cannot be delivered to a handler installed for a later event.
+	 */
+	abort_pending = efr32_radio_abort_pending;
+	efr32_radio_abort_pending = false;
+	if (abort_pending) {
+		if (isr_cb) {
+			isr_cb(isr_cb_param);
+		}
+		return;
+	}
+
 	pending = *radio_reg32(EFR32_FRC_BASE + EFR32_FRC_IF_OFFSET) &
 		  EFR32_FRC_IF_COMPLETION;
 
@@ -568,8 +593,11 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 
 	isr_cb_param = param;
 	isr_cb = cb;
+	efr32_radio_abort_pending = false;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	/* FRC's line can remain pended after its source was acknowledged. */
+	k_irq_clear_pending(LL_RADIO_IRQn);
 
 	irq_unlock(key);
 }
@@ -579,6 +607,7 @@ void radio_setup(void)
 {
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
+	efr32_radio_abort_pending = false;
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
@@ -628,6 +657,7 @@ void radio_reset(void)
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
+	efr32_radio_abort_pending = false;
 
 	/*
 	 * Stock RAIL clears the three RAC scratch registers and asserts
@@ -931,11 +961,14 @@ void radio_tx_enable(void)
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
 void radio_disable(void)
 {
+	unsigned int key;
+
 	/*
 	 * Keep independent command writes: their combined hardware semantics are
 	 * unverified. The retained stock trace issues RXDIS before TXDIS
 	 * (docs/radio-tables.md §4.1), so preserve that observed order.
 	 */
+	key = irq_lock();
 	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
 	/* An aborted PDU cannot be delivered by a later receive completion. */
 	efr32_packet_stage.rx_target = NULL;
@@ -943,8 +976,22 @@ void radio_disable(void)
 	efr32_packet_stage.tx_source = NULL;
 	efr32_packet_stage.tx_bytes = 0U;
 	efr32_packet_stage.tx_fifo_configured = false;
+	/* An abort is not a TXDONE or RXDONE; discard any pre-abort completion. */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	/*
+	 * OpenISA relies on radio_disable() to enter the installed abort/cleanup
+	 * callback.  FRC has no disable-complete latch, so pend its already-owned
+	 * IRQ as a software event and make isr_radio() distinguish it from a PDU
+	 * completion above.
+	 */
+	efr32_radio_abort_pending = isr_cb != NULL;
+	if (efr32_radio_abort_pending) {
+		k_irq_set_pending(LL_RADIO_IRQn);
+	}
+	irq_unlock(key);
 }
 
 /* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */
