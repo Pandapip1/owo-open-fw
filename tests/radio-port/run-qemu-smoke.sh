@@ -10,7 +10,9 @@
 #
 # Output is intentionally bounded: the application marker pair (recorded by
 # the native USART model's tracepoint) plus QEMU's radio-register and RAC
-# traces. Temporary QEMU logs and trace output are removed on every exit.
+# traces. It reports the scheduler boundary separately from TX: a RAC disable
+# command alone is not evidence that an advertising PDU was started. Temporary
+# QEMU logs and trace output are removed on every exit.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -63,8 +65,12 @@ printf '%s\n' "$console" | grep -E '^(bt_enable|adv_start):' || true
 if ! printf '%s\n' "$console" | grep -q '^bt_enable: 0$'; then
     echo "radio-mmio: bt_enable did not report success through native USART tracing"
 elif printf '%s\n' "$console" | grep -q '^adv_start: 0$'; then
-    if grep -q 'RAC.CMD=' "$RUNTIME_DIR/radio.trace"; then
-        echo "radio-mmio: RAC command observed"
+    if printf '%s\n' "$console" | grep -q \
+        '^efr32-radio: radio_tmr_start needs '; then
+        echo "radio-mmio: LLL reached scheduled start; PROTIMER compare/IRQ remains unmodeled"
+        sed -n '1,40p' "$RUNTIME_DIR/radio.trace"
+    elif grep -q 'RAC.CMD=0x00000001' "$RUNTIME_DIR/radio.trace"; then
+        echo "radio-mmio: RAC TXEN observed"
         sed -n '1,40p' "$RUNTIME_DIR/radio.trace"
     elif [ -s "$RUNTIME_DIR/radio.trace" ]; then
         echo "radio-mmio: advertiser queued, radio MMIO observed but no RAC command"

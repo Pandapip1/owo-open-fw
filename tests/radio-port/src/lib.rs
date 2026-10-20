@@ -52,8 +52,8 @@ extern "C" fn rust_main() {
     // API call; `ad`, `param`, and its static payload remain valid throughout.
     let adv_err = unsafe { bt_le_adv_start(&param, ad.as_ptr(), ad.len(), ptr::null(), 0) };
     // A zero here is the host/controller boundary: an actual Zephyr legacy
-    // advertising workload has been accepted.  The QEMU harness uses this
-    // marker plus RAC tracing to distinguish rejection from a queued workload
-    // which never reaches radio MMIO.
+    // advertising workload has been accepted. The QEMU harness separately
+    // reports whether LLL reached its scheduled-start boundary or RAC TXEN;
+    // acceptance alone does not claim a packet was transmitted.
     printkln!("adv_start: {}", adv_err);
 }

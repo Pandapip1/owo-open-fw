@@ -211,10 +211,18 @@ nix develop . -c tests/radio-port/run-qemu-smoke.sh 3
 
 The smoke deliberately uses the non-stub register configuration and starts a
 real legacy advertiser; it does not inject a packet. It reports the two
-app-side API results and native `efr32bg22_radio_write`/RAC traces separately:
-an accepted advertiser plus an empty radio trace is therefore distinct from a
-rejected advertiser. The current QEMU USART model accepts polling-console
-bytes but intentionally does not forward them to a host character device
+app-side API results and native `efr32bg22_radio_write`/RAC traces separately.
+The current bounded run reaches `lll_adv_prepare`'s `prepare_cb()` and its
+`radio_tmr_start(1, ticks_at_start, remainder)` call
+(`lll/lll_adv.c:318-403`), evidenced by the HAL's one-time
+`radio_tmr_start needs regs` console marker. It does not reach
+`radio_tx_enable()` (`lll_adv.c:683-704`), so there is no `RAC.CMD=1` or native
+TX snapshot. The missing transition is intentional: `radio_tmr_start()` only
+retains controller state at `modules/efr32-radio/hal/radio.c:1206-1213`, while
+PROTIMER compare/IRQ semantics remain unproven. The script calls this a
+scheduled-start boundary rather than claiming a transmission from a RAC
+disable command. The current QEMU USART model accepts polling-console bytes
+but intentionally does not forward them to a host character device
 (`vendor/qemu/hw/arm/efr32bg22.c:150-153,1074-1079`), so if the markers are not
 available the script reports the queue state as unobserved rather than making
 that distinction falsely. Its repo-local temporary logs are cleaned on exit.
