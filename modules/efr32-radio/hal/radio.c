@@ -11,11 +11,13 @@
  * Until those exist the functions only keep software state; anything that would put a packet on the
  * air asserts through EFR32_RADIO_TODO() instead of writing guessed registers.
  */
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/irq.h>
+#include <zephyr/sys/atomic.h>
 #include <soc.h>
 #include <psa/crypto.h>
 
@@ -48,6 +50,14 @@
 
 static radio_isr_cb_t isr_cb;
 static void *isr_cb_param;
+/*
+ * OpenISA uses sleep/wake as a reference-counted clock-availability
+ * contract.  xG22 radio power sequencing has not been characterized, so
+ * this intentionally represents immediate software availability only; it is
+ * not a claim that RAC idle, an EN bit, or any other MMIO state is powered
+ * down.  radio_setup() establishes the initial caller-held reference.
+ */
+static atomic_t efr32_radio_power_ref = ATOMIC_INIT(1);
 static uint8_t MALIGN(4) pkt_empty[PDU_EM_LL_SIZE_MAX];
 /* Largest data PDU the controller can be configured to receive, plus MIC; or an advertising PDU. */
 static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_SIZE_MAX + 4,
@@ -453,6 +463,9 @@ void radio_setup(void)
 	 */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+
+	/* Match OpenISA's initially available radio-clock contract. */
+	atomic_set(&efr32_radio_power_ref, 1);
 }
 
 /* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
@@ -1180,23 +1193,31 @@ uint32_t radio_ar_has_match(void)
 	return 0;
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [software] Immediate reference-counted availability; hardware sleep is unknown (T1, T2). */
 uint32_t radio_sleep(void)
 {
-	EFR32_RADIO_TODO("regs");
+	atomic_val_t previous;
+
+	/* Do not underflow: callers use -EALREADY to diagnose unmatched sleep. */
+	do {
+		previous = atomic_get(&efr32_radio_power_ref);
+		if (previous == 0) {
+			return (uint32_t)-EALREADY;
+		}
+	} while (!atomic_cas(&efr32_radio_power_ref, previous, previous - 1));
+
 	return 0;
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [software] Immediate reference-counted availability; hardware wake is unknown (T1, T2). */
 uint32_t radio_wake(void)
 {
-	EFR32_RADIO_TODO("regs");
+	atomic_inc(&efr32_radio_power_ref);
 	return 0;
 }
 
-/* [regs] IRQ routing, block enables and reset sequence: RAC/FRC/BUFC/MODEM/SYNTH/AGC EN registers and RAC reset (docs/radio-tables.md T1, T2) */
+/* [software] This is deliberately not inferred from RAC STATUS.STATE. */
 uint32_t radio_is_off(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return atomic_get(&efr32_radio_power_ref) == 0;
 }
