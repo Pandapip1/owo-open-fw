@@ -221,6 +221,27 @@ same command (substituting that build directory), then run:
 nix develop . -c tests/radio-port/run-qemu-smoke.sh 3
 ```
 
+`flash=` is a raw-image loader. It loads at zero by default, which is the
+right shape for a complete image (including a bootloader) whose reset vectors
+are at zero. An application built for a nonzero flash slot must state both its
+physical flash placement and the vector table selected for direct debugging;
+this is not a claim that QEMU emulates the production bootloader. For example,
+the retained dry root image's ELF load segment and vector table are at
+`0x16000`, so a bounded direct-slot run is:
+
+```sh
+timeout --kill-after=1s 5 build/qemu/qemu-system-arm \
+  -M efr32bg22,flash=build/ram-probe-dry/zephyr/zephyr.bin,\
+flash-offset=0x16000,boot-offset=0x16000 \
+  -display none -monitor none -icount shift=5
+```
+
+The model configures both secure and non-secure reset VTORs to `boot-offset`.
+Its Cortex-M33 also advertises the Series-2 16-region MPU configuration, so
+Zephyr's early MPU setup is modelled rather than faulting due to a generic CPU
+default. This dry run has reached RAC `TXEN`; it is a controller-startup
+observation, not evidence of a transmitted packet or a bootloader model.
+
 The smoke deliberately uses the non-stub register configuration and starts a
 real legacy advertiser; it does not inject a packet. It reports the two
 app-side API results and native `efr32bg22_radio_write`/RAC traces separately.
