@@ -291,12 +291,12 @@ static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
  */
 static uint32_t owo_suit_reset_safe_off_failures;
 
-#define STAGE0_BRIDGE(i) BIT(i)
-#define STAGE0_DAC       BIT(4)
-#define STAGE0_SWITCH    BIT(5)
-#define STAGE0_BOOST     BIT(6)
-#define STAGE0_PHASE     BIT(7)
-#define STAGE0_SUPPLY(i) BIT(8 + (i))
+#define RESET_SAFE_OFF_BRIDGE(i) BIT(i)
+#define RESET_SAFE_OFF_DAC       BIT(4)
+#define RESET_SAFE_OFF_SWITCH    BIT(5)
+#define RESET_SAFE_OFF_BOOST     BIT(6)
+#define RESET_SAFE_OFF_PHASE     BIT(7)
+#define RESET_SAFE_OFF_SUPPLY(i) BIT(8 + (i))
 
 /*
  * Reset shutdown. This runs on every normal boot after the device
@@ -323,48 +323,48 @@ static int owo_suit_reset_safe_off(void)
 		if (!gpio_is_ready_dt(&bridge[i]) ||
 		    gpio_pin_configure_dt(&bridge[i],
 			(i < 2) ? GPIO_OUTPUT_INACTIVE : GPIO_OUTPUT_ACTIVE) < 0) {
-			owo_suit_reset_safe_off_failures |= STAGE0_BRIDGE(i);
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_BRIDGE(i);
 		}
 	}
 	if (device_is_ready(dac_dev)) {
 		if (dac_channel_setup(dac_dev, &dac_cfg) < 0 ||
 		    dac_write_value(dac_dev, dac_cfg.channel_id, 0) < 0) {
-			owo_suit_reset_safe_off_failures |= STAGE0_DAC;
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_DAC;
 		}
 	} else {
-		owo_suit_reset_safe_off_failures |= STAGE0_DAC;
+		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_DAC;
 	}
 	for (i = 0; i < ARRAY_SIZE(switch_routes); ++i) {
 		switch_mask |= switch_routes[i];
 	}
 	if (device_is_ready(switch_dev)) {
 		if (gpio_port_set_masked_raw(switch_dev, switch_mask, 0) < 0) {
-			owo_suit_reset_safe_off_failures |= STAGE0_SWITCH;
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_SWITCH;
 		}
 	} else {
-		owo_suit_reset_safe_off_failures |= STAGE0_SWITCH;
+		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_SWITCH;
 	}
 	if (device_is_ready(boost.dev)) {
 		if (pwm_set_dt(&boost, boost.period, 0) < 0) {
-			owo_suit_reset_safe_off_failures |= STAGE0_BOOST;
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_BOOST;
 		}
 	} else {
-		owo_suit_reset_safe_off_failures |= STAGE0_BOOST;
+		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_BOOST;
 	}
 	if (device_is_ready(phase_timer)) {
 		if (counter_stop(phase_timer) < 0) {
-			owo_suit_reset_safe_off_failures |= STAGE0_PHASE;
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_PHASE;
 		}
 	} else {
-		owo_suit_reset_safe_off_failures |= STAGE0_PHASE;
+		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_PHASE;
 	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
 		if (device_is_ready(supplies[i])) {
 			if (regulator_disable(supplies[i]) < 0) {
-				owo_suit_reset_safe_off_failures |= STAGE0_SUPPLY(i);
+				owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_SUPPLY(i);
 			}
 		} else {
-			owo_suit_reset_safe_off_failures |= STAGE0_SUPPLY(i);
+			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_SUPPLY(i);
 		}
 	}
 	return 0;

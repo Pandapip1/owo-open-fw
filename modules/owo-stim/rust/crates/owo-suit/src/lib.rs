@@ -317,7 +317,7 @@ fn ok(r: Result<(), i32>) -> Result<(), InitError> {
 }
 
 impl Suit {
-    /// Run stage 1's non-energising driver POST, then stage 2's forced
+    /// Run non-energising driver POST, then forced
     /// shutdown initialization. The forced sequence runs even if POST fails
     /// so a brown-out cannot turn a missing acknowledgement into skipped
     /// recovery. Callers must not start safety-critical work unless this
