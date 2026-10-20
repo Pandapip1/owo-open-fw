@@ -118,12 +118,17 @@ impl Drop for Lease {
     }
 }
 
-pub(crate) fn feed() {
+/// Feed the watchdog if every active lease is safe.
+///
+/// `false` asks the pump to begin its orderly cold-reboot path.  It has not
+/// fed the watchdog, so hardware reset remains the containment fallback if
+/// that path cannot complete.
+pub(crate) fn feed() -> bool {
     loop {
         let (checks, generation) = {
             let state = STATE.lock().unwrap();
             if !state.running {
-                return;
+                return true;
             }
             let mut checks = [None; MAX_LEASES];
             for (dst, slot) in checks.iter_mut().zip(state.leases.iter()) {
@@ -137,7 +142,7 @@ pub(crate) fn feed() {
         for check in checks.into_iter().flatten() {
             if !check() {
                 error!("watchdog safety check failed; withholding feed");
-                return;
+                return false;
             }
         }
 
@@ -150,7 +155,7 @@ pub(crate) fn feed() {
             // SAFETY: serialized plain Zephyr call through the C shim.
             let _ = unsafe { owo_wdt_feed() };
         }
-        return;
+        return true;
     }
 }
 

@@ -83,12 +83,14 @@ pub(crate) fn resetting() -> bool {
 }
 
 /*
- * The stimulation lease is feedable only while its supervisor is still armed
- * and reset teardown has not begun. It deliberately rechecks shared output
- * state every feed rather than trusting the earlier acquisition.
+ * This is the admission and feed condition for a live stimulation session.
+ * Its lifecycle owns the stricter output invariant: the monitor drops the
+ * lease immediately after its ordered safe-off path.  Do not take STATE here:
+ * a frame acquires its lease while holding that mutex, and the predicate must
+ * be usable as an acquire-time race gate.
  */
 fn stim_watchdog_safe() -> bool {
-    !resetting() && STATE.lock().unwrap().out.monitoring_required()
+    !resetting()
 }
 
 fn now_us() -> u64 {
@@ -262,7 +264,13 @@ extern "C" fn rust_main() {
     // queued, sleep until a GATT write gives the semaphore. Active stimulation
     // additionally caps that sleep at the watchdog feed interval (src/wdt.rs).
     loop {
-        wdt::feed();
+        if !wdt::feed() {
+            // Safety predicate failure is handled in this scheduler-owned
+            // context: safe-off first, immediate cold reboot second. The
+            // deliberately un-fed watchdog remains the fallback if either
+            // operation wedges.
+            ota::request_safe_reboot();
+        }
         ota::reboot_if_requested();
         let (wake, poll, watchdog) = {
             let mut s = STATE.lock().unwrap();

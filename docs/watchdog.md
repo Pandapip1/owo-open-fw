@@ -11,7 +11,9 @@
   Zephyr's supported `wdt_disable()` only after the ordered bridge/DAC/routing/supply safe-off sequence, so
   idle firmware can enter extended EM4 residency. A lease may carry a safety predicate; acquisition checks it
   before any watchdog-driver call, and every active predicate is checked again before feeding. Any failure
-  rejects the lease or deliberately withholds the feed. There is no ambient application on/off switch.
+  rejects the lease or requests a pump-owned ordered safe-off and cold reboot without feeding. The watchdog
+  remains deliberately un-fed as containment if that reboot path wedges. There is no ambient application
+  on/off switch.
   (`wdt_gecko_get_persel_from_timeout`, period `(8 << PERSEL) + 1` cycles of the 1 kHz ULFRCO → 2049 ms),
   `WDT_FLAG_RESET_SOC`, `WDT_OPT_PAUSE_IN_SLEEP` (the driver then clears `em2Run`/`em3Run`).
 * Fed only by the pump loop (`src/wdt.rs`) while monitoring is active. The watchdog keeps counting while the

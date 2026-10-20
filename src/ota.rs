@@ -23,24 +23,37 @@ const REBOOT_COLD: c_int = 1;
 /// Time for the ATT write response to leave before the radio goes away.
 const SETTLE_MS: u64 = 200;
 
-static REQUESTED: AtomicBool = AtomicBool::new(false);
+static BOOTLOADER_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SAFE_REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Ask for a reboot into the bootloader (callable from the GATT callback).
 pub(crate) fn request() {
-    REQUESTED.store(true, Ordering::SeqCst);
+    BOOTLOADER_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Ask the pump for an ordinary cold reboot after it has made the output safe.
+///
+/// Unlike [`request`], this does not select the bootloader. It is used when a
+/// watchdog lease's safety predicate rejects continued operation.
+pub(crate) fn request_safe_reboot() {
+    SAFE_REBOOT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 /// Called by the pump with the output already off. Does not return if a request is pending.
 pub(crate) fn reboot_if_requested() {
-    if !REQUESTED.load(Ordering::SeqCst) {
+    let bootloader = BOOTLOADER_REQUESTED.load(Ordering::SeqCst);
+    let safe_reboot = SAFE_REBOOT_REQUESTED.load(Ordering::SeqCst);
+    if !bootloader && !safe_reboot {
         return;
     }
-    // SAFETY: plain kernel/retention calls; the boot-mode device is a board requirement.
-    unsafe {
-        if bootmode_set(BOOT_MODE_BOOTLOADER) != 0 {
-            // Cannot record the request: stay running rather than reboot into the application again.
-            REQUESTED.store(false, Ordering::SeqCst);
-            return;
+    if bootloader {
+        // SAFETY: plain kernel/retention calls; the boot-mode device is a board requirement.
+        unsafe {
+            if bootmode_set(BOOT_MODE_BOOTLOADER) != 0 {
+                // Do not reboot into the application when the requested target was the bootloader.
+                BOOTLOADER_REQUESTED.store(false, Ordering::SeqCst);
+                return;
+            }
         }
     }
 
@@ -52,7 +65,9 @@ pub(crate) fn reboot_if_requested() {
     // Output is already off, but teardown can still wedge before reset.  This
     // local lease keeps reset containment active until sys_reboot() consumes it.
     let _teardown_watchdog = crate::wdt::Lease::acquire(None).ok();
-    zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
+    if bootloader {
+        zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
+    }
     crate::ble::shutdown();
 
     // SAFETY: reset preparation has put the output stage in its safe state.
