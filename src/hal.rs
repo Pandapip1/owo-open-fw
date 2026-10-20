@@ -69,7 +69,14 @@ mod real {
 
     impl Real {
         pub const fn new() -> Real {
-            Real { hw: None, sup: Stimulator::new(Config::conservative()), poll_every_us: 250_000 }
+            Real {
+                hw: None,
+                sup: Stimulator::new(Config::conservative()),
+                // The pump itself is the sole scheduled safety owner. This
+                // keeps output shutdown out of IRQ context and avoids a
+                // second monitor thread competing for the output mutex.
+                poll_every_us: k::CONFIG_OWO_STIM_MONITOR_INTERVAL_MS as u64 * 1_000,
+            }
         }
 
         /// Establish and verify the driver's shutdown state before normal

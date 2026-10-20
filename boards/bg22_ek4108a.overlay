@@ -47,6 +47,26 @@
 	status = "okay";
 };
 
+/*
+ * Use Zephyr's standard split-controller HCI device with the open EFR32
+ * lower layer, not the board's Silicon Labs blob controller.  The vendor HCI
+ * node would otherwise remain chosen without a linked driver.
+ */
+&bt_hci_silabs {
+	status = "disabled";
+};
+
+&radio {
+	bt_hci_efr32: bt_hci_efr32 {
+		compatible = "zephyr,bt-hci-ll-sw-split";
+		status = "okay";
+	};
+};
+
+&burtc0 {
+	status = "okay";
+};
+
 &sram0 {
 	reg = <0x20000008 (DT_SIZE_K(32) - 8)>;
 };
@@ -72,9 +92,12 @@
 
 	chosen {
 		zephyr,boot-mode = &boot_mode0;
+		zephyr,bt-hci = &bt_hci_efr32;
 	};
 
 	aliases {
 		watchdog0 = &wdog0;
+		/* 32.768 kHz 32-bit ticker counter; RTCC is the sleeptimer. */
+		ll-counter = &burtc0;
 	};
 };

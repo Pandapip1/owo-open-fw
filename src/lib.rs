@@ -70,10 +70,6 @@ pub(crate) static STATE: Mutex<State> = Mutex::new(State {
 /// Given whenever the engine may have new work; the pump sleeps on it.
 static WAKE: Semaphore = Semaphore::new(0, 1);
 
-// The C monitor thread is created statically and may run before `rust_main` has
-// initialized the output backend. It must be completely inert until then.
-static STIM_MONITOR_READY: AtomicBool = AtomicBool::new(false);
-
 // Once reset preparation starts, no callback may re-arm the supervisor or restart
 // advertising while the pump is tearing the system down.
 static RESETTING: AtomicBool = AtomicBool::new(false);
@@ -97,33 +93,6 @@ fn now_us() -> u64 {
     // SAFETY: plain kernel query.
     let ticks = unsafe { zephyr::raw::k_uptime_ticks() } as u64;
     ticks * 1_000_000 / SYS_FREQUENCY as u64
-}
-
-/// Entry point for the persistent Zephyr safety-monitor job in `owo_shim.c`.
-///
-/// This deliberately shares the application mutex with the pump: `Output`, the
-/// supervisor state, and the hardware handles have one owner at a time.  If a
-/// pulse is in progress, Zephyr priority inheritance lets that bounded critical
-/// section finish; the pulse's own feedback/freshness/overrun checks continue
-/// to protect the live bridge.  The job then applies the dead-man safe-off path
-/// without waiting for radio, BLE, or the pump's next wake-up.
-#[no_mangle]
-pub extern "C" fn owo_stim_monitor_poll() {
-    #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
-    {
-        if !STIM_MONITOR_READY.load(Ordering::Acquire) {
-            return;
-        }
-        let mut s = STATE.lock().unwrap();
-        s.out.poll(now_us());
-        // A dead-man expiry disarms only after Output has run its ordered
-        // safe-off path. Releasing the session lease here permits EM4 again.
-        let watchdog = (!s.out.monitoring_required())
-            .then(|| s.stim_watchdog.take())
-            .flatten();
-        drop(s);
-        drop(watchdog);
-    }
 }
 
 pub(crate) fn passkey() -> u32 {
@@ -233,12 +202,11 @@ fn early_boot_baseline() -> Result<(), ()> {
 /// Quiesce the application before an intentional reset.
 ///
 /// This is deliberately called only by the pump: regulator, GPIO, and Bluetooth
-/// teardown may sleep, so neither a GATT callback nor the safety-monitor thread
-/// is a suitable context. A monitor poll already in progress shares `STATE` and
-/// must finish its bounded critical section before this obtains the lock.
+/// teardown may sleep, so neither a GATT callback nor an interrupt is a
+/// suitable context. The pump owns the same `STATE` lock and completes
+/// its bounded critical section before this obtains it.
 pub(crate) fn prepare_reset() {
     RESETTING.store(true, Ordering::Release);
-    STIM_MONITOR_READY.store(false, Ordering::Release);
     stop_all();
 }
 
@@ -264,9 +232,6 @@ extern "C" fn rust_main() {
             zephyr::time::sleep(Duration::millis_at_least(1_000));
         }
     }
-    // The statically-created monitor may now take the same mutex as the pump.
-    STIM_MONITOR_READY.store(true, Ordering::Release);
-
     if let Err(e) = ble::start() {
         error!("BLE start failed: {}", e);
         return;

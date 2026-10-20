@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 # Reusable stimulation-output subsystem (Kconfig + Rust driver crate).
-list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_LIST_DIR}/modules/owo-stim)
+# The EFR32 module provides the open split Bluetooth controller; it replaces
+# the board's blob-dependent Silicon Labs HCI driver.
+list(APPEND ZEPHYR_EXTRA_MODULES
+  ${CMAKE_CURRENT_LIST_DIR}/modules/owo-stim
+  ${CMAKE_CURRENT_LIST_DIR}/modules/efr32-radio
+)
 
 # `-DOWO_HW=ON` enables the real output stage: devicetree overlay + Kconfig fragment.
 # Never set by default; see README ("Bench checklist").

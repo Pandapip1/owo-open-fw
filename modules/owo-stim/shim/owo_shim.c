@@ -19,39 +19,6 @@
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/timing/timing.h>
 
-/*
- * The Rust application provides this.  The job must stay in C because this
- * module owns the Kconfig-controlled static Zephyr thread.  It is deliberately
- * a preemptive (not cooperative or ISR) job: taking the application mutex and
- * executing the regulator/GPIO safe-off sequence may block, and neither is
- * legal in interrupt context.  Priority 0 is Zephyr's highest preemptive
- * priority.  Cooperative priorities could prevent ordinary application work
- * from running, while meta-IRQ priorities cannot take this mutex.
- */
-/* Optional because the reusable output module is also linked by native_sim tests. */
-extern void owo_stim_monitor_poll(void) __attribute__((weak));
-
-#if defined(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)
-static void owo_stim_monitor_job(void *a, void *b, void *c)
-{
-	ARG_UNUSED(a);
-	ARG_UNUSED(b);
-	ARG_UNUSED(c);
-
-	for (;;) {
-		if (owo_stim_monitor_poll != NULL) {
-			owo_stim_monitor_poll();
-		}
-		k_sleep(K_MSEC(CONFIG_OWO_STIM_MONITOR_INTERVAL_MS));
-	}
-}
-
-K_THREAD_DEFINE(owo_stim_monitor_thread,
-		CONFIG_OWO_STIM_MONITOR_STACK_SIZE,
-		owo_stim_monitor_job, NULL, NULL, NULL,
-		0, 0, 0);
-#endif
-
 int owo_gpio_configure(const void *g, int active)
 {
 	return gpio_pin_configure_dt((const struct gpio_dt_spec *)g,
