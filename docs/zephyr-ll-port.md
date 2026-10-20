@@ -42,7 +42,9 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   `AGC 31, BUFC 32, FRC_PRI 33, FRC 34, MODEM 35, PROTIMER 36, RAC_RSM 37, RAC_SEQ 38, RDMAILBOX 39, RFSENSE 40, PRORTC 41, SYNTH 42`
   (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h:94-105,115-118`).
 * **Done** (`include/hal/efr32/swi.h`, `ll_irqs.h`): radio-LLL = SW0, ULL-low = SW1, worker = SW2 (pended from the counter alarm callback),
-  `LL_RADIO_IRQn = RAC_SEQ_IRQn` **[I] placeholder** (which radio line ends an event is T1).
+  and `LL_RADIO_IRQn = FRC_IRQn`.  This is deliberately limited to the public
+  FRC `TXDONE`/`RXDONE` latches used by `radio_is_done()`; `RAC_SEQ_IRQn` is a
+  separate sequencer route and is not enabled as an LLL completion source.
 
 ### 2.2 Tick counter and ticker (`hal/cntr.h`, `hal/ticker.h`, `ticker/ticker.c`)
 * **[F]** Contract: `cntr_init/start/stop/cnt_get/cmp_set` (`hal/cntr.h`), 32-bit counter at 32768 Hz
@@ -144,6 +146,33 @@ MIC in the length and lets the HAL's CCM path remove it after decryption
 (`lll_conn.c:441-447`, `hal/radio.c:1288-1332`). A future delivery interface
 therefore needs normalized bytes, exact byte count, and separate CRC status;
 it must not encode an inferred FRC layout.
+
+### Completion and future RX-delivery contract
+
+The current port has one shared FRC interrupt but two distinct controller
+outcomes.  `isr_radio()` routes `FRC.IF.TXDONE` only while a TX stage is armed,
+and `FRC.IF.RXDONE` only while an RX stage is armed.  A stale, idle, or
+wrong-direction completion is acknowledged without invoking the LLL callback.
+This matters because the OpenISA TX callback does not independently re-check
+`radio_is_done()`; treating RXDONE as TX completion would advance the wrong
+controller state machine.  The routing label is software bookkeeping only:
+it makes no claim about how FRC produces either latch.
+
+The RX stage is intentionally two-phase:
+
+| Phase | Proven/current behavior | Not implied |
+|---|---|---|
+| Arm | Retain the LLL destination and configure BUFC channel 1. | That BUFC writes a Bluetooth PDU to that destination. |
+| Produce | A future producer supplies normalized `header[2] + payload` bytes and their exact count. | Raw BUFC bytes, an FRC interrupt, or `TRAILRXDATA` define framing. |
+| Validate | Reject null, wrong-direction, non-octet-length, short, inconsistent, or over-limit input. | A validation failure is a hardware CRC result. |
+| Deliver | Copy once, retire the RX stage, expose CRC/completion, then invoke the LLL callback. | A timeout/abort copies a PDU or invokes an RX completion. |
+
+This is deliberately a controller contract rather than a speculative
+register-level implementation.  It gives a future QEMU medium or proven
+FRC/BUFC extraction path a testable boundary: it must provide one normalized,
+bounded PDU and a separate CRC outcome before raising RXDONE.  Until that
+producer is evidenced, the dormant copy helper is not connected to FRC or
+BUFC and RXDONE alone is never described as packet delivery.
 
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
