@@ -109,6 +109,34 @@ accesses FRC/RAC/PROTIMER-area literals. These are concrete call-graph and
 access facts, but without resolving the called routines or their state inputs,
 they are not evidence for an EFR32 sleep/wake register sequence.
 
+Subsequent archive resolution supplies a narrow, useful part of that sequence.
+The Wake helper calls `rfhal_trustzone.o` at archive offset `0x496a8`, which
+writes `0x20000000` to `0xE000E100` (NVIC ISER0 bit 29, public
+`EMUDG_IRQn`), and PROTIMER helpers at `rfhal_protimer.o` offsets `0x3c5c8`,
+`0x3c314`, and `0x3c050`; the last clears pending IRQ36 at `0xE000E284`,
+enables it at `0xE000E104`, then writes `1` to non-secure PROTIMER CMD
+`0xB801C00C`. The Sleep helper symmetrically reaches `rfhal_trustzone.o`
+`0x496b8` (NVIC ICER0 bit 29 at `0xE000E180`) and `rfhal_protimer.o`
+`0x3c06c` (clear pending IRQ36, disable it at `0xE000E184`, DSB/ISB, then
+write `4` to the same PROTIMER CMD address). These are IRQ and PROTIMER
+gating facts only: they do not establish RAC or RF power state.
+
+The Idle path now has similarly bounded RAC evidence. `RAIL_Idle` in
+`rail_singleprotocol.o` at archive offset `0x1492c4` reaches a 304-byte
+`rail_rf_hal.o` helper at `0x11758`. Its mode tables at `0x145f0`, `0x145ec`,
+and `0x145e8` map the public `RAIL_IDLE`, `RAIL_IDLE_ABORT`,
+`RAIL_IDLE_FORCE_SHUTDOWN`, and `RAIL_IDLE_FORCE_SHUTDOWN_CLEAR_FLAGS` modes
+to internal boolean tuples `(0,0,0)`, `(1,0,0)`, `(1,1,0)`, and `(1,1,1)`.
+The reached `generic_phy.o` helper at `0x52524` writes `0x100` to
+`0xB8020010` (`RAC.CMD.RXDIS`). For the nonzero first tuple component (Abort
+and both Force Shutdown modes), its callee at `0x52470` also writes `0x20` to
+the same CMD register (`RAC.CMD.TXDIS`). The preceding helper reaches
+`RAC.CTRL.SET.FORCEDISABLE` for the two Force Shutdown modes; only when that
+CTRL bit is set does `0x52524` poll `RAC.STATUS.STATE` at `0xB802000C` until
+OFF. This directly supports QEMU's distinct RXDIS and TXDIS command
+transitions; it does not prove that every Idle invocation forces OFF, or
+establish the rest of the radio shutdown sequence.
+
 ### 3.2 TX-power boundary [F]
 
 The available RAIL evidence rules out treating OpenISA's power argument as a
