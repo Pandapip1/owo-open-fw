@@ -48,6 +48,12 @@ config OWO_STIM_DEADMAN_MS
 config OWO_STIM_MAX_PHASE_US
 	int "Longest allowed phase"
 	default 400
+	range 1 400
+	help
+	  Maximum energised duration of either half of a biphasic pulse. The current
+	  supervisor performs phase-end and feedback checks in a bounded busy loop;
+	  400 us is the safety-reviewed upper bound for that implementation. Do not
+	  increase it without replacing the phase loop with a hardware-timed design.
 
 config OWO_STIM_SOFT_START_MS
 	int "Soft-start ramp after (re)arming"

@@ -49,6 +49,10 @@ pub trait Hw {
     /// or `None` if there has been none yet. The sampler runs in interrupt context and stamps
     /// each result with the clock, so the caller can judge how old it is.
     fn sense_latest(&mut self) -> Option<Sample>;
+    /// Wait for the first feedback conversion after the supply was enabled. Implementations must
+    /// block the calling thread until either the sample is published or `timeout_us` expires.
+    /// The bridge is still open while this runs.
+    fn wait_first_sample(&mut self, timeout_us: u32) -> bool;
     /// Busy-wait. Interrupts stay enabled.
     fn delay_us(&mut self, us: u32);
 }

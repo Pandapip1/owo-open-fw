@@ -238,6 +238,10 @@ impl Hw for Suit {
         Some(Sample { value: self.scale.level_from_mv(mv), at_us })
     }
 
+    fn wait_first_sample(&mut self, timeout_us: u32) -> bool {
+        self.sense.wait_first(timeout_us)
+    }
+
     fn supply(&mut self, on: bool) -> Result<(), HwError> {
         if on && self.supply_on {
             return Ok(());

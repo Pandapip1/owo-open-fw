@@ -21,6 +21,7 @@ extern "C" {
     fn owo_dac_write(d: *const c_void, ch: u8, value: u32) -> c_int;
     fn owo_pwm_set_percent(p: *const c_void, percent: u8) -> c_int;
     fn owo_sense_start(a: *const c_void, interval_us: u32) -> c_int;
+    fn owo_sense_wait_first(timeout_us: u32) -> c_int;
     fn owo_sense_stop();
     fn owo_sense_latest(raw: *mut u16, stamp: *mut u64) -> c_int;
     fn owo_adc_raw_to_mv(a: *const c_void, raw: u16) -> i32;
@@ -275,6 +276,12 @@ impl Sampler {
         unsafe { owo_timing_start() };
         // SAFETY: valid handle by construction.
         check(unsafe { owo_sense_start(self.0, interval_us) })
+    }
+    /// Wait in thread context until the ADC callback has published the first sample.
+    /// Returns false when the Zephyr timeout expires.
+    pub fn wait_first(&self, timeout_us: u32) -> bool {
+        // SAFETY: blocks only the calling thread on the shim's static semaphore.
+        unsafe { owo_sense_wait_first(timeout_us) == 0 }
     }
     /// Ask the sampler to stop; after its next conversion it finishes and releases the timing source.
     pub fn stop(&mut self) {

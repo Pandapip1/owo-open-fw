@@ -293,8 +293,8 @@ impl Stimulator {
 
         // The sampler starts with the supply; wait (bounded) for its first conversion so the
         // bridge never closes without live feedback.
-        if let Err(f) = self.await_first_sample(hw) {
-            return self.fault(hw, ch, f);
+        if !hw.wait_first_sample(self.cfg.sense_startup_us) {
+            return self.fault(hw, ch, Fault::SenseTimeout);
         }
 
         let r: Result<Option<u16>, Fault> = (|| {
@@ -316,19 +316,6 @@ impl Stimulator {
                 Outcome::Fired { measured: m.unwrap_or(0), open_circuit }
             }
             Err(f) => self.fault(hw, ch, f),
-        }
-    }
-
-    fn await_first_sample<H: Hw>(&self, hw: &mut H) -> Result<(), Fault> {
-        let start = hw.now_us();
-        loop {
-            if hw.sense_latest().is_some() {
-                return Ok(());
-            }
-            if hw.now_us().saturating_sub(start) > self.cfg.sense_startup_us as u64 {
-                return Err(Fault::SenseTimeout);
-            }
-            hw.delay_us(self.cfg.poll_step_us);
         }
     }
 

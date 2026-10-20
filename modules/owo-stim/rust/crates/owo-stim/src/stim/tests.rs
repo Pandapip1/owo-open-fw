@@ -23,6 +23,8 @@ struct Mock {
     sampler_dies_at: Option<u64>,
     /// Never produce a first conversion.
     no_samples: bool,
+    first_waits: u32,
+    first_wait_timeout: Option<u32>,
     sense_gain: f32,
     /// Conversions completing at or after this clock value read this instead.
     over_from: Option<(u64, u16)>,
@@ -44,6 +46,8 @@ impl Mock {
             period: 60,
             sampler_dies_at: None,
             no_samples: false,
+            first_waits: 0,
+            first_wait_timeout: None,
             sense_gain: 1.0,
             over_from: None,
             stall_energised: 0,
@@ -129,6 +133,22 @@ impl Hw for Mock {
         let at = from + (upto - from) / self.period * self.period;
         Some(Sample { value: self.conversion_at(at), at_us: at })
     }
+    fn wait_first_sample(&mut self, timeout_us: u32) -> bool {
+        self.first_waits += 1;
+        self.first_wait_timeout = Some(timeout_us);
+        let Some(from) = self.sampler_from else { return false };
+        if self.no_samples {
+            self.clock += timeout_us as u64;
+            return false;
+        }
+        let first = from + self.period;
+        if self.sampler_dies_at.is_some_and(|dies| dies <= first) || first > self.clock + timeout_us as u64 {
+            self.clock += timeout_us as u64;
+            return false;
+        }
+        self.clock = self.clock.max(first);
+        true
+    }
     fn delay_us(&mut self, us: u32) {
         let live = self.bridge_at(self.clock) != Bridge::Off;
         let step = us as u64 + if live { core::mem::take(&mut self.stall_energised) as u64 } else { 0 };
@@ -207,9 +227,11 @@ fn bridge_never_closes_without_a_first_conversion() {
     m.no_samples = true;
     let o = s.fire(&mut m, T0, &cmd(0, 20));
     assert_eq!(o, Outcome::Faulted(Fault::SenseTimeout));
+    assert_eq!(m.first_waits, 1);
+    assert_eq!(m.first_wait_timeout, Some(3_000));
     let t = m.bridge_trace();
     assert!(!t.contains(&Bridge::Positive) && !t.contains(&Bridge::Negative));
-    assert!(m.clock <= 3_100, "waited {} us", m.clock);
+    assert_eq!(m.clock, 3_000, "waited {} us", m.clock);
 }
 
 #[test]
@@ -242,6 +264,8 @@ fn bridge_closes_only_after_a_fresh_conversion_exists() {
     // first closure no earlier than the first conversion (60 us after the supply came on)
     let first = log.iter().find(|(_, b)| *b == Bridge::Positive).unwrap().0;
     assert!(first >= 60);
+    assert_eq!(m.first_waits, 1);
+    assert_eq!(m.first_wait_timeout, Some(3_000));
 }
 
 #[test]

@@ -139,6 +139,7 @@ struct sample {
 
 /* Depth 1, "latest wins": the ISR drops the old entry and stores the new; readers peek. */
 K_MSGQ_DEFINE(sample_q, sizeof(struct sample), 1, 8);
+K_SEM_DEFINE(sample_first, 0, 1);
 static uint16_t sample_buf;
 static atomic_t sample_stop;
 static struct adc_sequence_options sample_opts;
@@ -160,6 +161,7 @@ static enum adc_action sample_cb(const struct device *dev, const struct adc_sequ
 	s.raw = *(const uint16_t *)seq->buffer;
 	(void)k_msgq_get(&sample_q, &old, K_NO_WAIT);
 	(void)k_msgq_put(&sample_q, &s, K_NO_WAIT);
+	k_sem_give(&sample_first);
 	return ADC_ACTION_REPEAT;
 }
 
@@ -172,6 +174,7 @@ int owo_sense_start(const void *p, uint32_t interval_us)
 		return r;
 	}
 	k_msgq_purge(&sample_q);
+	k_sem_reset(&sample_first);
 	atomic_set(&sample_stop, 0);
 	sample_opts = (struct adc_sequence_options){.interval_us = interval_us, .callback = sample_cb};
 	sample_seq = (struct adc_sequence){
@@ -183,6 +186,12 @@ int owo_sense_start(const void *p, uint32_t interval_us)
 	};
 	/* Blocks briefly if a previous run is still finishing. No signal: nobody waits for it. */
 	return adc_read_async(a->dev, &sample_seq, NULL);
+}
+
+/* Thread context only. The ADC completion callback gives this after publishing the sample. */
+int owo_sense_wait_first(uint32_t timeout_us)
+{
+	return k_sem_take(&sample_first, K_USEC(timeout_us));
 }
 
 void owo_sense_stop(void)
