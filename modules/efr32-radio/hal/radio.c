@@ -29,6 +29,7 @@
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
+#include "packet_stage_lifecycle.h"
 #include "rx_pdu_delivery.h"
 #include "timer_state.h"
 
@@ -174,12 +175,6 @@ static uint8_t MALIGN(4) efr32_rx_fifo[512];
  * not yet evidenced.  The stored RX target is the eventual completion target,
  * not a claim that BUFC already writes directly to it.
  */
-enum efr32_radio_packet_direction {
-	EFR32_RADIO_PACKET_IDLE,
-	EFR32_RADIO_PACKET_RX,
-	EFR32_RADIO_PACKET_TX,
-};
-
 static struct {
 	void *rx_target;
 	const void *tx_source;
@@ -196,7 +191,7 @@ static struct {
 	bool packet_configured;
 	bool rx_fifo_configured;
 	bool tx_fifo_configured;
-	enum efr32_radio_packet_direction active_direction;
+	struct efr32_radio_packet_lifecycle lifecycle;
 } efr32_packet_stage;
 
 /*
@@ -209,6 +204,7 @@ static bool efr32_rx_delivery_invalid;
 static void efr32_packet_stage_reset(void)
 {
 	memset(&efr32_packet_stage, 0, sizeof(efr32_packet_stage));
+	efr32_packet_lifecycle_reset(&efr32_packet_stage.lifecycle);
 }
 
 #define BLE_CCM_MIC_SIZE 4U
@@ -309,7 +305,7 @@ static inline volatile uint32_t *radio_reg32(uintptr_t address)
 static void efr32_packet_stage_arm(enum efr32_radio_packet_direction direction)
 {
 	LL_ASSERT(efr32_packet_stage.packet_configured);
-	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 
 	if (direction == EFR32_RADIO_PACKET_RX) {
 		LL_ASSERT(efr32_packet_stage.rx_target != NULL);
@@ -328,7 +324,7 @@ static void efr32_packet_stage_arm(enum efr32_radio_packet_direction direction)
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	efr32_rx_delivery_invalid = false;
-	efr32_packet_stage.active_direction = direction;
+	efr32_packet_lifecycle_arm(&efr32_packet_stage.lifecycle, direction);
 }
 
 /*
@@ -617,6 +613,7 @@ void isr_radio(void *arg)
 {
 	uint32_t pending;
 	uint32_t expected = 0U;
+	enum efr32_radio_packet_direction completion_direction = EFR32_RADIO_PACKET_IDLE;
 	radio_isr_cb_t abort_callback;
 	void *abort_param;
 
@@ -653,10 +650,12 @@ void isr_radio(void *arg)
 	 * active_direction is a software routing label; it does not assign how the
 	 * hardware produces either latch.
 	 */
-	if (efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_TX) {
+	if (efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_TX) {
 		expected = EFR32_FRC_IF_TXDONE;
-	} else if (efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_RX) {
+		completion_direction = EFR32_RADIO_PACKET_TX;
+	} else if (efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_RX) {
 		expected = EFR32_FRC_IF_RXDONE;
+		completion_direction = EFR32_RADIO_PACKET_RX;
 	}
 
 	/* A stale or wrong-direction completion must not leave FRC_IRQn asserted. */
@@ -666,6 +665,13 @@ void isr_radio(void *arg)
 	}
 
 	if (efr32_radio_abort.callback && (pending & expected)) {
+		/*
+		 * Keep the completion visible while the callback samples status.  It
+		 * is retired by radio_status_reset(), the LLL's explicit status
+		 * consumption boundary, rather than by this IRQ entry.
+		 */
+		LL_ASSERT(efr32_packet_lifecycle_latch_completion(
+			&efr32_packet_stage.lifecycle, completion_direction));
 		efr32_radio_abort.callback(efr32_radio_abort.param);
 	}
 }
@@ -683,6 +689,7 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 	unsigned int key = irq_lock();
 
 	efr32_radio_abort_replace(&efr32_radio_abort, cb, param);
+	efr32_packet_lifecycle_forget_completion(&efr32_packet_stage.lifecycle);
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	/* FRC's line can remain pended after its source was acknowledged. */
@@ -885,7 +892,7 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 	 * while no packet operation is active; retain that ordering as an explicit
 	 * controller contract rather than trying to reconfigure an active FRC.
 	 */
-	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 	efr32_packet_stage.rx_target = NULL;
 	efr32_packet_stage.rx_fifo_configured = false;
 	efr32_packet_stage.tx_source = NULL;
@@ -915,7 +922,7 @@ void radio_pkt_rx_set(void *rx_packet)
 	 * a buffer belonging to another LLL event, so make that ordering an
 	 * explicit HAL invariant.
 	 */
-	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(rx_packet != NULL);
 	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
 
@@ -953,7 +960,7 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 	if (!efr32_packet_stage.rx_target ||
 	    !efr32_packet_stage.packet_configured ||
 	    !efr32_packet_stage.rx_fifo_configured ||
-	    efr32_packet_stage.active_direction != EFR32_RADIO_PACKET_RX) {
+	    efr32_packet_stage.lifecycle.active_direction != EFR32_RADIO_PACKET_RX) {
 		efr32_rx_delivery_invalid = true;
 		return -EINVAL;
 	}
@@ -967,8 +974,12 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 		return err;
 	}
 
-	/* A completion is consumed once; another delivery needs a new RX start. */
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
+	/*
+	 * Do not release this stage here: a producer runs before RXDONE, while
+	 * isr_radio() still needs the active direction to attribute that latch.
+	 * radio_status_reset() retires the stage after the LLL callback sampled
+	 * the resulting completion and CRC state.
+	 */
 
 	return 0;
 }
@@ -991,7 +1002,7 @@ void radio_pkt_tx_set(void *tx_packet)
 	 * RAC is active could make that operation consume a mixture of two LLL
 	 * events, so retain the same setup-before-arm contract as the RX path.
 	 */
-	LL_ASSERT(efr32_packet_stage.active_direction == EFR32_RADIO_PACKET_IDLE);
+	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(pdu != NULL);
 	bytes = (uint32_t)pdu[1] + 2U;
 	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
@@ -1097,7 +1108,7 @@ void radio_disable(void)
 	 * (docs/radio-tables.md §4.1), so preserve that observed order.
 	 */
 	key = irq_lock();
-	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
+	efr32_packet_lifecycle_reset(&efr32_packet_stage.lifecycle);
 	/* An aborted PDU cannot be delivered by a later receive completion. */
 	efr32_packet_stage.rx_target = NULL;
 	efr32_packet_stage.rx_fifo_configured = false;
@@ -1126,6 +1137,8 @@ void radio_status_reset(void)
 {
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	/* The LLL has sampled completion/CRC state before asking to clear it. */
+	(void)efr32_packet_lifecycle_status_reset(&efr32_packet_stage.lifecycle);
 	efr32_rx_delivery_invalid = false;
 }
 
