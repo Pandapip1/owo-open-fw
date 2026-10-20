@@ -53,7 +53,9 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
 | T9 | AGC RSSI read | **[F] live/frame value registers and fixed-point fields known; readiness/measurement policy unknown** | `radio_rssi_*` |
 
-Software-only (nothing blocked, not yet written): filter, bc, gpio, ccm, ar.
+Software-only: filtering and bit-counter hooks now deliberately match the
+OpenISA reference's no-op/no-match implementation (`hal/RV32M1/radio/radio.c:971-1012`);
+gpio, ccm, and address resolution retain their separate implementation status.
 Timing constants in `lll/lll_vendor.h` and the `*_delay_get` functions are OpenISA placeholders [I], to be measured once T2/T8 exist.
 
 ### 3.1 OpenISA clock-availability contract [F]

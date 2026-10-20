@@ -828,59 +828,51 @@ uint32_t radio_rssi_is_ready(void)
 		 EFR32_AGC_IF_RSSIVALID);
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] OpenISA's reference HAL intentionally leaves software filtering disabled. */
 void radio_filter_configure(uint8_t bitmask_enable, uint8_t bitmask_addr_type,
 			    uint8_t *bdaddr)
 {
 	ARG_UNUSED(bitmask_enable);
 	ARG_UNUSED(bitmask_addr_type);
 	ARG_UNUSED(bdaddr);
-	EFR32_RADIO_TODO("software filter");
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] No filter hardware or software matcher is enabled by this LLL path. */
 void radio_filter_disable(void)
 {
-	EFR32_RADIO_TODO("software filter");
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] No match latch exists while filtering is disabled. */
 void radio_filter_status_reset(void)
 {
-	EFR32_RADIO_TODO("software filter");
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Matches the OpenISA reference's permanently no-match filter path. */
 uint32_t radio_filter_has_match(void)
 {
-	EFR32_RADIO_TODO("software");
 	return 0;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] No filter match index exists while filtering is disabled. */
 uint32_t radio_filter_match_get(void)
 {
-	EFR32_RADIO_TODO("software");
 	return 0;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] OpenISA's reference does not configure a bit counter here. */
 void radio_bc_configure(uint32_t n)
 {
 	ARG_UNUSED(n);
-	EFR32_RADIO_TODO("software filter");
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] No bit-counter status is produced by this port. */
 void radio_bc_status_reset(void)
 {
-	EFR32_RADIO_TODO("software filter");
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Matches the OpenISA reference's permanently no-match bit counter. */
 uint32_t radio_bc_has_match(void)
 {
-	EFR32_RADIO_TODO("software");
 	return 0;
 }
 
