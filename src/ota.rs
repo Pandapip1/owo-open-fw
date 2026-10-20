@@ -24,36 +24,24 @@ const REBOOT_COLD: c_int = 1;
 const SETTLE_MS: u64 = 200;
 
 static BOOTLOADER_REQUESTED: AtomicBool = AtomicBool::new(false);
-static SAFE_REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Ask for a reboot into the bootloader (callable from the GATT callback).
 pub(crate) fn request() {
     BOOTLOADER_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-/// Ask the pump for an ordinary cold reboot after it has made the output safe.
-///
-/// Unlike [`request`], this does not select the bootloader. It is used when a
-/// watchdog lease's safety predicate rejects continued operation.
-pub(crate) fn request_safe_reboot() {
-    SAFE_REBOOT_REQUESTED.store(true, Ordering::SeqCst);
-}
-
 /// Called by the pump with the output already off. Does not return if a request is pending.
 pub(crate) fn reboot_if_requested() {
     let bootloader = BOOTLOADER_REQUESTED.load(Ordering::SeqCst);
-    let safe_reboot = SAFE_REBOOT_REQUESTED.load(Ordering::SeqCst);
-    if !bootloader && !safe_reboot {
+    if !bootloader {
         return;
     }
-    if bootloader {
-        // SAFETY: plain kernel/retention calls; the boot-mode device is a board requirement.
-        unsafe {
-            if bootmode_set(BOOT_MODE_BOOTLOADER) != 0 {
-                // Do not reboot into the application when the requested target was the bootloader.
-                BOOTLOADER_REQUESTED.store(false, Ordering::SeqCst);
-                return;
-            }
+    // SAFETY: plain kernel/retention calls; the boot-mode device is a board requirement.
+    unsafe {
+        if bootmode_set(BOOT_MODE_BOOTLOADER) != 0 {
+            // Do not reboot into the application when the requested target was the bootloader.
+            BOOTLOADER_REQUESTED.store(false, Ordering::SeqCst);
+            return;
         }
     }
 
@@ -67,9 +55,7 @@ pub(crate) fn reboot_if_requested() {
     // runs in the pump's thread context. If Bluetooth teardown wedges, the
     // watchdog remains armed and resets the SoC.
     crate::prepare_reset();
-    if bootloader {
-        zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
-    }
+    zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
     crate::ble::shutdown();
 
     // SAFETY: reset preparation has put the output stage in its safe state.
