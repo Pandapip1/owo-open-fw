@@ -29,6 +29,9 @@ pub struct Sample {
 }
 
 pub trait Hw {
+    /// True when the resource lease was revoked. Implementations must make
+    /// this lock-free: pulse execution checks it at bounded checkpoints.
+    fn cancelled(&self) -> bool { false }
     /// Set the bridge. Must return with all drive off if it returns an error.
     fn bridge(&mut self, s: Bridge) -> Result<(), HwError>;
     /// Set the amplitude control DAC. `level` is in the stock firmware's 0..=126 units.

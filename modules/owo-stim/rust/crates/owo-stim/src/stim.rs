@@ -93,6 +93,8 @@ pub struct PulseCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
+    /// The resource lease was revoked; all output must be shut down.
+    Cancelled,
     Hw(HwError),
     /// Measured output exceeded the commanded level by more than the margin.
     Overdrive { measured: u16, commanded: u8 },
@@ -274,6 +276,9 @@ impl Stimulator {
         }
         self.credit_us[ch] = credit - cost;
 
+        if hw.cancelled() {
+            return self.fault(hw, ch, Fault::Cancelled);
+        }
         // Setup (slow, interrupts enabled): supply, routing with read-back, amplitude.
         if !self.supply_on {
             if let Err(e) = hw.supply(true) {
@@ -301,6 +306,7 @@ impl Stimulator {
             let a = self.phase(hw, Bridge::Positive, level, width)?;
             if gap > 0 {
                 hw.delay_us(gap);
+                if hw.cancelled() { return Err(Fault::Cancelled); }
             }
             let b = self.phase(hw, Bridge::Negative, level, width)?;
             Ok(b.or(a))
@@ -339,6 +345,7 @@ impl Stimulator {
         width: u32,
     ) -> Result<Option<u16>, Fault> {
         let limit = level as u16 + self.cfg.over_margin;
+        if hw.cancelled() { return Err(Fault::Cancelled); }
         self.fresh(hw)?;
         if let Err(e) = hw.bridge(pol) {
             let _ = hw.bridge(Bridge::Off);
@@ -351,6 +358,10 @@ impl Stimulator {
         let mut measured = None;
         loop {
             hw.delay_us(self.cfg.poll_step_us);
+            if hw.cancelled() {
+                let _ = hw.bridge(Bridge::Off);
+                return Err(Fault::Cancelled);
+            }
             let elapsed = hw.fine_since_us(f0);
             if elapsed >= width {
                 break;
