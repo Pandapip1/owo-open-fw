@@ -81,6 +81,18 @@ increments it, and off means a zero count. This is deliberately immediate and
 does not write a guessed EFR32 power register or equate RAC `STATUS.STATE=OFF`
 with a powered-down radio. Hardware power sequencing remains T1/T2 work.
 
+Following one level deeper still does not provide that sequencing contract.
+Wake reaches a 84-byte helper at archive file offset `0x138b8` and Sleep a
+144-byte helper at `0x13948`, both in `rail_rf_hal.o` (member data offset
+`0x10dd4`; object section offsets `0x2ae4` and `0x2b74`). The former calls
+further helpers and has literals for `0xB801C000` and `0xB802C000`; the latter
+uses a core critical section, calls further helpers, and has literals for
+`0xE000E100` and `0xB801C000`. `RAIL_Idle` reaches a 304-byte helper at
+`0x11758` (section offset `0x984`) which calls several additional helpers and
+accesses FRC/RAC/PROTIMER-area literals. These are concrete call-graph and
+access facts, but without resolving the called routines or their state inputs,
+they are not evidence for an EFR32 sleep/wake register sequence.
+
 ## 4. BUFC [F]
 The per-buffer field order matches the public xG21 header, but the xG22 trace establishes a different layout: four buffers begin at `+0x00C`, use a `0x40` stride, and have `THRESHOLDCTRL`/`CMD` at buffer-relative `+0x24`/`+0x28`. Global `IF`/`IEN` are at `+0x114`/`+0x118`. For example, stock configures buffer 3 with `CTRL +0x0CC`, `ADDR +0x0D0`, `THRESHOLDCTRL +0x0F0`, then `CMD +0x0F4`; the other three sequences occur at bases `+0x00C`, `+0x04C`, and `+0x08C`. The compatible public field definitions give `CTRL` mask `0x7`, read/write offset masks `0x1FFF`, `THRESHOLDCTRL` mask `0x2FFF`, and `CMD` mask `0xF` (`efr32bg21_bufc.h:124-245`); QEMU applies and regresses those masks at the trace-established xG22 offsets. `ADDR` deliberately remains a full-width latch because the retained xG22 trace uses full SRAM addresses, which the older header's 24-bit encoding does not explain. A future trace-backed native BUFC DMA model can read `BUF.ADDR`; no BUFC DMA trigger or transfer semantics are inferred or modelled yet. Source: the public header and the stock 7.9.07 QEMU trace.
 

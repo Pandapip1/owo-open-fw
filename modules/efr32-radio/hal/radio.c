@@ -678,9 +678,13 @@ void radio_tx_enable(void)
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
 void radio_disable(void)
 {
-	/* Keep independent command writes: their combined hardware semantics are unverified. */
-	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	/*
+	 * Keep independent command writes: their combined hardware semantics are
+	 * unverified. The retained stock trace issues RXDIS before TXDIS
+	 * (docs/radio-tables.md §4.1), so preserve that observed order.
+	 */
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
 }
 
 /* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */
