@@ -49,7 +49,7 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T4 | SYNTH channel/frequency registers | **[F] implemented from public BLE channel config and CHCTRL field** | `radio_freq_chan_set` |
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; public BLE 1M FRC baseline and descriptor fields decoded, but sequencer handoff/buffer behavior remains incomplete** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; FRC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
-| T7 | PA power registers | unknown (RAIL PA tables are public per-board) | `radio_tx_power_*` |
+| T7 | PA power registers | **[F] RAIL routes raw and dBm requests through configuration-dependent helpers; a board-safe PA setting remains unresolved** | `radio_tx_power_*` |
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
 | T9 | AGC RSSI read | **[F] live/frame value registers and fixed-point fields known; readiness/measurement policy unknown** | `radio_rssi_*` |
 
@@ -94,6 +94,36 @@ uses a core critical section, calls further helpers, and has literals for
 accesses FRC/RAC/PROTIMER-area literals. These are concrete call-graph and
 access facts, but without resolving the called routines or their state inputs,
 they are not evidence for an EFR32 sleep/wake register sequence.
+
+### 3.2 TX-power boundary [F]
+
+The available RAIL evidence rules out treating OpenISA's power argument as a
+portable PA register value. `RAIL_SetTxPower` is a 34-byte wrapper in
+`rail_tx.o`, at archive file offset `0x156488` (member data starts at
+`0x1562e8`, section-relative object offset `0x1a0`). It dispatches to
+`sli_rail_63a89db964f651a01db7d72312883c55`, whose 168-byte section is at
+archive file offset `0x123e4` in `rail_rf_hal.o` (member data starts at
+`0x10dd4`, section-relative offset `0x1610`). That helper saves the requested
+raw setting in RAIL state, selects another helper based on its state/config
+inputs, and can return failure; it is not a direct MMIO wrapper.
+
+`RAIL_SetTxPowerDbm` is similarly a 50-byte wrapper at archive file offset
+`0x1564ae`. Its 92-byte target,
+`sli_rail_984b4b7d4bcd6e72d28d953fbc3f5c82`, begins at `0x1248c` in
+`rail_rf_hal.o` (section-relative offset `0x16b8`). It either calls the
+application conversion callback
+`sl_railcb_convert_ddbm_to_power_setting_entry`, or obtains a TX-power
+configuration and calls `RAIL_ConvertDbmToRaw` before entering the raw-setting
+path. These direct call-graph facts demonstrate that dBm conversion depends on
+the configured PA path and may be application-supplied. They do not identify a
+safe xG22 PA register, range, board matching network, or calibration value.
+
+Consequently `radio_tx_power_set()` and `radio_tx_power_max_set()` remain
+explicitly unsupported: the HAL must not turn a controller power value into an
+uncalibrated PA write. A future implementation needs a public board-specific
+power table or independently validated calibration/configuration contract, and
+QEMU should only model the resulting registers once that contract establishes
+their externally visible behavior.
 
 ## 4. BUFC [F]
 The per-buffer field order matches the public xG21 header, but the xG22 trace establishes a different layout: four buffers begin at `+0x00C`, use a `0x40` stride, and have `THRESHOLDCTRL`/`CMD` at buffer-relative `+0x24`/`+0x28`. Global `IF`/`IEN` are at `+0x114`/`+0x118`. For example, stock configures buffer 3 with `CTRL +0x0CC`, `ADDR +0x0D0`, `THRESHOLDCTRL +0x0F0`, then `CMD +0x0F4`; the other three sequences occur at bases `+0x00C`, `+0x04C`, and `+0x08C`. The compatible public field definitions give `CTRL` mask `0x7`, read/write offset masks `0x1FFF`, `THRESHOLDCTRL` mask `0x2FFF`, and `CMD` mask `0xF` (`efr32bg21_bufc.h:124-245`); QEMU applies and regresses those masks at the trace-established xG22 offsets. `ADDR` deliberately remains a full-width latch because the retained xG22 trace uses full SRAM addresses, which the older header's 24-bit encoding does not explain. A future trace-backed native BUFC DMA model can read `BUF.ADDR`; no BUFC DMA trigger or transfer semantics are inferred or modelled yet. Source: the public header and the stock 7.9.07 QEMU trace.
