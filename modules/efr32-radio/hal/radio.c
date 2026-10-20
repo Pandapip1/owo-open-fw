@@ -26,6 +26,7 @@
 #include "hal/efr32/ll_irqs.h"
 #include "hal/radio.h"
 #include "hal/debug.h"
+#include "rx_pdu_delivery.h"
 #include "timer_state.h"
 
 #include "util/mem.h"
@@ -825,9 +826,9 @@ void radio_pkt_rx_set(void *rx_packet)
 static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 						  uint16_t bytes)
 {
-	uint16_t pdu_bytes;
+	int err;
 
-	if (!pdu || !efr32_packet_stage.rx_target ||
+	if (!efr32_packet_stage.rx_target ||
 	    !efr32_packet_stage.packet_configured ||
 	    !efr32_packet_stage.rx_fifo_configured ||
 	    efr32_packet_stage.active_direction != EFR32_RADIO_PACKET_RX) {
@@ -835,19 +836,15 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 		return -EINVAL;
 	}
 
-	/* All current OpenISA callers configure an octet-sized length field. */
-	if (efr32_packet_stage.bits_len != 8U || bytes < 2U) {
+	err = efr32_radio_rx_pdu_validate_and_copy(efr32_packet_stage.rx_target,
+							   pdu, bytes,
+							   efr32_packet_stage.bits_len,
+							   efr32_packet_stage.max_len);
+	if (err) {
 		efr32_rx_delivery_invalid = true;
-		return -EMSGSIZE;
+		return err;
 	}
 
-	pdu_bytes = (uint16_t)pdu[1] + 2U;
-	if (pdu_bytes != bytes || pdu[1] > efr32_packet_stage.max_len) {
-		efr32_rx_delivery_invalid = true;
-		return -EMSGSIZE;
-	}
-
-	memcpy(efr32_packet_stage.rx_target, pdu, bytes);
 	/* A completion is consumed once; another delivery needs a new RX start. */
 	efr32_packet_stage.active_direction = EFR32_RADIO_PACKET_IDLE;
 
