@@ -53,6 +53,18 @@ static inline bool efr32_qemu_tifs_state_advance_to_hcto(
 	return true;
 }
 
+/*
+ * Cancellation point immediately before the worker can issue RXEN.  Keep
+ * this separate from the post-command transition: a cancelled generation
+ * must never reach a radio side effect.
+ */
+static inline bool efr32_qemu_tifs_state_rx_permit(
+	struct efr32_qemu_tifs_state *state, uint32_t generation)
+{
+	return state->phase == EFR32_QEMU_TIFS_WAIT_RX &&
+		state->generation == generation;
+}
+
 static inline bool efr32_qemu_tifs_state_begin_timeout(
 	struct efr32_qemu_tifs_state *state, uint32_t generation)
 {

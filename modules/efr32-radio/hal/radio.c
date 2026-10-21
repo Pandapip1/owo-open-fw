@@ -224,6 +224,19 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 		irq_unlock(key);
 
 		if (phase == EFR32_QEMU_TIFS_WAIT_RX) {
+			/*
+			 * Re-check at the final cancellation point before RXEN.  A reset,
+			 * disable, or timer stop may have invalidated this dequeued work
+			 * while the worker was waiting to run.
+			 */
+			key = irq_lock();
+			bool permit = efr32_qemu_tifs_state_rx_permit(
+				&efr32_qemu_tifs, generation);
+			irq_unlock(key);
+			if (!permit) {
+				continue;
+			}
+
 			/* radio_pkt_rx_set() was completed before HCTO was configured. */
 			radio_rx_enable();
 
