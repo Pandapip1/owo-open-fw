@@ -62,11 +62,23 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   if(_n STREQUAL _c)
     message(FATAL_ERROR "efr32_radio: Zephyr's openisa lll.c changed (LPTMR1 block not found)")
   endif()
-  string(REPLACE "#include \"hal/swi.h\"" "#include \"hal/swi.h\"\n#include \"hal/efr32/cntr_efr32.h\"" _n "${_n}")
+  string(REPLACE "#include \"hal/swi.h\""
+                 "#include \"hal/swi.h\"\n#include \"hal/efr32/cntr_efr32.h\"\n#include \"hal/efr32/ll_threads.h\""
+                 _n "${_n}")
+  # The worker and LLL contexts run in threads (hal/ll_threads.c). Their software interrupts are
+  # connected to doorbells that only make the thread runnable; the bodies are bound to the threads.
+  set(_irq "\tIRQ_CONNECT(LL_RTC0_IRQn, CONFIG_BT_CTLR_ULL_HIGH_PRIO,\n\t\t    rtc0_rv32m1_isr, NULL, 0);\n\tIRQ_CONNECT(HAL_SWI_RADIO_IRQ, CONFIG_BT_CTLR_LLL_PRIO,\n\t\t    swi_lll_rv32m1_isr, NULL, 0);\n")
+  string(FIND "${_n}" "${_irq}" _pos)
+  if(_pos EQUAL -1)
+    message(FATAL_ERROR "efr32_radio: Zephyr's openisa lll.c changed (SWI IRQ_CONNECT block not found)")
+  endif()
+  string(REPLACE "${_irq}"
+                 "\tefr32_ll_threads_bind(rtc0_rv32m1_isr, swi_lll_rv32m1_isr);\n\tIRQ_CONNECT(LL_RTC0_IRQn, CONFIG_BT_CTLR_ULL_HIGH_PRIO,\n\t\t    efr32_ll_worker_doorbell_isr, NULL, 0);\n\tIRQ_CONNECT(HAL_SWI_RADIO_IRQ, CONFIG_BT_CTLR_LLL_PRIO,\n\t\t    efr32_ll_lll_doorbell_isr, NULL, 0);\n"
+                 _n "${_n}")
   file(WRITE ${GEN}/lll/lll.c "${_n}")
   efr32_radio_derive(${CMAKE_CURRENT_LIST_DIR}/lll/lll_vendor.h ${GEN}/lll/lll_vendor.h)
 
-  # hal/*_vendor_hal.h, the headers that are generic, the HCI vendor header, mayfly and ticker glue.
+  # hal/*_vendor_hal.h, the headers that are generic, the HCI vendor header and ticker glue.
   foreach(n cntr cpu debug radio swi ticker)
     efr32_radio_derive(${OI}/hal/${n}_vendor_hal.h ${GEN}/hal/${n}_vendor_hal.h)
   endforeach()
@@ -74,7 +86,6 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     efr32_radio_derive(${OI}/hal/RV32M1/${n} ${GEN}/hal/efr32/${n})
   endforeach()
   efr32_radio_derive(${OI}/hci/hci_vendor.h ${GEN}/hci_vendor.h)
-  efr32_radio_derive(${OI}/hal/RV32M1/mayfly.c ${GEN}/hal/efr32/mayfly.c)
   efr32_radio_derive(${OI}/hal/RV32M1/ticker.c ${GEN}/hal/efr32/ticker.c)
 
   zephyr_library_named(efr32_radio)
@@ -100,7 +111,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   zephyr_library_sources_ifdef(CONFIG_BT_CTLR_DTM ${GEN}/lll/lll_test.c)
 
   zephyr_library_sources(
-    ${GEN}/hal/efr32/mayfly.c
+    hal/ll_threads.c
     ${GEN}/hal/efr32/ticker.c
     hal/cntr.c
     hal/ecb.c

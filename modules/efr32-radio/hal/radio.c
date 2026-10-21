@@ -25,6 +25,7 @@
 #include "hal/ccm.h"
 #include "hal/cntr.h"
 #include "hal/efr32/cntr_efr32.h"
+#include "hal/efr32/ll_threads.h"
 #include "hal/efr32/ticker.h"
 #include "abort_lifecycle.h"
 #include "completion_dispatch.h"
@@ -165,18 +166,9 @@ static bool efr32_qemu_tifs_rx_to_tx_staging;
 K_DEADLINE_EVENT_DEFINE(efr32_qemu_tifs_event);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
 
-static uint32_t efr32_qemu_tifs_deadline(uint32_t delay_us)
-{
-	/* cntr_init() selects the QEMU scheduler's 32.768 kHz BURTC clock. */
-	uint32_t ticks = (uint32_t)(((uint64_t)delay_us * 32768U + 999999U) /
-				      1000000U);
-
-	return cntr_cnt_get() + (ticks ? ticks : 1U);
-}
-
 static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation)
 {
-	cntr_qemu_tifs_cmp_set(efr32_qemu_tifs_deadline(delay_us), generation);
+	cntr_qemu_tifs_arm_after_us(delay_us, generation);
 }
 
 static void efr32_qemu_tifs_cancel(void)
@@ -320,7 +312,7 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_qemu_tifs_job, NULL, NULL, NULL,
-		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+		EFR32_LL_THREAD_PRIO, 0, 0);
 #endif
 
 /* Called from the shared BURTC CC0 alarm: publish work only, never RAC MMIO. */
@@ -397,15 +389,15 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 K_THREAD_DEFINE(efr32_radio_tx_job_thread,
 		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
 		efr32_radio_tx_job, NULL, NULL, NULL,
-		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+		EFR32_LL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_rx_job_thread,
 		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
 		efr32_radio_rx_job, NULL, NULL, NULL,
-		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+		EFR32_LL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_completion_job_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_radio_completion_job, NULL, NULL, NULL,
-		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+		EFR32_LL_THREAD_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
 void efr32_radio_launch_wake(uint8_t trx, uint32_t generation)
@@ -1675,7 +1667,7 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 K_THREAD_DEFINE(efr32_qemu_rx_descriptor_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_radio_qemu_rx_descriptor_job, NULL, NULL, NULL,
-		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+		EFR32_LL_THREAD_PRIO, 0, 0);
 
 /* BUFC IRQ work is scheduler-owned; this ISR only masks and wakes. */
 static void efr32_radio_qemu_rx_descriptor_isr(void *arg)

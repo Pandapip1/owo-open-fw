@@ -12,14 +12,9 @@ config BT_LLL_VENDOR_EFR32
 	# Kconfig.ll_sw_split, BT_LLL_VENDOR_OPENISA): legacy advertising/scanning, one-PHY connections,
 	# software AES (PSA) and software TIFS. Nothing here is a claim about what the radio can do.
 	select BT_HAS_HCI_VS
-	# The port's ll-counter alias is BURTC. Select the generic Counter
-	# subsystem so the devicetree-enabled Silabs BURTC driver is linked in both
-	# the dry-run/QEMU profile and the hardware-output profile.
-	select COUNTER
-	# The radio launch and QEMU TIFS dispatchers each bind a BURTC clock-event
-	# client; the driver continues to arbitrate both with the system clock.
-	select COUNTER_SILABS_BURTC_CLOCK_EVENT
-	select CLOCK_EVENT
+	# The ticker, launch and QEMU TIFS wake-ups are scheduler clock events, and the
+	# ticker count is derived from the scheduler clock's logical timebase.
+	select CLOCK_EVENT_SCHED
 	select BT_CTLR_ENTROPY_SUPPORT
 	select BT_CTLR_CRYPTO_SUPPORT
 	select BT_CTLR_LE_ENC_SUPPORT if BT_CTLR_CRYPTO_SUPPORT && !BT_CTLR_DATA_LENGTH_CLEAR
@@ -47,28 +42,31 @@ config EFR32_RADIO_STUB_REGISTERS
 	  The radio register map is not public (docs/radio-tables.md). While set, the radio HAL only
 	  keeps software state and asserts when the controller tries to put a packet on the air.
 
-config EFR32_RADIO_SCHEDULER_PRIO
-	int "Persistent radio scheduler job priority"
-	range -16 -1
-	default -2
+config EFR32_RADIO_LL_STACK_SIZE
+	int "Lower link layer thread stack size"
+	default 1024
 	help
-	  Priority for persistent TX/RX launch and completion jobs. Launch jobs are
-	  woken by BURTC expiry; FRC completion work is woken by its IRQ. All are
-	  intentionally scheduler-owned, never ISR-owned. This is best-effort
-	  scheduling, not a hardware launch deadline guarantee.
+	  Stack of the thread that runs the LLL and ULL contexts: the ticker and
+	  the mayflies (hal/ll_threads.c), work Zephyr's split controller otherwise
+	  runs in software interrupts. The contexts run one at a time; in the QEMU
+	  active-scan workload the ULL context peaked at 632 bytes and the LLL
+	  context at 136 bytes (thread analyzer). It shares one meta-IRQ priority
+	  with the radio's persistent jobs (EFR32_LL_THREAD_PRIO).
 
 config EFR32_RADIO_LAUNCH_STACK_SIZE
 	int "Persistent radio TX/RX launch job stack size"
-	default 320
+	default 576
 	help
 	  TX and RX launch jobs only wait for a coalescing event latch, claim their generation,
 	  and perform the bounded radio arm write. They deliberately do not invoke
-	  controller callbacks. Keep their stacks separate from the completion job
-	  so its callback budget does not reserve RAM for both launch paths.
+	  controller callbacks. Keep their stacks separate from the
+	  completion job so its callback budget does not reserve RAM for both launch
+	  paths. Arming a wake-up through the scheduler clock service measures about
+	  300 bytes (-fstack-usage), plus up to 104 bytes of FP exception context.
 
 config EFR32_RADIO_COMPLETION_STACK_SIZE
 	int "Persistent radio completion job stack size"
-	default 512
+	default 640
 	help
 	  FRC completion work invokes the controller callback after leaving the
 	  interrupt context, so it retains a larger, independent stack budget.
@@ -100,3 +98,8 @@ config EFR32_RADIO_QEMU_TIFS
 		a hardware timing claim.
 
 endif # BT_LLL_VENDOR_EFR32
+
+# Starting a kernel timeout runs the scheduler clock arm path on the caller's stack: the
+# controller's priority RX thread peaks at 376 of its default 448 bytes (thread analyzer).
+configdefault BT_CTLR_RX_PRIO_STACK_SIZE
+	default 640 if BT_LLL_VENDOR_EFR32
