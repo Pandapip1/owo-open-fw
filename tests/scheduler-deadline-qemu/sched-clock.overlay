@@ -1,0 +1,12 @@
+/* Scheduler clock providers: BURTC (deep sleep) and TIMER0 (HFXO, EM0/EM1). */
+&burtc0 {
+	status = "okay";
+};
+
+&timer0 {
+	status = "okay";
+
+	counter {
+		status = "okay";
+	};
+};
