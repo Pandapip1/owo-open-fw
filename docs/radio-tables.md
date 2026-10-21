@@ -623,11 +623,17 @@ layout identifies the source as buffer 1 `WRITEOFFSET` and the destination as
 buffer 2 `WRITEDATA` (`efr32bg21_bufc.h:42-56,290-304,379-393`). This directly
 corroborates class 4 as `RX_FIFO_OVERFLOW`; it establishes only that overflow
 record, not normal packet, aborted, or filtered producer timing/fields. No
-other direct buffer-2 `WRITEDATA` write occurs in that object, and no
-sequencer-image static write to those fields has been located. Thus BUFC
-hardware (possibly with the sequencer) remains the candidate normal producer,
-while the observed CPU paths configure, select, hold, release, and synthesize
-this one overflow record.
+other direct buffer-2 `WRITEDATA` write occurs in that object. An archive-wide
+`arm-none-eabi-objdump -d -r` scan of the identified SHA-256 archive likewise
+finds no other `STR*` at `[BUFC base,#0xa4]`, direct/alias port literal, split
+`#0xa4` construction, or BUFC-port relocation; the eight stores above are at
+section offsets `+0x26,+0x2a,+0x30,+0x36,+0x3a,+0x3e,+0x42,+0x46` (archive
+`0x333b6,0x333ba,0x333c0,0x333c6,0x333ca,0x333ce,0x333d2,0x333d6`). This
+bounds the archive's statically evident CPU writers, but not arbitrary runtime
+address construction, hardware/sequencer production, or another binary. Thus
+BUFC hardware (possibly with the sequencer) remains the candidate normal
+producer, while the observed CPU paths configure, select, hold, release, and
+synthesize this one overflow record.
 
 The channel distinction is source-backed rather than a modelling convention.
 The compatible public BUFC layout has its first buffer at `+0x00c` and a
