@@ -17,6 +17,7 @@
 
 static K_SEM_DEFINE(alarm_sem, 0, 1);
 K_CLOCK_EVENT_DEFINE(clock_event);
+K_CLOCK_EVENT_DEFINE(selected_clock_event);
 K_DEADLINE_EVENT_DEFINE(deferred_event);
 K_DEFERRED_RELEASE_DEFINE(deferred_release);
 
@@ -77,8 +78,9 @@ int main(void)
 		printk("burtc-arbitration: alarm arm failed\n");
 		return 1;
 	}
-	if (k_deferred_release_post(&deferred_release, now + 48U,
-				    K_DEADLINE(100U)) != 0) {
+	if (k_deferred_release_post_selected(&deferred_release, &selected_clock_event,
+					     now + 48U, K_DEADLINE(100U),
+					     K_CLOCK_EVENT_POWER_DEEP_SLEEP, 6U) != 0) {
 		printk("burtc-arbitration: clock-event arm failed\n");
 		return 1;
 	}
