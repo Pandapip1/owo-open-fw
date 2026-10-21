@@ -9,6 +9,11 @@ TX_BUILD_DIR=${TX_BUILD_DIR:-"$ROOT/build/radio-port-qemu"}
 RX_BUILD_DIR=${RX_BUILD_DIR:-"$ROOT/build/radio-rx-port-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
 RUN_SECONDS=${1:-5}
+# A 512-byte synthetic descriptor ring with eight-byte records wraps after
+# 64 records.  Keep this assertion bounded and overridable for slower hosts;
+# the default proves that the Zephyr consumer actually drains past one full
+# physical ring rather than accepting a one-shot descriptor.
+MIN_DESCRIPTOR_ACKS=${MIN_DESCRIPTOR_ACKS:-65}
 # This is a QEMU TCG startup convention, not a modeled silicon clock.  A
 # smaller round-robin quantum lets the receiver arm before the peer's one-shot
 # advertiser starts; the trace-order assertion below makes that prerequisite
@@ -115,13 +120,24 @@ descriptor_write_offset_line=$(grep -E \
     'addr=0x(aa|ba)000094 value=0x00000000' "$RUNTIME_DIR/radio.trace" |
     head -1 || true)
 descriptor_ack_count=$(grep -Ec \
-    'addr=0x(aa|ba)000098 value=0x000000(08|10)' "$RUNTIME_DIR/radio.trace" || true)
-if [ -z "$descriptor_write_offset_line" ] || [ "$descriptor_ack_count" -lt 2 ]; then
+    'addr=0x(aa|ba)000098 value=0x[0-9a-f]+' "$RUNTIME_DIR/radio.trace" || true)
+if [ -z "$descriptor_write_offset_line" ] || [ "$descriptor_ack_count" -lt "$MIN_DESCRIPTOR_ACKS" ]; then
     echo "radio-dual-e2e: scanner did not acknowledge repeated QEMU RX descriptors" >&2
-    echo "radio-dual-e2e: expected channel-2 WRITEOFFSET setup and at least two READOFFSET writes" >&2
+    echo "radio-dual-e2e: expected channel-2 WRITEOFFSET setup and at least $MIN_DESCRIPTOR_ACKS READOFFSET writes (got $descriptor_ack_count)" >&2
     grep -E 'addr=0x(aa|ba)00009[48]' "$RUNTIME_DIR/radio.trace" | head -20 >&2 || true
     exit 1
 fi
+# The logical 13-bit pointer reaches 0x200 after 64 eight-byte records while
+# the configured 512-byte backing store wraps to physical slot zero.  Seeing
+# the next acknowledgement at 0x208 proves both domains crossed that
+# boundary; this remains a QEMU-only descriptor-consumer contract.
+if ! grep -Eq 'addr=0x(aa|ba)000098 value=0x00000208' "$RUNTIME_DIR/radio.trace"; then
+    echo "radio-dual-e2e: descriptor acknowledgements did not cross the 512-byte ring boundary" >&2
+    echo "radio-dual-e2e: expected logical READOFFSET 0x208 after 64 eight-byte records" >&2
+    grep -E 'addr=0x(aa|ba)000098 value=0x' "$RUNTIME_DIR/radio.trace" | tail -10 >&2 || true
+    exit 1
+fi
+echo "radio-dual-e2e: descriptor acknowledgements=$descriptor_ack_count (crossed logical offset 0x200)"
 
 # The advertiser's QEMU-only TIFS seam is exercised only when its TX state
 # retires before a later software-RX arm.  The trace is intentionally a
