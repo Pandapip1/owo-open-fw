@@ -18,6 +18,7 @@
 #include <zephyr/device.h>
 #include <zephyr/irq.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <soc.h>
 #include <psa/crypto.h>
 
@@ -35,6 +36,7 @@
 #include "timer_state.h"
 
 #include "util/mem.h"
+#include "common/rpa.h"
 
 #include "lll/pdu_vendor.h"
 #include "ll_sw/pdu.h"
@@ -65,6 +67,59 @@
  * lifecycle.
  */
 static struct efr32_radio_abort_lifecycle efr32_radio_abort;
+
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+#define EFR32_RADIO_AR_NO_MATCH 0xffU
+/*
+ * ull_filter_lll_irks_get() supplies AAR-order (big-endian) IRKs. Retain an
+ * LE snapshot because bt_rpa_irk_matches() implements BLE ah in that order,
+ * and because the caller does not promise the source array's lifetime.
+ */
+static struct {
+	bool armed;
+	uint8_t count;
+	uint8_t match;
+	uint8_t irks[CONFIG_BT_CTLR_RL_SIZE][16];
+} efr32_radio_ar = {
+	.match = EFR32_RADIO_AR_NO_MATCH,
+};
+
+/*
+ * This is deliberately reached only from the normalized-PDU delivery seam.
+ * In particular, raw BUFC channel-1 bytes and descriptor data are not valid
+ * inputs: their framing and appended-info policy remain unproven.
+ */
+static void efr32_radio_ar_execute(const uint8_t *pdu, uint16_t bytes)
+{
+	const struct pdu_adv *adv = (const struct pdu_adv *)pdu;
+	bt_addr_t rpa;
+	uint8_t i;
+
+	if (!efr32_radio_ar.armed) {
+		return;
+	}
+
+	efr32_radio_ar.armed = false;
+	efr32_radio_ar.match = EFR32_RADIO_AR_NO_MATCH;
+	/* Two PDU header octets plus the advertiser address are required. */
+	if (bytes < 8U || adv->len < sizeof(rpa.val) ||
+	    bytes < (uint16_t)(PDU_AC_LL_HEADER_SIZE + adv->len) || !adv->tx_addr) {
+		return;
+	}
+
+	memcpy(rpa.val, adv->payload, sizeof(rpa.val));
+	if (!BT_ADDR_IS_RPA(&rpa)) {
+		return;
+	}
+
+	for (i = 0U; i < efr32_radio_ar.count; i++) {
+		if (bt_rpa_irk_matches(efr32_radio_ar.irks[i], &rpa)) {
+			efr32_radio_ar.match = i;
+			break;
+		}
+	}
+}
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 /*
  * This state is intentionally distinct from PROTIMER.  It mirrors only
  * OpenISA software bookkeeping; it never makes a timer expire or starts a
@@ -1061,6 +1116,11 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 		return err;
 	}
 
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	/* OpenISA resolves the completed, normalized advertising PDU before LLL. */
+	efr32_radio_ar_execute(pdu, bytes);
+#endif
+
 	/*
 	 * Do not release this stage here: a producer runs before RXDONE, while
 	 * isr_radio() still needs the active direction to attribute that latch.
@@ -1710,32 +1770,55 @@ uint32_t radio_ccm_is_available(void)
 	return ccm_ctx.empty;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Snapshot AAR-order IRKs for the next normalized advertising PDU. */
 void radio_ar_configure(uint32_t nirk, void *irk)
 {
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	uint32_t count = MIN(nirk, (uint32_t)CONFIG_BT_CTLR_RL_SIZE);
+	uint32_t i;
+
+	LL_ASSERT(irk != NULL || count == 0U);
+	for (i = 0U; i < count; i++) {
+		sys_memcpy_swap(efr32_radio_ar.irks[i],
+				(uint8_t *)irk + (i * sizeof(efr32_radio_ar.irks[i])),
+				sizeof(efr32_radio_ar.irks[i]));
+	}
+	efr32_radio_ar.count = (uint8_t)count;
+	efr32_radio_ar.match = EFR32_RADIO_AR_NO_MATCH;
+	efr32_radio_ar.armed = true;
+#else
 	ARG_UNUSED(nirk);
 	ARG_UNUSED(irk);
-	EFR32_RADIO_TODO("software: software (no register access needed); not implemen");
+#endif
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Return the index in the last configuration snapshot. */
 uint32_t radio_ar_match_get(void)
 {
-	EFR32_RADIO_TODO("software");
-	return 0;
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	return efr32_radio_ar.match;
+#else
+	return 0U;
+#endif
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] Disarm matching and discard the last result. */
 void radio_ar_status_reset(void)
 {
-	EFR32_RADIO_TODO("software: software (no register access needed); not implemen");
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	efr32_radio_ar.armed = false;
+	efr32_radio_ar.match = EFR32_RADIO_AR_NO_MATCH;
+#endif
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/* [software] A match exists only after normalized-PDU delivery ran ah(). */
 uint32_t radio_ar_has_match(void)
 {
-	EFR32_RADIO_TODO("software");
-	return 0;
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	return efr32_radio_ar.match != EFR32_RADIO_AR_NO_MATCH;
+#else
+	return 0U;
+#endif
 }
 
 /* [software] Immediate reference-counted availability; hardware sleep is unknown (T1, T2). */
