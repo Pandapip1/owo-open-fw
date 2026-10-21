@@ -31,8 +31,11 @@ static uint32_t ticker_compare;
 static uint32_t radio_compare;
 static uint32_t radio_generation;
 static uint8_t radio_trx;
+static uint32_t qemu_tifs_compare;
+static uint32_t qemu_tifs_generation;
 static bool ticker_armed;
 static bool radio_armed;
+static bool qemu_tifs_armed;
 static void alarm_cb(const struct device *, uint8_t, uint32_t, void *);
 
 /* Called with local IRQs locked: all CC0 client state has one owner. */
@@ -45,7 +48,10 @@ static void cmp_program_locked(void)
 	struct efr32_cntr_mux mux = {
 		.ticker_deadline = ticker_compare, .radio_deadline = radio_compare,
 		.radio_generation = radio_generation, .radio_trx = radio_trx,
+		.qemu_tifs_deadline = qemu_tifs_compare,
+		.qemu_tifs_generation = qemu_tifs_generation,
 		.ticker_armed = ticker_armed, .radio_armed = radio_armed,
+		.qemu_tifs_armed = qemu_tifs_armed,
 	};
 	uint32_t deadline;
 
@@ -71,11 +77,15 @@ static void alarm_cb(const struct device *dev, uint8_t chan, uint32_t ticks, voi
 	struct efr32_cntr_mux mux = {
 		.ticker_deadline = ticker_compare, .radio_deadline = radio_compare,
 		.radio_generation = radio_generation, .radio_trx = radio_trx,
+		.qemu_tifs_deadline = qemu_tifs_compare,
+		.qemu_tifs_generation = qemu_tifs_generation,
 		.ticker_armed = ticker_armed, .radio_armed = radio_armed,
+		.qemu_tifs_armed = qemu_tifs_armed,
 	};
 	struct efr32_cntr_mux_due due = efr32_cntr_mux_take_due(&mux, cntr_cnt_get());
 	ticker_armed = mux.ticker_armed;
 	radio_armed = mux.radio_armed;
+	qemu_tifs_armed = mux.qemu_tifs_armed;
 	cmp_program_locked();
 	if (due.ticker) {
 		atomic_set(&cmp_fired, 1);
@@ -83,6 +93,9 @@ static void alarm_cb(const struct device *dev, uint8_t chan, uint32_t ticks, voi
 	}
 	if (due.radio) {
 		efr32_radio_launch_wake(due.radio_trx, due.radio_generation);
+	}
+	if (due.qemu_tifs) {
+		efr32_radio_qemu_tifs_wake(due.qemu_tifs_generation);
 	}
 }
 
@@ -112,6 +125,7 @@ uint32_t cntr_stop(void)
 	unsigned int key = irq_lock();
 	ticker_armed = false;
 	radio_armed = false;
+	qemu_tifs_armed = false;
 	cmp_program_locked();
 	irq_unlock(key);
 	LL_ASSERT(counter_stop(cntr_dev) == 0);
@@ -150,6 +164,31 @@ void cntr_radio_cmp_cancel(void)
 {
 	unsigned int key = irq_lock();
 	radio_armed = false;
+	cmp_program_locked();
+	irq_unlock(key);
+}
+
+/*
+ * A QEMU-only software TIFS delay is a third CC0 client, independent of the
+ * normal LLL event launch. The BURTC ISR calls only the wake mailbox hook;
+ * its persistent Zephyr job owns all RAC state changes.
+ */
+void cntr_qemu_tifs_cmp_set(uint32_t value, uint32_t generation)
+{
+	unsigned int key = irq_lock();
+
+	qemu_tifs_compare = value;
+	qemu_tifs_generation = generation;
+	qemu_tifs_armed = true;
+	cmp_program_locked();
+	irq_unlock(key);
+}
+
+void cntr_qemu_tifs_cmp_cancel(void)
+{
+	unsigned int key = irq_lock();
+
+	qemu_tifs_armed = false;
 	cmp_program_locked();
 	irq_unlock(key);
 }
