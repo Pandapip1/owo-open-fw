@@ -11,6 +11,10 @@ TX_BUILD_DIR=${TX_BUILD_DIR:-"$ROOT/build/radio-port-qemu"}
 RX_BUILD_DIR=${RX_BUILD_DIR:-"$ROOT/build/radio-rx-port-active-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
 RUN_SECONDS=${1:-5}
+# A single exchange demonstrates the wiring, but it can also hide stale state
+# from startup. Require several independently ordered exchanges by default.
+# Callers can raise this for soak runs without extending the test contract.
+MIN_EXCHANGES=${MIN_EXCHANGES:-3}
 # The QEMU TIFS worker's measured 150-us interval needs shift=5; shift=1
 # stretches it to about 1.5 ms and lets the LLL clean up before TXEN.
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-5}
@@ -21,6 +25,13 @@ if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ]; then
     echo "active-scan-e2e: missing QEMU binary, advertiser image, or active scanner image" >&2
     exit 2
 fi
+
+case "$MIN_EXCHANGES" in
+    ''|*[!0-9]*|0)
+        echo "active-scan-e2e: MIN_EXCHANGES must be a positive integer" >&2
+        exit 2
+        ;;
+esac
 
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-active-scan-e2e-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
@@ -69,35 +80,43 @@ printf '%s\n' "$console" | grep -E '^(bt_enable|scan_callback_register|scan_star
 
 # Each machine has a private address space, so its MMIO windows do not tag a
 # sender. The QEMU model does: endpoint 0 is the advertiser and endpoint 1 is
-# the scanner. Startup is deliberately unconstrained: select an advertiser
-# snapshot immediately preceding an eventual scanner request, rather than
-# requiring that the scanner win the initial TCG scheduling race. The scanner
-# must issue the observed 14-byte SCAN_REQ (`c3 0c`, QEMU little-endian word
-# `0x1a1a0cc3`), followed by endpoint 0's eight-byte SCAN_RSP (`44 06`, word
-# `0x743a0644`). These are QEMU snapshot boundaries, not real RF airtime or
-# hardware FRC/PROTIMER event-ordering assertions.
-scan_request_line=$(grep -n 'endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3' \
-    "$RUNTIME_DIR/radio.trace" | head -1 | cut -d: -f1)
-advertisement_line=$(awk -v end="${scan_request_line:-0}" '
-    NR < end && /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
-        candidate = NR
+# the scanner. Startup is deliberately unconstrained, but each accepted cycle
+# must be ordered advertisement -> SCAN_REQ -> SCAN_RSP. The scanner request
+# is 14 bytes (`c3 0c`, QEMU little-endian word `0x1a1a0cc3`) and the response
+# is eight bytes (`44 06`, word `0x743a0644`). These are QEMU snapshot
+# boundaries, not real RF airtime or hardware FRC/PROTIMER assertions.
+#
+# A later advertisement supersedes an unmatched one. This avoids counting an
+# old startup advertisement with a request belonging to a newer advertising
+# event while still allowing the two CPUs to start in either order.
+exchange_summary=$(awk '
+    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
+        advertisement = NR
+        state = 1
+        next
     }
-    END { if (candidate) print candidate }
-' "$RUNTIME_DIR/radio.trace")
-scan_response_line=$(awk -v start="${scan_request_line:-0}" '
-    NR > start && /endpoint=0 TX snapshot sequence=.* bytes=8 first=0x743a0644/ {
-        print NR
-        exit
+    state == 1 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
+        request = NR
+        state = 2
+        next
     }
-' "$RUNTIME_DIR/radio.trace")
+    state == 2 && /endpoint=0 TX snapshot sequence=.* bytes=8 first=0x743a0644/ {
+        count++
+        printf "%d:%d:%d\n", advertisement, request, NR
+        state = 0
+    }
+    END {
+        if (!count) {
+            exit 1
+        }
+    }
+' "$RUNTIME_DIR/radio.trace") || exchange_summary=
+exchange_count=$(printf '%s\n' "$exchange_summary" | sed '/^$/d' | wc -l | tr -d ' ')
 
-if [ -z "$advertisement_line" ] || [ -z "$scan_request_line" ] || \
-   [ -z "$scan_response_line" ] || \
-   [ "$advertisement_line" -ge "$scan_request_line" ] || \
-   [ "$scan_request_line" -ge "$scan_response_line" ]; then
-    echo "active-scan-e2e: missing ordered advertisement -> SCAN_REQ -> SCAN_RSP exchange" >&2
+if [ "$exchange_count" -lt "$MIN_EXCHANGES" ]; then
+    echo "active-scan-e2e: observed $exchange_count ordered exchange(s); need $MIN_EXCHANGES" >&2
     grep -E 'RAC.CMD=|RAC state|TX snapshot' "$RUNTIME_DIR/radio.trace" >&2 || true
     exit 1
 fi
 
-echo "active-scan-e2e: observed QEMU-only advertisement -> SCAN_REQ -> SCAN_RSP"
+echo "active-scan-e2e: observed $exchange_count QEMU-only ordered advertisement -> SCAN_REQ -> SCAN_RSP exchanges"
