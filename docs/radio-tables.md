@@ -802,7 +802,13 @@ BLE framing, CRC/trailer state, nor an IRQ/completion contract. The native
 dual-SoC qtest exercises both paths: an unconfigured channel 2 remains
 raw-byte-only, while the configured path observes the record and threshold
 before it observes `RXDONE`; it is a regression for this simulator boundary,
-not hardware validation.
+not hardware validation. If the configured 512-byte descriptor backing ring
+has no room for another eight-byte record, QEMU sets the channel-2 overflow
+flag and drops the synthetic receive before touching channel 1 or raising
+`RXDONE`; this is a conservative simulator policy, not an inferred silicon
+recovery rule. The overflow regression accepts 64 records, rejects the 65th,
+then verifies that a record after explicit ring consumption uses only its own
+channel-1 endpoint.
 
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
