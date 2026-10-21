@@ -189,6 +189,12 @@ static void efr32_qemu_tifs_cancel(void)
 	efr32_qemu_tifs_rx_to_tx_staging = false;
 	irq_unlock(key);
 
+	/*
+	 * Invalidate before clearing the latch: an already-consumed wake is still
+	 * stopped by the generation/phase claim, while an unread old wake cannot
+	 * become the next arm's work item.
+	 */
+	k_deadline_event_reset(&efr32_qemu_tifs_event);
 	/* A stale BURTC wake is harmless: the worker rechecks phase/generation. */
 	cntr_qemu_tifs_cmp_cancel();
 	k_mutex_unlock(&efr32_qemu_tifs_op_lock);
@@ -200,8 +206,12 @@ static void efr32_qemu_tifs_arm(uint32_t hcto_us)
 	uint32_t generation;
 	bool stale;
 
-	/* Stop before publishing the new generation, then verify after arm. */
+	/* Invalidate and discard any old wake before publishing a new generation. */
 	cntr_qemu_tifs_cmp_cancel();
+	key = irq_lock();
+	efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+	irq_unlock(key);
+	k_deadline_event_reset(&efr32_qemu_tifs_event);
 	key = irq_lock();
 	generation = efr32_qemu_tifs_state_arm(&efr32_qemu_tifs, hcto_us);
 	irq_unlock(key);
@@ -419,6 +429,9 @@ void efr32_radio_launch_wake(uint8_t trx, uint32_t generation)
 static void efr32_radio_launch_disarm(void)
 {
 	atomic_set(&efr32_radio_launch_active, 0);
+	/* A stale latch must not consume a later launch generation early. */
+	k_deadline_event_reset(&efr32_radio_tx_event);
+	k_deadline_event_reset(&efr32_radio_rx_event);
 	cntr_radio_cmp_cancel();
 }
 /*
@@ -632,8 +645,12 @@ static void efr32_qemu_tifs_arm_tx(void)
 	uint32_t generation;
 	bool stale;
 
-	/* The completion job has stopped RX before publishing this deadline. */
+	/* The completion job stopped RX; replace any older scheduler generation. */
 	cntr_qemu_tifs_cmp_cancel();
+	key = irq_lock();
+	efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+	irq_unlock(key);
+	k_deadline_event_reset(&efr32_qemu_tifs_event);
 	key = irq_lock();
 	generation = efr32_qemu_tifs_state_arm_tx(&efr32_qemu_tifs);
 	irq_unlock(key);
@@ -2157,10 +2174,11 @@ static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t
 		remainder += HAL_TICKER_CNTR_CLK_UNIT_FSEC / 1000UL;
 	}
 	remainder /= 1000000UL;
+	/* Do not let an unread expiry from the replaced launch run this one. */
+	efr32_radio_launch_disarm();
 	do {
 		generation = (uint32_t)atomic_inc(&efr32_radio_launch_generation) + 1U;
 	} while (!generation);
-	atomic_set(&efr32_radio_launch_active, 0);
 	atomic_set(&efr32_radio_launch_active, generation);
 	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
 	cntr_radio_cmp_set(trx, tick, generation);
