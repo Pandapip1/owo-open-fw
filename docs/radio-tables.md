@@ -324,10 +324,16 @@ at literal `0x28474` before calling `0x1e39c`. The latter reaches its
 client-style indirect call through context `+0x08` only when the post-policy
 event pair intersects callback masks at context `+0xe8/+0xec`
 (`0x1e448..0x1e460`); its arguments are the context and those two masks.
-Neither condition is exclusive to the BUFC descriptor class. There is a
-potential bridge through the ISR's `r7` bit 10 at `0x28b10..0x28b1c`, which
-calls `0x2847c(2)` and contributes its result to the third generic event-set
-argument, but its relation to the descriptor return class is not yet proven.
+Neither condition is exclusive to the BUFC descriptor class. The apparent
+third-event-set bridge is independent: the descriptor return class maps only
+to the first event mask (`r8`) through `0x28842..0x28880`, while `r7` is a
+separate pending/enable word loaded from `0x200010b0+0x50/+0x5c`
+(`0x286b6..0x286d8`). Its bit-10 path calls `0x2847c(2)`, a separate byte
+counter/quota helper at `0x200032f0+2`, and only conditionally contributes
+third-event-set bit zero (`0x28480..0x28532`). No descriptor path writes `r7`
+or that third event set. Descriptor classes can therefore reach the generic
+masked-event callback only through their `r8` mask contribution; mapping one
+of those masks to a Bluetooth RX-client callback remains unrecovered.
 
 The open port consequently binds `LL_RADIO_IRQn` to direct `FRC_IRQn` and enables only `FRC.IEN.TXDONE|RXDONE` during `radio_setup()`. The generated revB2 model places `IEN` at `+0x06C`, exposes the standard SET alias, and names those two bits (`FRC_S_register.py:684-704`, `FRC_S_field.py:1197-1254`). This is deliberately narrower than the vendor handler: it gives the existing `radio_is_done()` completion policy an identical IRQ source, without treating an arbitrary sequencer, buffer, error, or RAC state flag as successful completion. It does not establish receive production or the rest of RAIL's packet-state dispatch.
 
