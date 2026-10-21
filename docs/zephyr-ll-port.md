@@ -344,11 +344,14 @@ A passing trace must establish this order and all of these boundaries:
 
 1. scanner RX arm: `addr=0xa8021008 value=0x00000002`;
 2. advertiser `TX snapshot sequence=...` after that arm;
-3. a positive modeled medium offer: `TX snapshot RX mailbox offers=[1-9]...`;
-4. the scanner's normal Zephyr callback marker: `rx_callback: len=...`.
+3. advertiser TX state retirement: `RAC state 9 -> 0`;
+4. a later QEMU TIFS RX arm: `addr=0xa8021008 value=0x00000002`;
+5. a positive modeled medium offer: `TX snapshot RX mailbox offers=[1-9]...`;
+6. the scanner's normal Zephyr callback marker: `rx_callback: len=...`.
 
 The harness also requires advertiser `RAC.CMD=0x00000001` (TXEN). The callback
-is therefore evidence that the QEMU medium's normalized offer traversed the
+is therefore evidence that the QEMU scheduler progressed through TX state
+retirement and the TIFS RX-arm job, and that the QEMU medium's normalized offer traversed the
 scanner's descriptor worker, FRC completion publication, Zephyr controller,
 and scan callback. It is not evidence of silicon TX/RX timing, BUFC descriptor
 layout, FRC/CRC semantics, or an over-air packet. Those remain bounded by the

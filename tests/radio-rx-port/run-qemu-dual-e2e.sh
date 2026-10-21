@@ -90,6 +90,21 @@ if ! grep -Eq 'TX snapshot RX mailbox offers=[1-9][0-9]*' "$RUNTIME_DIR/radio.tr
     exit 1
 fi
 
+# The advertiser's QEMU-only TIFS seam is exercised only when its TX state
+# retires before a later software-RX arm.  The trace is intentionally a
+# machine-level boundary: it does not identify a silicon packet-end event.
+tx_off_line=$(grep -n 'RAC state 9 -> 0' "$RUNTIME_DIR/radio.trace" |
+    head -1 | cut -d: -f1)
+post_tx_rx_arm_line=$(awk -v start="${tx_off_line:-0}" '
+    NR > start && /addr=0xa8021008 value=0x00000002/ { print NR; exit }
+' "$RUNTIME_DIR/radio.trace")
+if [ -z "$tx_off_line" ] || [ -z "$post_tx_rx_arm_line" ] ||
+   [ "$tx_off_line" -ge "$post_tx_rx_arm_line" ]; then
+    echo "radio-dual-e2e: TX completion did not precede a later QEMU TIFS RX arm" >&2
+    echo "radio-dual-e2e: this checks scheduler progression only, not silicon timing" >&2
+    exit 1
+fi
+
 if ! grep -q 'addr=0xa8021008 value=0x00000002' "$RUNTIME_DIR/radio.trace"; then
     echo "radio-dual-e2e: scanner never armed software RX" >&2
     exit 1
