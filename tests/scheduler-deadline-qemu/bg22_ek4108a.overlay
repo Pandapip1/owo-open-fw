@@ -1,0 +1,4 @@
+/* Use the QEMU-modeled BURTC as the Zephyr system-clock source. */
+&burtc0 {
+	status = "okay";
+};
