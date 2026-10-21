@@ -166,13 +166,15 @@ tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
     }
     stage == 5 && /endpoint=0 .*RAC state 0 -> 2/ {
         handoff = now_ns($0) - irq_now
-        if (handoff < 0 || handoff > max_handoff_ns) {
-            exit 2
-        }
         stage = 6
         next
     }
     stage == 6 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
+        # A later advertisement supersedes an unpaired candidate. Apply the
+        # handoff bound only once this request proves the turn was accepted.
+        if (handoff < 0 || handoff > max_handoff_ns) {
+            exit 2
+        }
         count++
         if (handoff > max_seen) {
             max_seen = handoff

@@ -161,7 +161,8 @@ static enum efr32_qemu_tifs_next_action efr32_qemu_tifs_next_action;
 static bool efr32_qemu_tifs_transition_requested;
 /* RXDIS has claimed a recorded turn-around; wait for the callback to stage TX. */
 static bool efr32_qemu_tifs_rx_to_tx_staging;
-K_SEM_DEFINE(efr32_qemu_tifs_sem, 0, 1);
+/* Coalesces an IRQ publication while the persistent TIFS job is running. */
+K_DEADLINE_EVENT_DEFINE(efr32_qemu_tifs_event);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
 
 static uint32_t efr32_qemu_tifs_deadline(uint32_t delay_us)
@@ -234,7 +235,8 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 		uint32_t hcto_us;
 		unsigned int key;
 
-		k_sem_take(&efr32_qemu_tifs_sem, K_FOREVER);
+		/* Atomically consume a TIFS publication or become its idle consumer. */
+		k_deadline_event_wait(&efr32_qemu_tifs_event);
 		key = irq_lock();
 		phase = efr32_qemu_tifs.phase;
 		generation = efr32_qemu_tifs.generation;
@@ -322,7 +324,12 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation)
 		efr32_qemu_tifs.generation == generation;
 	irq_unlock(key);
 	if (valid) {
-		k_sem_give(&efr32_qemu_tifs_sem);
+		/*
+		 * BURTC expiry is this job's release event. K_DEADLINE(0) gives the
+		 * now-eligible worker an immediate start-by key at its static priority;
+		 * it does not advance the RXEN/TXEN action before the compare expiry.
+		 */
+		k_deadline_event_post(&efr32_qemu_tifs_event, K_DEADLINE(0));
 	}
 #else
 	ARG_UNUSED(generation);

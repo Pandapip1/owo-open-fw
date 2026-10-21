@@ -81,6 +81,7 @@ config EFR32_RADIO_QEMU_RX_DESCRIPTOR
 config EFR32_RADIO_QEMU_TIFS
 	bool "Enable QEMU-only scheduler-owned TIFS turn-around"
 	default n
+	select SCHED_DEADLINE
 	help
 		Enable the opt-in simulator seam that schedules the OpenISA TX-to-RX
 		turn-around and no-response timeout through persistent Zephyr jobs. The
@@ -88,6 +89,8 @@ config EFR32_RADIO_QEMU_TIFS
 		is cancelled by radio reset, teardown, or event timer stop. It is not a
 		model of the EFR32 PROTIMER/RAC TIFS sequencer: leave this disabled for
 		hardware builds because packet-end capture, warm-up timing, and HCTO
-		semantics remain unproven on silicon.
+		semantics remain unproven on silicon. It selects deadline scheduling for
+		the simulator-only persistent event latch; deadline ordering is not a
+		hardware timing claim.
 
 endif # BT_LLL_VENDOR_EFR32
