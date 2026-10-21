@@ -2,7 +2,14 @@
 #![no_std]
 
 use zephyr::printkln;
-use zephyr::raw::{bt_le_scan_param, bt_le_scan_start};
+use zephyr::raw::{
+    bt_le_scan_cb,
+    bt_le_scan_cb_register,
+    bt_le_scan_param,
+    bt_le_scan_recv_info,
+    bt_le_scan_start,
+    net_buf_simple,
+};
 use zephyr_panic as _;
 
 unsafe extern "C" {
@@ -10,6 +17,50 @@ unsafe extern "C" {
 }
 
 const BT_LE_SCAN_TYPE_PASSIVE: u8 = 0;
+
+/*
+ * This callback is intentionally a probe for the QEMU-only descriptor seam.
+ * It records the first bytes delivered by Zephyr's host scanner; it does not
+ * inspect the radio FIFO or treat a raw BUFC completion as a host callback.
+ */
+unsafe extern "C" fn scan_recv(
+    _info: *const bt_le_scan_recv_info,
+    buf: *mut net_buf_simple,
+) {
+    if buf.is_null() {
+        return;
+    }
+
+    // SAFETY: Zephyr supplies a live net_buf_simple for the duration of the
+    // callback and never calls this function with a null buffer.
+    let packet = unsafe { &*buf };
+    let first = if packet.data.is_null() {
+        0
+    } else {
+        // SAFETY: Zephyr's buffer contract makes data valid for len bytes.
+        unsafe { *packet.data }
+    };
+    let second = if packet.data.is_null() || packet.len < 2 {
+        0
+    } else {
+        // SAFETY: The length check above proves the second byte is present.
+        unsafe { *packet.data.add(1) }
+    };
+    printkln!(
+        "rx_callback: len={} first={} second={}",
+        packet.len,
+        first,
+        second
+    );
+}
+
+static mut SCAN_CALLBACKS: bt_le_scan_cb = bt_le_scan_cb {
+    recv: Some(scan_recv),
+    timeout: None,
+    node: zephyr::raw::_snode {
+        next: core::ptr::null_mut(),
+    },
+};
 
 #[no_mangle]
 extern "C" fn rust_main() {
@@ -20,11 +71,20 @@ extern "C" fn rust_main() {
         return;
     }
 
+    // SAFETY: this static callback remains registered for the life of the
+    // image, and Zephyr invokes it only from thread context.
+    let callback_err = unsafe { bt_le_scan_cb_register(&raw mut SCAN_CALLBACKS) };
+    printkln!("scan_callback_register: {}", callback_err);
+    if callback_err != 0 {
+        return;
+    }
+
     let scan = bt_le_scan_param {
         type_: BT_LE_SCAN_TYPE_PASSIVE,
         options: 0,
-        // Continuous passive scanning asks the real LLL to arm RX. The null
-        // callback intentionally avoids claiming raw BUFC bytes are a PDU.
+        // Continuous passive scanning asks the real LLL to arm RX. The
+        // registered callback is reached only after the QEMU descriptor seam
+        // has normalized a bounded PDU for Zephyr's host.
         interval: 160,
         window: 160,
         timeout: 0,
