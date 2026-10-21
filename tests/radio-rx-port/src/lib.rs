@@ -16,7 +16,15 @@ unsafe extern "C" {
     fn bt_enable(cb: Option<unsafe extern "C" fn(i32)>) -> i32;
 }
 
+#[cfg(not(CONFIG_RADIO_RX_PORT_ACTIVE_SCAN))]
 const BT_LE_SCAN_TYPE_PASSIVE: u8 = 0;
+#[cfg(CONFIG_RADIO_RX_PORT_ACTIVE_SCAN)]
+const BT_LE_SCAN_TYPE_ACTIVE: u8 = 1;
+
+#[cfg(CONFIG_RADIO_RX_PORT_ACTIVE_SCAN)]
+const SCAN_TYPE: u8 = BT_LE_SCAN_TYPE_ACTIVE;
+#[cfg(not(CONFIG_RADIO_RX_PORT_ACTIVE_SCAN))]
+const SCAN_TYPE: u8 = BT_LE_SCAN_TYPE_PASSIVE;
 
 /*
  * This callback is intentionally a probe for the QEMU-only descriptor seam.
@@ -87,11 +95,14 @@ extern "C" fn rust_main() {
     }
 
     let scan = bt_le_scan_param {
-        type_: BT_LE_SCAN_TYPE_PASSIVE,
+        type_: SCAN_TYPE,
         options: 0,
-        // Continuous passive scanning asks the real LLL to arm RX. The
-        // registered callback is reached only after the QEMU descriptor seam
-        // has normalized a bounded PDU for Zephyr's host.
+        // Continuous scanning asks the real LLL to arm RX. In the opt-in
+        // active-scanning profile, Zephyr stages SCAN_REQ after an eligible
+        // advertisement; the RX-to-TX transition remains intentionally
+        // unavailable until the QEMU-only HAL seam provides it. The callback
+        // is reached only after the QEMU descriptor seam has normalized a
+        // bounded PDU for Zephyr's host.
         interval: 160,
         window: 160,
         timeout: 0,
@@ -100,5 +111,5 @@ extern "C" fn rust_main() {
     };
     // SAFETY: Zephyr copies this parameter structure while starting scanning.
     let scan_err = unsafe { bt_le_scan_start(&scan, None) };
-    printkln!("scan_start: {}", scan_err);
+    printkln!("scan_start: {} type={}", scan_err, SCAN_TYPE);
 }

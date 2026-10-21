@@ -62,7 +62,7 @@ printf '%s\n' "$console" | grep -E '^(bt_enable|scan_start):' || true
 if ! printf '%s\n' "$console" | grep -q '^bt_enable: 0$'; then
     echo "radio-rx: bt_enable did not report success"
     exit 1
-elif ! printf '%s\n' "$console" | grep -q '^scan_start: 0$'; then
+elif ! printf '%s\n' "$console" | grep -q '^scan_start: 0 type=0$'; then
     echo "radio-rx: passive scanner did not report success"
     exit 1
 elif grep -q 'addr=0xa8021008 value=0x00000002' "$RUNTIME_DIR/radio.trace"; then

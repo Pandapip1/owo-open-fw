@@ -1,0 +1,19 @@
+# Test-only configuration for the EFR32 QEMU scanner workload.
+
+menu "EFR32 radio RX-port test"
+
+config RADIO_RX_PORT_ACTIVE_SCAN
+	bool "Exercise active scanning in the QEMU RX-port workload"
+	depends on BT_OBSERVER
+	default n
+	help
+	  Use the host's active scan parameter rather than the default passive
+	  parameter. This is solely an in-tree QEMU integration workload: it
+	  expects the EFR32 HAL's separately gated QEMU RX-to-TX turn-around to
+	  send a staged SCAN_REQ, then receive the advertiser's SCAN_RSP. Do not
+	  select it for a hardware build; silicon packet-end/TIFS semantics are
+	  not established.
+
+endmenu
+
+source "Kconfig.zephyr"
