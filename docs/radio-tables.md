@@ -750,6 +750,18 @@ endpoint back to channel-1 `READOFFSET`. These consumer facts establish the
 minimum record shape, but not when a record is valid, its normal status values,
 or a safe QEMU condition for synthesizing one.
 
+The public RAIL 3 API independently gives this ring a narrower role. Its
+`sl_rail_packet_queue_entry_t` is an opaque `uint64_t` receive Packet Queue
+entry, explicitly separate from RX-FIFO payload data and retained in packet
+arrival order (`sl_rail_types.h:2048-2055`). The configuration contract says
+enabled packet-completion events add an entry and that callback return or
+`sl_rail_release_rx_packet()` removes it (`sl_rail_types.h:2305-2322`);
+`sl_rail.h:2222-2268` describes the queue as circular per-packet metadata.
+The eight-byte stock ring and separate channel-1 FIFO therefore match that
+public abstraction. The entry remains opaque, however, so this compatible
+API-level correlation does not prove its xG22 field encoding or producer
+trigger.
+
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
 The OpenISA LLL supplies the API meaning and byte order that the archive alone does not: its advertising preparation creates `uint32_t aa = sys_cpu_to_le32(PDU_AC_ACCESS_ADDR)` at `lll_adv.c:321`, then calls `radio_aa_set((uint8_t *)&aa)` at `:359`; scan uses the same conversion at `lll_scan.c:127,170`. The reference OpenISA HAL treats its argument as the access address (`hal/RV32M1/radio/radio.c:687-704`). Together these public sources justify `radio_aa_set` writing the four supplied bytes, little-endian, to `MODEM.SYNC0`. The EFR32 HAL assembles the word byte-wise so that it does not impose an unadvertised alignment requirement on this byte-pointer API. This establishes only the configuration write; it does not establish when the sequencer consumes it or any sync/demodulation behavior.
