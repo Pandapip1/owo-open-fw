@@ -288,9 +288,15 @@ capture offsets `0x0dec` (`0xAA000054`), `0x0e34` (`0xAA000064`), `0x15b0`
 `0x328c` (`0xAA000018`). They target channel 0, channel 1, or channel 3;
 there is no channel-2 literal in the capture (whose SHA-256 is
 `acd72f8ebb4008e918af059b1ba2383dc64b33c66690871f4343a5bfed100847`).
-This is only a literal-search fact: it does not exclude a computed channel-2
-address, and it is not evidence that any listed access executes. It does rule
-out claiming a plainly encoded sequencer descriptor producer from this image.
+This is not only a literal-search result. The sole computed BUFC-base sequence
+in the captured image is at dump offsets `0x1310..0x131e`: it forms
+`0xAA00000C + (r5 << 6)`, reads `[computed + 0x20]`, and writes that value to
+another peripheral. It does not form or write buffer 2's `WRITEDATA` address
+(`0xAA0000A4`). A focused instruction scan also finds no computed
+`BUFC + 0xA4` port address or channel-2 descriptor store. This is static-code
+evidence only, not evidence that any listed access executes; it rules out a
+plainly encoded normal sequencer descriptor producer from this captured image,
+but not hardware/opaque-runtime production.
 It also bounds the capture's TX evidence: its sole channel-0 literal,
 `0xAA000018` at member offset `0x328c`, is `READOFFSET`; there is no static
 channel-0 `ADDR`, `WRITEOFFSET`, or `WRITEDATA` literal. The nearby
