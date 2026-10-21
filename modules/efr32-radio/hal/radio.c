@@ -1813,6 +1813,17 @@ void *radio_pkt_scratch_get(void)
 void radio_switch_complete_and_rx(uint8_t phy_rx)
 {
 	ARG_UNUSED(phy_rx);
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	/*
+	 * Connectable legacy advertising uses TX->RX here (for a scan response).
+	 * Only a completed TX may arm the simulator turn-around; initial event
+	 * setup and unrelated RX transitions retain the hardware TODO below.
+	 */
+	if (efr32_qemu_tifs_tx_completion) {
+		efr32_qemu_tifs_tx_completion = false;
+		efr32_qemu_tifs_transition_requested = true;
+	}
+#endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
