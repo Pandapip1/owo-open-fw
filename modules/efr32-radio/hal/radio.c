@@ -36,6 +36,9 @@
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 #include "rx_descriptor.h"
 #endif
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+#include "qemu_tifs_state.h"
+#endif
 #include "timer_state.h"
 
 #include "util/mem.h"
@@ -145,6 +148,120 @@ static struct {
 	bool abort;
 } efr32_radio_completion_work;
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
+
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+/*
+ * This is a simulator-only replacement for the unproven PROTIMER/RAC TIFS
+ * sequencer.  The timer callback only wakes this pre-created job; all RAC
+ * commands and timeout handling remain scheduler-owned.
+ */
+static struct efr32_qemu_tifs_state efr32_qemu_tifs;
+static bool efr32_qemu_tifs_tx_completion;
+static bool efr32_qemu_tifs_transition_requested;
+K_SEM_DEFINE(efr32_qemu_tifs_sem, 0, 1);
+
+static void efr32_qemu_tifs_timer_expiry(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_sem_give(&efr32_qemu_tifs_sem);
+}
+
+K_TIMER_DEFINE(efr32_qemu_tifs_timer, efr32_qemu_tifs_timer_expiry, NULL);
+
+static void efr32_qemu_tifs_cancel(void)
+{
+	unsigned int key = irq_lock();
+
+	efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+	irq_unlock(key);
+
+	/* A stale expiry is harmless: the worker rechecks phase and generation. */
+	k_timer_stop(&efr32_qemu_tifs_timer);
+}
+
+static void efr32_qemu_tifs_arm(uint32_t hcto_us)
+{
+	unsigned int key;
+	uint32_t generation;
+	bool stale;
+
+	/* Stop before publishing the new generation, then verify after start. */
+	k_timer_stop(&efr32_qemu_tifs_timer);
+	key = irq_lock();
+	generation = efr32_qemu_tifs_state_arm(&efr32_qemu_tifs, hcto_us);
+	irq_unlock(key);
+
+	k_timer_start(&efr32_qemu_tifs_timer, K_USEC(efr32_radio_timer.tifs_us),
+			      K_NO_WAIT);
+
+	/* If reset/teardown raced the start, do not resurrect the cancelled job. */
+	key = irq_lock();
+	stale = efr32_qemu_tifs.phase != EFR32_QEMU_TIFS_WAIT_RX ||
+		efr32_qemu_tifs.generation != generation;
+	irq_unlock(key);
+	if (stale) {
+		k_timer_stop(&efr32_qemu_tifs_timer);
+	}
+}
+
+static void efr32_qemu_tifs_job(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (;;) {
+		enum efr32_qemu_tifs_phase phase;
+		uint32_t generation;
+		uint32_t hcto_us;
+		unsigned int key;
+
+		k_sem_take(&efr32_qemu_tifs_sem, K_FOREVER);
+		key = irq_lock();
+		phase = efr32_qemu_tifs.phase;
+		generation = efr32_qemu_tifs.generation;
+		hcto_us = efr32_qemu_tifs.hcto_us;
+		irq_unlock(key);
+
+		if (phase == EFR32_QEMU_TIFS_WAIT_RX) {
+			/* radio_pkt_rx_set() was completed before HCTO was configured. */
+			radio_rx_enable();
+
+			key = irq_lock();
+			(void)efr32_qemu_tifs_state_advance_to_hcto(&efr32_qemu_tifs,
+							 generation);
+			irq_unlock(key);
+
+			/* Arm the same persistent job for the bounded no-response path. */
+			key = irq_lock();
+			if (efr32_qemu_tifs.phase == EFR32_QEMU_TIFS_WAIT_HCTO &&
+			    efr32_qemu_tifs.generation == generation) {
+				irq_unlock(key);
+				k_timer_start(&efr32_qemu_tifs_timer, K_USEC(hcto_us), K_NO_WAIT);
+			} else {
+				irq_unlock(key);
+			}
+		} else if (phase == EFR32_QEMU_TIFS_WAIT_HCTO) {
+			key = irq_lock();
+			if (efr32_qemu_tifs_state_begin_timeout(&efr32_qemu_tifs,
+							 generation)) {
+				irq_unlock(key);
+				/* A completed response owns cleanup; only abort silence. */
+				if (!radio_is_done()) {
+					radio_disable();
+				}
+			} else {
+				irq_unlock(key);
+			}
+		}
+	}
+}
+
+K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
+		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
+		efr32_qemu_tifs_job, NULL, NULL, NULL,
+		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+#endif
 
 static void efr32_radio_completion_job(void *a, void *b, void *c);
 
@@ -917,6 +1034,11 @@ void radio_setup(void)
 {
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	efr32_qemu_tifs_state_init(&efr32_qemu_tifs);
+	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_transition_requested = false;
+#endif
 	efr32_radio_completion_quiesce();
 
 	/*
@@ -976,6 +1098,11 @@ void radio_setup(void)
 void radio_reset(void)
 {
 	efr32_radio_launch_disarm();
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	efr32_qemu_tifs_cancel();
+	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_transition_requested = false;
+#endif
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
@@ -1495,6 +1622,11 @@ void radio_disable(void)
 	unsigned int key;
 
 	efr32_radio_launch_disarm();
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	efr32_qemu_tifs_cancel();
+	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_transition_requested = false;
+#endif
 
 	/*
 	 * Keep independent command writes: their combined hardware semantics are
@@ -1529,10 +1661,19 @@ void radio_disable(void)
 /* [regs-public] FRC.IF has named TXDONE and RXDONE completion latches. */
 void radio_status_reset(void)
 {
+	bool completed;
+	enum efr32_radio_packet_direction completed_direction;
+
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	/* The LLL has sampled completion/CRC state before asking to clear it. */
-	(void)efr32_packet_lifecycle_status_reset(&efr32_packet_stage.lifecycle);
+	completed_direction = efr32_packet_stage.lifecycle.completion_direction;
+	completed = efr32_packet_lifecycle_status_reset(&efr32_packet_stage.lifecycle);
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	/* Setup paths have no retired TX completion; only those paths may arm TIFS. */
+	efr32_qemu_tifs_tx_completion = completed &&
+		completed_direction == EFR32_RADIO_PACKET_TX;
+#endif
 	efr32_rx_delivery_invalid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
@@ -1644,12 +1785,29 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 	ARG_UNUSED(flags_rx);
 	ARG_UNUSED(phy_tx);
 	ARG_UNUSED(flags_tx);
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	/*
+	 * OpenISA also calls this during initial event setup (not after TXDONE).
+	 * radio_status_reset() marks the latter, and only that source-backed
+	 * software boundary may enable this QEMU-only replacement sequencer.
+	 */
+	if (efr32_qemu_tifs_tx_completion) {
+		efr32_qemu_tifs_tx_completion = false;
+		efr32_qemu_tifs_transition_requested = true;
+	}
+#endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
 /* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
 void radio_switch_complete_and_disable(void)
 {
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	/* A non-turn-around event must not inherit a pending simulator timer. */
+	efr32_qemu_tifs_cancel();
+	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_transition_requested = false;
+#endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
@@ -1820,6 +1978,11 @@ uint32_t radio_tmr_start_get(void)
 void radio_tmr_stop(void)
 {
 	efr32_radio_launch_disarm();
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	efr32_qemu_tifs_cancel();
+	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_transition_requested = false;
+#endif
 }
 
 /*
@@ -1839,6 +2002,20 @@ void radio_tmr_stop(void)
 void radio_tmr_hcto_configure(uint32_t hcto)
 {
 	efr32_radio_timer_state_hcto_set(&efr32_radio_timer, hcto);
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	if (!efr32_qemu_tifs_transition_requested) {
+		/* Initial event setup has no post-TXDONE transition marker. */
+		return;
+	}
+	/*
+	 * This arm is intentionally based on the TX-completion marker rather than
+	 * on a guessed hardware timestamp. It is a QEMU-only scheduler contract;
+	 * hardware builds retain the bookkeeping-only behavior above.
+	 */
+	efr32_qemu_tifs_transition_requested = false;
+	efr32_radio_timer.hcto_requested = true;
+	efr32_qemu_tifs_arm(hcto);
+#endif
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */

@@ -223,6 +223,16 @@ remains limited to the archived sequencer's `FRC.RXRAWDATA` byte lanes written
 to BUFC channel 1, documented in `docs/radio-tables.md` §4 at capture offsets
 `0x0ce4` and `0x0d5a..0x0d6a`.
 
+The advertiser QEMU profile separately opts into
+`CONFIG_EFR32_RADIO_QEMU_TIFS`. After the LLL has retired a TX completion, the
+HAL records that boundary and arms a persistent Zephyr timer/job: the job
+enables the staged RX path after the requested TIFS, then uses the supplied
+HCTO as a bounded no-response teardown. Reset, `radio_disable()`, and
+`radio_tmr_stop()` invalidate the generation and stop the timer. This is a
+QEMU-only scheduler seam; it does not claim an EFR32 packet-end timestamp,
+PROTIMER compare, RAC sequencer latency, or silicon HCTO behavior, and the
+option remains disabled for hardware builds.
+
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
@@ -372,7 +382,7 @@ safety margin.
 
 ## 4. Known gaps/risks (not resolved)
 1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §6; RFSENSE is documented separately in §5 and is not on the startup/RX/TX critical path.
-2. **Software TIFS on a Cortex-M33** with unknown RAC latency: if T_IFS (150 us +-2) cannot be met from the interrupt, a hardware path (PRS/PROTIMER -> RAC) is required.
+2. **Hardware TIFS on a Cortex-M33** remains unproven, including RAC latency, packet-end capture, and HCTO semantics. The QEMU-only scheduler seam above is only a bounded model transition; if T_IFS (150 us +-2) cannot be met from the interrupt/job path on hardware, a hardware path (PRS/PROTIMER -> RAC) is required.
 3. **HFXO / sleep**: `lll_clock_wait` is a no-op; `EVENT_OVERHEAD_XTAL_US` etc. in `lll/lll_vendor.h` are OpenISA placeholders. Interaction with Zephyr PM (EM2) is unexamined.
 4. **Feature set**: legacy 1M only (OpenISA LLL). The stock suit needs LE Secure/legacy pairing with MITM (host side, fine) and encryption (needs CCM above).
 5. **Flash/RAM**: the controller adds ~100 kB flash on top of the application; the application slot in `boards/bg22_ek4108a.overlay` is 408 K, fine, but the existing app's RAM is already 85 % used without the controller.
