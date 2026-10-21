@@ -15,11 +15,32 @@ model; **[I]** = inference, not confirmed. No blob bytes or disassembly are repr
 | SYNTH | 0xA8018000 [S] / 0xB8018000 [NS] | [F] same |
 | PROTIMER | 0xA801C000 | [F] RAIL archive object access; see §4.3 |
 | RAC | 0xA8020000 [S] / 0xB8020000 [NS] | [F] public table plus stock disassembly literals; generated `RAC_S.py` / `RAC_NS.py` |
-| RF mailbox | 0xA8028000, 0xA802C000 | [I] |
+| RF mailbox | 0xB8028000, 0xB802C000 | [F] xG22 RAIL archive mailbox access; see §1.1 |
 | BUFC | 0xAA000000 | [F] layout matches the xG21 public header; matched by stock init trace |
 
-The public rev-B2 models establish a narrower, usable fact: FRC, AGC, RFCRC, MODEM, SYNTH, and RAC each have writable one-bit `EN.EN` at `+0x004` (their respective `*_S_register.py:24-37` and `*_S_field.py:17-24` files). `radio_setup()` enables exactly those six blocks, and QEMU masks the matching latches to bit zero with a native regression. Separately, the stock helper writes `1` at secure BUFC and PROTIMER `+0x004` at `flash-stock.bin` offsets `0x26de4` and `0x26dfc` (target literals `0xAA000004` and `0xA801C004` at `0x2723c` and `0x2724c`); the HAL mirrors those direct writes through the established non-secure aliases because it uses both blocks. This is not a claim that either bit is named `EN`, nor does it establish ordering, reset sequencing, or interrupt policy. No conclusion is drawn for PRORTC or mailbox blocks. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
+The public rev-B2 models establish a narrower, usable fact: FRC, AGC, RFCRC, MODEM, SYNTH, and RAC each have writable one-bit `EN.EN` at `+0x004` (their respective `*_S_register.py:24-37` and `*_S_field.py:17-24` files). `radio_setup()` enables exactly those six blocks, and QEMU masks the matching latches to bit zero with a native regression. Separately, the stock helper writes `1` at secure BUFC and PROTIMER `+0x004` at `flash-stock.bin` offsets `0x26de4` and `0x26dfc` (target literals `0xAA000004` and `0xA801C004` at `0x2723c` and `0x2724c`); the HAL mirrors those direct writes through the established non-secure aliases because it uses both blocks. This is not a claim that either bit is named `EN`, nor does it establish ordering, reset sequencing, or interrupt policy. No conclusion is drawn for PRORTC. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
 (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h`).
+
+### 1.1 RF mailbox endpoint contract [F]
+
+The archive identifies two mailbox endpoint windows at non-secure
+`0xB802C000` and `0xB8028000`. Both expose data at `+0x004`, flags/status at
+`+0x040`, and enable at `+0x044`. In `rfhal_mailbox.o` archive
+`0x4e4c0..0x4ecb0`, the `C`-endpoint producer waits for bit 1 of
+`0xB802C040` to clear, writes packed `arg0 | arg1<<8` to `0xB802C004`, then
+writes bit 1 through the `+0x1000` alias (`0xB802D040`), at
+`0x4e4f4..0x4e51c`. Its poller reads `0xB802C004`, requires the upper byte
+clear, and compares the low byte to its expected result (`0x4e51c..0x4e554`).
+The service path waits on bit 1 at `0xB8028040`, acknowledges it through
+`0xB802A040`, then consumes the low byte at `0xB8028004`
+(`0x4e56c..0x4e59c`). `generic_phy.o:RDMAILBOX_IRQHandler` independently
+intersects the latter status/enable pair, clears active bit 1 through the
+alias, and consumes byte zero (archive `0x52fdc..0x53048`). This proves an
+eight-bit command/response-style exchange and doorbell/ack convention. It
+does not establish endpoint cross-routing, RDMAILBOX assertion timing, normal
+RX descriptor production, or stock use: no relevant static mailbox literal
+occurs in the stripped stock image, and the archive paths do not write buffer
+2 `WRITEDATA`.
 
 ## 2. RAIL PHY configuration table format (`ble_efr32xg22_configurator_out.c`, Zlib licence) [F]
 The public xG22 configurator source names every target register and makes the encoding unambiguous. Arrays contain `uint32_t` entries and end in `0xFFFFFFFF`.
