@@ -573,6 +573,16 @@ its SET/CLR/TGL aliases; the temporary trace was discarded after inspection.
 That bounds the currently stalled pre-provisioning path only—it does not prove
 the configuration selected by a fully provisioned stock boot.
 
+The local archive and public default are mechanism/reference evidence only,
+not a substitute for that stock selection: its archive has SHA-256
+`c94fa52d538db6faa9150a327edff04f00980947897e7c7d09d12686190477fb`, while
+the stock image is a distinct stripped artifact. The public default leaves
+`REMOVE_APPENDED_INFO` clear (and does not request CRC storage), but stock may
+override it. In the archive's clear-option path, `0x1b` selects public
+`TRAILRXDATA` fields RSSI, CRCOK, and PROTIMER CC0 wrap-low/wrap-high—not CC0
+base or RTC stamp. None of those defaults or field names establishes the
+fully provisioned stock firmware's actual trailer policy.
+
 Archive call tracing adds no BLE-specific selection. Aside from the public
 `RAIL_ConfigRxOptions` entry, the only direct archive caller of that helper is
 generic `rail_rf_hal.o:sli_rail_f70cad…` at archive `0x13580`: it passes mask
