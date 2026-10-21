@@ -134,11 +134,11 @@ static void efr32_radio_ar_execute(const uint8_t *pdu, uint16_t bytes)
 static struct efr32_radio_timer_state efr32_radio_timer;
 static atomic_t efr32_radio_launch_generation;
 static atomic_t efr32_radio_launch_active;
-/* Generation mailboxes pair the coalescing semaphore token with its expiry. */
+/* Generation mailboxes pair the coalescing event latch with its expiry. */
 static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
-K_SEM_DEFINE(efr32_radio_tx_sem, 0, 1);
-K_SEM_DEFINE(efr32_radio_rx_sem, 0, 1);
+K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
+K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
 K_SEM_DEFINE(efr32_radio_completion_sem, 0, 1);
 
 /* The FRC vector publishes this mailbox; only the persistent job calls LLL. */
@@ -358,7 +358,7 @@ static void efr32_radio_tx_job(void *a, void *b, void *c)
 	for (;;) {
 		atomic_val_t generation;
 
-		k_sem_take(&efr32_radio_tx_sem, K_FOREVER);
+		k_deadline_event_wait(&efr32_radio_tx_event);
 		generation = atomic_get(&efr32_radio_tx_pending_generation);
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
@@ -375,7 +375,7 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 	for (;;) {
 		atomic_val_t generation;
 
-		k_sem_take(&efr32_radio_rx_sem, K_FOREVER);
+		k_deadline_event_wait(&efr32_radio_rx_event);
 		generation = atomic_get(&efr32_radio_rx_pending_generation);
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
@@ -405,10 +405,12 @@ void efr32_radio_launch_wake(uint8_t trx, uint32_t generation)
 	}
 	if (trx) {
 		atomic_set(&efr32_radio_tx_pending_generation, generation);
-		k_sem_give(&efr32_radio_tx_sem);
+		/* Compare expiry is the release event; do not defer eligible launch work. */
+		k_deadline_event_post(&efr32_radio_tx_event, K_DEADLINE(0));
 	} else {
 		atomic_set(&efr32_radio_rx_pending_generation, generation);
-		k_sem_give(&efr32_radio_rx_sem);
+		/* The EDF key orders equal-priority ready jobs; it cannot start early. */
+		k_deadline_event_post(&efr32_radio_rx_event, K_DEADLINE(0));
 	}
 }
 

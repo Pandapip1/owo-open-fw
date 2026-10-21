@@ -25,6 +25,9 @@ config BT_LLL_VENDOR_EFR32
 	select BT_TICKER_REMAINDER_SUPPORT
 	select BT_TICKER_UPDATE if BT_BROADCASTER || BT_CONN
 	select PSA_CRYPTO
+	# TX/RX launch uses generic deadline-event latches to atomically retain an
+	# IRQ publication while its persistent consumer is running.
+	select SCHED_DEADLINE
 	help
 	  Out-of-tree lower link layer ("vendor") for subsys/bluetooth/controller/ll_sw. The LLL
 	  sources are derived at configure time from Zephyr's OpenISA LLL (Apache-2.0); only the
@@ -54,7 +57,7 @@ config EFR32_RADIO_LAUNCH_STACK_SIZE
 	int "Persistent radio TX/RX launch job stack size"
 	default 320
 	help
-	  TX and RX launch jobs only wait for a semaphore, claim their generation,
+	  TX and RX launch jobs only wait for a coalescing event latch, claim their generation,
 	  and perform the bounded radio arm write. They deliberately do not invoke
 	  controller callbacks. Keep their stacks separate from the completion job
 	  so its callback budget does not reserve RAM for both launch paths.
@@ -81,7 +84,6 @@ config EFR32_RADIO_QEMU_RX_DESCRIPTOR
 config EFR32_RADIO_QEMU_TIFS
 	bool "Enable QEMU-only scheduler-owned TIFS turn-around"
 	default n
-	select SCHED_DEADLINE
 	help
 		Enable the opt-in simulator seam that schedules the OpenISA TX-to-RX
 		turn-around and no-response timeout through persistent Zephyr jobs. The
@@ -89,8 +91,8 @@ config EFR32_RADIO_QEMU_TIFS
 		is cancelled by radio reset, teardown, or event timer stop. It is not a
 		model of the EFR32 PROTIMER/RAC TIFS sequencer: leave this disabled for
 		hardware builds because packet-end capture, warm-up timing, and HCTO
-		semantics remain unproven on silicon. It selects deadline scheduling for
-		the simulator-only persistent event latch; deadline ordering is not a
-		hardware timing claim.
+		semantics remain unproven on silicon. Its persistent event latch uses the
+		vendor LLL's generic deadline scheduling support; deadline ordering is not
+		a hardware timing claim.
 
 endif # BT_LLL_VENDOR_EFR32
