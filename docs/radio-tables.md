@@ -612,13 +612,22 @@ is archive `[0x33740, 0x337c8)` (member `0x332f4`, section file offset
 handle `+0x38`, gives BUFC the ring base from `+0x18`, and writes channel-2
 registers `0xBA0000B4 = 1`, `+0x08c = log2(size)-6`, `+0x090 = ring_base`,
 and `+0x0b0 = 7`; it clears BUFC flags `0x50000` and resets the software
-indices at `+0x3a` and `+0x3c`. Static accesses in this object only read slot
-fields `+0`, `+2`, and `+3`, except that the release helper writes slot `+0`
-to reclaim it; the initializer writes no individual eight-byte slot, and no
-sequencer-image static write to those fields has been located. This supports
-BUFC hardware (possibly together with the sequencer) as the descriptor
-producer, while the observed CPU paths configure, select, hold, and release
-entries. It does not identify the producer's record encoding or time boundary.
+indices at `+0x3a` and `+0x3c`. It has one narrow, software-produced
+exception: `rfhal_bufc.o` section
+`.text.sli_rail_893fd72dfcf6ebbe2598a01d375fa2c0`, archive
+`[0x33390,0x333e0)` (object `0x9c..0xec`), handles `BUFC.IF.BUF2OF` bit 16.
+It W1C-clears that bit, clears its IEN through the alias, then writes this
+eight-byte record to buffer-2 `WRITEDATA`: `[BUF1.WRITEOFFSET low,
+BUF1.WRITEOFFSET high, 0x04, 0, 0, 0, 0, 0]`. The compatible public BUFC
+layout identifies the source as buffer 1 `WRITEOFFSET` and the destination as
+buffer 2 `WRITEDATA` (`efr32bg21_bufc.h:42-56,290-304,379-393`). This directly
+corroborates class 4 as `RX_FIFO_OVERFLOW`; it establishes only that overflow
+record, not normal packet, aborted, or filtered producer timing/fields. No
+other direct buffer-2 `WRITEDATA` write occurs in that object, and no
+sequencer-image static write to those fields has been located. Thus BUFC
+hardware (possibly with the sequencer) remains the candidate normal producer,
+while the observed CPU paths configure, select, hold, release, and synthesize
+this one overflow record.
 
 The channel distinction is source-backed rather than a modelling convention.
 The compatible public BUFC layout has its first buffer at `+0x00c` and a
