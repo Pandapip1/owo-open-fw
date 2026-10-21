@@ -10,7 +10,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/adc.h>
-#include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/dac.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -78,38 +77,38 @@ void owo_busy_wait_us(uint32_t us)
 	k_busy_wait(us);
 }
 
-/* ---- fine counter for phase widths (Zephyr Counter API) ---- */
+/*
+ * ---- fine timestamps for phase widths (Zephyr system clock) ----
+ *
+ * The system clock's hardware cycles are the timebase, so no counter device is
+ * owned here. The handle is only an identity token for the Rust wrapper.
+ */
+static const char fine_clock;
 
 int owo_counter_start(const void *d)
 {
-	const struct device *dev = d;
-
-	if (counter_get_max_top_value(dev) != UINT32_MAX || counter_get_frequency(dev) < 1000000U) {
-		return -ENOTSUP; /* needs 32 bits and at most 1 us per tick */
+	ARG_UNUSED(d);
+	if (sys_clock_hw_cycles_per_sec() < 1000000U) {
+		return -ENOTSUP; /* needs at most 1 us per cycle */
 	}
-	return counter_start(dev);
+	return 0;
 }
 
 void owo_counter_stop(const void *d)
 {
-	(void)counter_stop((const struct device *)d);
+	ARG_UNUSED(d);
 }
 
 uint32_t owo_counter_mark(const void *d)
 {
-	uint32_t t = 0;
-
-	(void)counter_get_value((const struct device *)d, &t);
-	return t;
+	ARG_UNUSED(d);
+	return k_cycle_get_32();
 }
 
 uint32_t owo_counter_since_us(const void *d, uint32_t mark)
 {
-	const struct device *dev = d;
-	uint32_t now = 0;
-
-	(void)counter_get_value(dev, &now);
-	return (uint32_t)((uint64_t)(uint32_t)(now - mark) * 1000000ULL / counter_get_frequency(dev));
+	ARG_UNUSED(d);
+	return k_cyc_to_us_floor32(k_cycle_get_32() - mark);
 }
 
 /* ---- timing (Zephyr timing API; the backend is the board's choice) ---- */
@@ -245,7 +244,6 @@ static const uint32_t switch_routes[] = {
 static const struct device *const switch_dev = DEVICE_DT_GET(DT_PHANDLE(SUIT, switch));
 static const struct device *const dac_dev =
 	DEVICE_DT_GET(DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude));
-static const struct device *const phase_timer = DEVICE_DT_GET(DT_PHANDLE(SUIT, phase_timer));
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
 
@@ -262,7 +260,6 @@ static uint32_t owo_suit_reset_safe_off_failures;
 #define RESET_SAFE_OFF_DAC       BIT(4)
 #define RESET_SAFE_OFF_SWITCH    BIT(5)
 #define RESET_SAFE_OFF_BOOST     BIT(6)
-#define RESET_SAFE_OFF_PHASE     BIT(7)
 #define RESET_SAFE_OFF_SUPPLY(i) BIT(8 + (i))
 
 /*
@@ -318,13 +315,6 @@ static int owo_suit_reset_safe_off(void)
 	} else {
 		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_BOOST;
 	}
-	if (device_is_ready(phase_timer)) {
-		if (counter_stop(phase_timer) < 0) {
-			owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_PHASE;
-		}
-	} else {
-		owo_suit_reset_safe_off_failures |= RESET_SAFE_OFF_PHASE;
-	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
 		if (device_is_ready(supplies[i])) {
 			if (regulator_disable(supplies[i]) < 0) {
@@ -360,8 +350,7 @@ int owo_suit_post(void)
 		}
 	}
 	if (!device_is_ready(switch_dev) || !device_is_ready(dac_dev) ||
-	    !device_is_ready(boost.dev) || !device_is_ready(sense.dev) ||
-	    !device_is_ready(phase_timer)) {
+	    !device_is_ready(boost.dev) || !device_is_ready(sense.dev)) {
 		return -ENODEV;
 	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
@@ -407,7 +396,7 @@ const void *owo_suit_handle(int kind)
 	case 5: h = dac_dev; dev = dac_dev; break;
 	case 6: h = &boost; dev = boost.dev; break;
 	case 7: h = &sense; dev = sense.dev; break;
-	case 8: h = phase_timer; dev = phase_timer; break;
+	case 8: return &fine_clock; /* the system clock: nothing to be ready */
 	default:
 		/* 16 + i: supply regulator i */
 		if (kind >= 16 && (size_t)(kind - 16) < ARRAY_SIZE(supplies)) {

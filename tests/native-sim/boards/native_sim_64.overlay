@@ -77,7 +77,6 @@
 		switch = <&test_switch>;
 		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
 				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
-		phase-timer = <&counter0>;
 		pwms = <&test_pwm 0 250000 0>;
 		boost-duty-percent = <50>;
 		io-channels = <&test_dac 15>, <&test_adc 0>;
@@ -90,6 +89,3 @@
 	};
 };
 
-&counter0 {
-	status = "okay";
-};

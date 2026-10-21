@@ -201,17 +201,18 @@ impl Pwm {
     }
 }
 
-/// A free-running 32-bit Counter device (<= 1 us per tick) for timing short intervals.
+/// Fine timestamps (<= 1 us per cycle) for timing short intervals, read from Zephyr's system
+/// clock.
 pub struct FineCounter(*const c_void);
-// SAFETY: static device pointer.
+// SAFETY: static identity token from the shim.
 unsafe impl Send for FineCounter {}
 impl FineCounter {
     /// # Safety
-    /// `p` must be a ready `struct device *` of a Counter.
+    /// `p` must be the shim's `SuitHandle::PhaseTimer` handle.
     pub unsafe fn from_raw(p: *const c_void) -> Self {
         Self(p)
     }
-    /// Start counting (fails with `-ENOTSUP` if the counter is not 32-bit / fine enough).
+    /// Check the system clock is fine enough (fails with `-ENOTSUP` above 1 us per cycle).
     pub fn start(&mut self) -> Result<(), Errno> {
         // SAFETY: valid handle by construction.
         check(unsafe { owo_counter_start(self.0) })
