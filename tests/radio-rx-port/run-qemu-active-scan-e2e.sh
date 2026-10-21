@@ -15,14 +15,16 @@ RUN_SECONDS=${1:-5}
 # from startup. Require several independently ordered exchanges by default.
 # Callers can raise this for soak runs without extending the test contract.
 MIN_EXCHANGES=${MIN_EXCHANGES:-3}
-# The QEMU TIFS worker's measured 150-us interval needs shift=5; shift=1
-# stretches it to about 1.5 ms and lets the LLL clean up before TXEN.
-ICOUNT_SHIFT=${ICOUNT_SHIFT:-5}
+# shift=3 charges 8 ns per instruction; the two endpoints share that, so each
+# runs at roughly 60 MIPS, close to the 76.8 MHz Cortex-M33. Slower settings
+# (shift=5 is about 15 MIPS per endpoint) make the firmware miss deadlines its
+# scheduler clock would meet on silicon, and the miss check panics.
+ICOUNT_SHIFT=${ICOUNT_SHIFT:-3}
 # sleep=off: idle time jumps straight to the next deadline instead of tracking
 # host time, so a run's virtual timeline does not depend on host scheduling.
 # This is a QEMU scheduler-observability bound, not a silicon TIFS claim.
-# It bounds QEMU virtual time from IRQ18 assertion to the persistent job's
-# RAC RXSEARCH transition: three 32.768-kHz cycles, rounded up.
+# It bounds QEMU virtual time from the scheduler-clock IRQ assertion to the
+# persistent job's RAC RXSEARCH transition: three 32.768-kHz cycles, rounded up.
 MAX_TIFS_JOB_HANDOFF_NS=${MAX_TIFS_JOB_HANDOFF_NS:-100000}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
@@ -56,6 +58,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
     -trace enable=efr32bg22_burtc_compare_program \
     -trace enable=efr32bg22_burtc_compare_expire \
     -trace enable=efr32bg22_burtc_irq \
+    -trace enable=efr32bg22_timer0_event \
     -trace file="$RUNTIME_DIR/radio.trace" \
     >"$RUNTIME_DIR/guest.log" 2>&1 &
 qemu_pid=$!
@@ -132,10 +135,10 @@ fi
 # The active-scan success criterion above proves the packet sequence, but it
 # does not say whether it was reached by running radio work in IRQ context.
 # For every accepted advertising turn below, require the model-side chain:
-# a short CC0 arm after TX retires, COMP expiry, IRQ18 assertion, then the
-# advertiser's RAC RXSEARCH transition.  The RAC transition is a guest MMIO
-# write and therefore occurs from the persistent TIFS job, not from QEMU's
-# BURTC callback.  The elapsed virtual time is reported and bounded only as a
+# TX retires, a scheduler-clock compare expires (BURTC IRQ18 or a TIMER0 CC
+# match; the kernel chooses which), then the advertiser's RAC RXSEARCH
+# transition.  The RAC transition is a guest MMIO write and therefore occurs
+# from the persistent TIFS job, not from a QEMU timer callback.  The elapsed virtual time is reported and bounded only as a
 # QEMU scheduling handoff diagnostic.  It is not RF timing or a claim about
 # the hardware PROTIMER/RAC sequencer.
 tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
@@ -145,35 +148,9 @@ tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
         sub(/[^0-9].*$/, "", value)
         return value + 0
     }
-    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
-        stage = 1
-        next
-    }
-    stage == 1 && /endpoint=0 .*RAC state 9 -> 0/ {
-        stage = 2
-        next
-    }
-    stage == 2 && /endpoint=0 .*BURTC compare program .* ticks=[1-7]$/ {
-        stage = 3
-        next
-    }
-    stage == 3 && /endpoint=0 .*BURTC compare expired/ {
-        stage = 4
-        next
-    }
-    stage == 4 && /endpoint=0 .*BURTC IRQ18 level=1 / {
-        irq_now = now_ns($0)
-        stage = 5
-        next
-    }
-    stage == 5 && /endpoint=0 .*RAC state 0 -> 2/ {
-        handoff = now_ns($0) - irq_now
-        stage = 6
-        next
-    }
-    stage == 6 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
-        # A later advertisement supersedes an unpaired candidate. Apply the
-        # handoff bound only once this request proves the turn was accepted.
+    function accept() {
+        # Apply the handoff bound only once a request proves the turn was
+        # accepted.
         if (handoff < 0 || handoff > max_handoff_ns) {
             exit 2
         }
@@ -181,22 +158,68 @@ tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
         if (handoff > max_seen) {
             max_seen = handoff
         }
+        if (!min_turn || turnaround < min_turn) {
+            min_turn = turnaround
+        }
+        if (turnaround > max_turn) {
+            max_turn = turnaround
+        }
         stage = 0
+    }
+    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
+        # A later advertisement supersedes an unpaired candidate.
+        stage = 1
+        req_seen = 0
+        next
+    }
+    stage == 1 && /endpoint=0 .*RAC state 9 -> 0/ {
+        tx_end = now_ns($0)
+        stage = 2
+        next
+    }
+    # Other clients can expire after TX too; the RX transition is caused by
+    # the latest expiry before it.
+    (stage == 2 || stage == 3) && (/endpoint=0 .*BURTC IRQ18 level=1 / ||
+                                   /endpoint=0 .*TIMER0 event .*IF\|=0x000000[4-7]0/) {
+        irq_now = now_ns($0)
+        stage = 3
+        next
+    }
+    # Both sides turn around in about one TIFS: the scanner request may be
+    # traced before or after the advertiser reaches RX.
+    stage >= 2 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
+        req_seen = 1
+        if (stage == 4) {
+            accept()
+        }
+        next
+    }
+    stage == 3 && /endpoint=0 .*RAC state 0 -> 2/ {
+        handoff = now_ns($0) - irq_now
+        turnaround = now_ns($0) - tx_end
+        stage = 4
+        if (req_seen) {
+            accept()
+        }
+        next
     }
     END {
         if (!count) {
             exit 1
         }
-        printf "%d:%d\n", count, max_seen
+        printf "%d:%d:%d:%d\n", count, max_seen, min_turn, max_turn
     }
 ' "$RUNTIME_DIR/radio.trace") || tifs_summary=
 tifs_count=${tifs_summary%%:*}
-tifs_max_handoff_ns=${tifs_summary#*:}
+tifs_rest=${tifs_summary#*:}
+tifs_max_handoff_ns=${tifs_rest%%:*}
+tifs_turnaround=${tifs_rest#*:}
 if [ -z "$tifs_summary" ] || [ "$tifs_count" -lt "$MIN_EXCHANGES" ]; then
-    echo "active-scan-e2e: missing causal BURTC IRQ18 -> persistent TIFS-job RX transition" >&2
-    grep -E 'BURTC compare|BURTC IRQ18|RAC state|TX snapshot' "$RUNTIME_DIR/radio.trace" >&2 || true
+    echo "active-scan-e2e: missing causal scheduler-clock expiry -> persistent TIFS-job RX transition" >&2
+    grep -E 'BURTC compare|BURTC IRQ18|TIMER0 event|RAC state|TX snapshot' "$RUNTIME_DIR/radio.trace" >&2 || true
     exit 1
 fi
-echo "active-scan-e2e: $tifs_count BURTC IRQ18 -> TIFS-job RX handoff(s), max ${tifs_max_handoff_ns} ns virtual"
+echo "active-scan-e2e: $tifs_count scheduler-clock expiry -> TIFS-job RX handoff(s), max ${tifs_max_handoff_ns} ns virtual"
+echo "active-scan-e2e: TX end -> RXSEARCH turnaround ${tifs_turnaround%%:*}..${tifs_turnaround#*:} ns virtual (QEMU model timing, not an RF TIFS claim)"
 
 echo "active-scan-e2e: observed $exchange_count QEMU-only ordered advertisement -> SCAN_REQ -> SCAN_RSP exchanges"

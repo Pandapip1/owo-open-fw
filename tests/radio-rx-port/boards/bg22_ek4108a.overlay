@@ -14,12 +14,17 @@
 	chosen {
 		zephyr,bt-hci = &bt_hci_efr32;
 	};
-
-	aliases {
-		ll-counter = &burtc0;
-	};
 };
 
 &burtc0 {
 	status = "okay";
+};
+
+/* HFXO-clocked 32-bit TIMER0: the scheduler clock's active-state provider. */
+&timer0 {
+	status = "okay";
+
+	counter {
+		status = "okay";
+	};
 };

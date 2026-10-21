@@ -17,14 +17,17 @@
 	chosen {
 		zephyr,bt-hci = &bt_hci_efr32;
 	};
-
-	aliases {
-		/* 32768 Hz 32-bit tick counter for the ticker (modules/efr32-radio/hal/cntr.c);
-		 * RTCC is taken by the sleeptimer (xg22.dtsi: silabs,sleeptimer = &rtcc0). */
-		ll-counter = &burtc0;
-	};
 };
 
 &burtc0 {
 	status = "okay";
+};
+
+/* HFXO-clocked 32-bit TIMER0: the scheduler clock's active-state provider. */
+&timer0 {
+	status = "okay";
+
+	counter {
+		status = "okay";
+	};
 };
