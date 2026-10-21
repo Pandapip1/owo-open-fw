@@ -49,6 +49,15 @@ inferred here. This establishes stock mailbox servicing, not a packet path:
 the bounded handler analysis has not shown a buffer-2 `WRITEDATA` write or a
 descriptor record producer.
 
+The stock bit-1 branch further bounds this endpoint's observed role. It reads
+the low byte of B `DATA + 0x004`, acts only when that byte is `1`
+(`0x28c2a..0x28c38`), samples helper `0x29c60`, then polls bit 5 of
+`0xA802005c` while taking a second sample and passing the pair to the
+wrapped-difference helper `0x29a74` (`0x28c38..0x28c5e`). The visible handler
+path contains no BUFC address, descriptor-ring access, or PDU copy. This is
+consistent with a mailbox-assisted timing/control exchange, but does not
+identify the helpers' semantic clock or prove a full endpoint protocol.
+
 ## 2. RAIL PHY configuration table format (`ble_efr32xg22_configurator_out.c`, Zlib licence) [F]
 The public xG22 configurator source names every target register and makes the encoding unambiguous. Arrays contain `uint32_t` entries and end in `0xFFFFFFFF`.
 Each entry header is `[op:4][block:4][count:8][offset:16]`, followed by `count` data words for consecutive 32-bit registers:
