@@ -11,6 +11,8 @@
 enum efr32_qemu_tifs_phase {
 	EFR32_QEMU_TIFS_IDLE,
 	EFR32_QEMU_TIFS_WAIT_RX,
+	/* A received packet had pre-armed a QEMU-only RX-to-TX turn-around. */
+	EFR32_QEMU_TIFS_WAIT_TX,
 	EFR32_QEMU_TIFS_WAIT_HCTO,
 };
 
@@ -32,6 +34,19 @@ static inline uint32_t efr32_qemu_tifs_state_arm(
 {
 	state->phase = EFR32_QEMU_TIFS_WAIT_RX;
 	state->hcto_us = hcto_us;
+	return ++state->generation;
+}
+
+/*
+ * Unlike WAIT_RX, this transition has no header-completion timeout.  The
+ * completion worker has already stopped RX and the LLL callback stages the
+ * response PDU while this bounded TIFS timer runs.
+ */
+static inline uint32_t efr32_qemu_tifs_state_arm_tx(
+	struct efr32_qemu_tifs_state *state)
+{
+	state->phase = EFR32_QEMU_TIFS_WAIT_TX;
+	state->hcto_us = 0U;
 	return ++state->generation;
 }
 
@@ -73,6 +88,18 @@ static inline bool efr32_qemu_tifs_state_claim_rx(
 		return false;
 	}
 	state->phase = EFR32_QEMU_TIFS_WAIT_HCTO;
+	return true;
+}
+
+/* Reserve the TX side effect while the caller holds the operation lock. */
+static inline bool efr32_qemu_tifs_state_claim_tx(
+	struct efr32_qemu_tifs_state *state, uint32_t generation)
+{
+	if (state->phase != EFR32_QEMU_TIFS_WAIT_TX ||
+	    state->generation != generation) {
+		return false;
+	}
+	state->phase = EFR32_QEMU_TIFS_IDLE;
 	return true;
 }
 

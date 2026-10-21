@@ -36,5 +36,16 @@ int main(void)
 	assert(!efr32_qemu_tifs_state_advance_to_hcto(&state, generation));
 	assert(!efr32_qemu_tifs_state_begin_timeout(&state, generation));
 
+	/* RX-to-TX has no HCTO: it is one cancellable, scheduler-owned TIFS. */
+	generation = efr32_qemu_tifs_state_arm_tx(&state);
+	assert(state.phase == EFR32_QEMU_TIFS_WAIT_TX);
+	assert(state.hcto_us == 0U);
+	assert(efr32_qemu_tifs_state_claim_tx(&state, generation));
+	assert(state.phase == EFR32_QEMU_TIFS_IDLE);
+
+	generation = efr32_qemu_tifs_state_arm_tx(&state);
+	efr32_qemu_tifs_state_cancel(&state);
+	assert(!efr32_qemu_tifs_state_claim_tx(&state, generation));
+
 	return 0;
 }
