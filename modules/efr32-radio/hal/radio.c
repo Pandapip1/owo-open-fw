@@ -248,6 +248,15 @@ static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_
 static uint8_t MALIGN(4) efr32_tx_fifo[512];
 /* RAIL configures the RX BUFC channel as a 512-byte power-of-two FIFO too. */
 static uint8_t MALIGN(4) efr32_rx_fifo[512];
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+/*
+ * The synthetic descriptor producer is a QEMU-only test seam.  Keep its
+ * backing ring in storage owned by this image rather than reusing the stock
+ * firmware's observed address, which may overlap unrelated Zephyr RAM.
+ */
+static uint8_t MALIGN(4) efr32_qemu_rx_descriptor_ring_storage[
+	EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES];
+#endif
 
 /*
  * Packet buffers have two distinct ownership domains on this part:
@@ -1337,7 +1346,8 @@ static void efr32_radio_qemu_rx_descriptor_setup(void)
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
-		EFR32_BUFC_ADDR_OFFSET) = EFR32_RADIO_QEMU_RX_DESCRIPTOR_ROOT;
+		EFR32_BUFC_ADDR_OFFSET) =
+		(uint32_t)(uintptr_t)efr32_qemu_rx_descriptor_ring_storage;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_WRITEOFFSET) = 0U;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +

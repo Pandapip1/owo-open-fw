@@ -183,15 +183,16 @@ BUFC and RXDONE alone is never described as packet delivery.
 
 The scanner QEMU profile now opts into one explicit synthetic producer,
 `CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR`. It configures BUFC channel 2 with
-the stock-observed ring root `0x20001178`, a 512-byte backing region, and the
-channel-2 threshold source (`BUFC.IF` bit 18). That address is a simulator
-contract, not a generic hardware placement rule: the consumer reads the
-channel-2 `ADDR` register and refuses the event unless channel 1 still points
-at the HAL-owned 512-byte RX FIFO. The worker is woken by `BUFC_IRQn`, masks
-the source in the ISR, accepts only descriptor classes 6/7, and uses the
-descriptor word-0 low 13 bits as the channel-1 endpoint. It requires the
-resulting circular interval to contain exactly the normalized BLE header plus
-its length-selected payload before copying and releasing channel 1.
+the channel-2 threshold source (`BUFC.IF` bit 18), using a dedicated aligned
+512-byte static buffer owned by the Zephyr image. The stock-observed ring root
+`0x20001178` remains evidence about the vendor firmware only; it is not a
+Zephyr RAM placement requirement. The consumer reads the channel-2 `ADDR`
+register and refuses the event unless channel 1 still points at the HAL-owned
+512-byte RX FIFO. The worker is woken by `BUFC_IRQn`, masks the source in the
+ISR, accepts only descriptor classes 6/7, and uses the descriptor word-0 low
+13 bits as the channel-1 endpoint. It requires the resulting circular
+interval to contain exactly the normalized BLE header plus its length-selected
+payload before copying and releasing channel 1.
 
 For this QEMU-only seam, a successfully normalized class-6/7 record is also
 the synthetic CRC-success result. The worker marks that result before

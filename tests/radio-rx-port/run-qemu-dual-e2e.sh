@@ -95,6 +95,16 @@ if ! grep -q 'addr=0xa8021008 value=0x00000002' "$RUNTIME_DIR/radio.trace"; then
     exit 1
 fi
 
+# The descriptor ring is an image-owned QEMU test buffer.  The stock root
+# (0x20001178) is evidence about the vendor firmware, not a Zephyr RAM ABI.
+descriptor_addr_line=$(grep -E 'addr=0x(aa|ba)000090 value=0x2000[0-9a-f]+' \
+    "$RUNTIME_DIR/radio.trace" | head -1 || true)
+if [ -z "$descriptor_addr_line" ] ||
+   printf '%s\n' "$descriptor_addr_line" | grep -q 'value=0x20001178'; then
+    echo "radio-dual-e2e: scanner did not program an image-owned descriptor ring" >&2
+    exit 1
+fi
+
 expected_callback='rx_callback: len=3 first=2 second=1 third=6'
 # radio-port publishes one Flags AD structure: length=2, type=0x01, value=0x06.
 # Zephyr's host callback receives those three AD bytes, so require the complete
