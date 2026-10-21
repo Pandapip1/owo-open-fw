@@ -432,6 +432,19 @@ LL PDUs crossed the QEMU RAC/BUFC/medium boundary in the expected order. They
 do not establish over-air reception, CRC/FRC production, packet-end timing,
 PROTIMER behavior, BLE channel access semantics, or a silicon TIFS guarantee.
 
+The same harness also enables QEMU-only `BURTC compare program`, `compare
+expired`, and IRQ18 tracepoints, all timestamped in virtual nanoseconds.  For
+each accepted active-scan turn it requires the causal model sequence: the
+advertiser TX retires, a short BURTC compare is armed, that compare expires,
+IRQ18 asserts, and only then does guest MMIO put RAC into RXSEARCH.  The last
+transition is the persistent TIFS job's observable action; the QEMU BURTC
+callback itself cannot issue RAC MMIO.  `MAX_TIFS_JOB_HANDOFF_NS` (100,000 ns
+by default) bounds expiry/IRQ publication to that job action as a QEMU virtual
+time diagnostic.  A five-second `-icount shift=5` run recorded 19 such
+handoffs with a 29,920-ns maximum.  This is observability for the simulated
+IRQ-exit scheduling path, not a guest-log dependency, silicon scheduling
+measurement, or BLE timing claim.
+
 The full hardware-output configuration has an explicit RAM gate. After a
 `build/ram-probe` build, run `scripts/check-hardware-ram.sh`; it reads the
 linker map's complete `_image_ram_size` allocation rather than the incomplete
