@@ -9,6 +9,11 @@ TX_BUILD_DIR=${TX_BUILD_DIR:-"$ROOT/build/radio-port-qemu"}
 RX_BUILD_DIR=${RX_BUILD_DIR:-"$ROOT/build/radio-rx-port-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
 RUN_SECONDS=${1:-5}
+# This is a QEMU TCG startup convention, not a modeled silicon clock.  A
+# smaller round-robin quantum lets the receiver arm before the peer's one-shot
+# advertiser starts; the trace-order assertion below makes that prerequisite
+# explicit instead of relying on an RF-medium packet queue.
+ICOUNT_SHIFT=${ICOUNT_SHIFT:-1}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
 
@@ -22,7 +27,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 
 "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount shift=5 -d guest_errors \
+    -display none -monitor none -icount "shift=$ICOUNT_SHIFT" -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
@@ -64,6 +69,17 @@ printf '%s\n' "$console" | grep -E '^(bt_enable|scan_callback_register|scan_star
 
 if ! grep -q 'RAC.CMD=0x00000001' "$RUNTIME_DIR/radio.trace"; then
     echo "radio-dual-e2e: advertiser did not reach RAC TXEN" >&2
+    exit 1
+fi
+
+rx_arm_line=$(grep -n 'addr=0xa8021008 value=0x00000002' "$RUNTIME_DIR/radio.trace" |
+    head -1 | cut -d: -f1)
+tx_snapshot_line=$(grep -n 'TX snapshot sequence=' "$RUNTIME_DIR/radio.trace" |
+    head -1 | cut -d: -f1)
+if [ -z "$rx_arm_line" ] || [ -z "$tx_snapshot_line" ] ||
+   [ "$rx_arm_line" -ge "$tx_snapshot_line" ]; then
+    echo "radio-dual-e2e: scanner RX arm did not precede advertiser snapshot" >&2
+    echo "radio-dual-e2e: set ICOUNT_SHIFT only for QEMU startup scheduling; this is not silicon timing" >&2
     exit 1
 fi
 
