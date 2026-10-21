@@ -308,6 +308,16 @@ direct PDU-delivery condition. The meaning of record byte `+2`, its payload
 framing, and which dispatched result represents a CRC-valid BLE packet remain
 unrecovered.
 
+The deferred call is descriptor release, not an RX-client callback. `0x296a6`
+calls `0x29574` only for a retained, untagged record pointer, then clears the
+saved pointer (`0x296a8..0x296b8`). The release marks descriptor word `+0`
+with bit 15, writes its low 13 bits to BUFC `0xaa000058`, acknowledges BUFC
+`0x40000`, and updates queue state (`0x29574..0x2963c`). The generic event
+processing call is instead `0x27b3e` at `0x28b1e..0x28b24`, before release;
+it reaches `0x1e39c` after masking its event sets. That call is shared with
+non-RX paths, so it is a next trace target—not evidence that a Bluetooth
+receive callback has already run.
+
 The open port consequently binds `LL_RADIO_IRQn` to direct `FRC_IRQn` and enables only `FRC.IEN.TXDONE|RXDONE` during `radio_setup()`. The generated revB2 model places `IEN` at `+0x06C`, exposes the standard SET alias, and names those two bits (`FRC_S_register.py:684-704`, `FRC_S_field.py:1197-1254`). This is deliberately narrower than the vendor handler: it gives the existing `radio_is_done()` completion policy an identical IRQ source, without treating an arbitrary sequencer, buffer, error, or RAC state flag as successful completion. It does not establish receive production or the rest of RAIL's packet-state dispatch.
 
 The generic OpenISA LLL, not the radio HAL, installs and enables this route: `lll_init()` uses `IRQ_CONNECT(LL_RADIO_IRQn, ..., isr_radio, NULL, 0)` then enables `LL_RADIO_IRQn` (`lll/lll.c:142-155`). Since this port maps that macro to `FRC_IRQn` (`include/hal/efr32/ll_irqs.h:14-18`), `radio_isr_set()` only swaps the callback parameter and `isr_radio()` invokes it. The FRC enable policy above confines that callback path to TXDONE/RXDONE in this port; it does not make any other FRC source a completion.
