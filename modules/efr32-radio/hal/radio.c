@@ -1592,14 +1592,33 @@ void *radio_pkt_scratch_get(void)
 	return pkt_scratch;
 }
 
-/* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
+/*
+ * OpenISA's radio_switch_complete_and_tx() is called in two distinct
+ * contexts: before radio_tmr_start() during event setup, and from the
+ * packet-complete ISR for an RX/TX turn-around (see its radio.c:231-233,
+ * 350-354, and 937-945).  The latter does not issue RAC.CMD immediately.
+ * It records the next sequencer command and, after the packet-end capture,
+ * programs T1 for end + TIFS - warmup.  A conforming EFR32 implementation
+ * therefore needs all of these state inputs before it can arm a switch:
+ *
+ *   - a source-backed packet-end timestamp;
+ *   - the requested TIFS interval; and
+ *   - PHY-specific RX/TX warm-up/chain-delay values and a proven
+ *     PROTIMER-to-RAC command path.
+ *
+ * This port currently has only the BURTC event-start alarm.  The end-capture
+ * API records a request (radio_tmr_end_capture()), but no captured timestamp
+ * is available, and QEMU models no autonomous TIFS sequencer.  Do not turn
+ * this into an immediate RAC command: that would change the OpenISA
+ * packet-complete contract and would not be evidence-consistent.
+ */
 void radio_switch_complete_and_rx(uint8_t phy_rx)
 {
 	ARG_UNUSED(phy_rx);
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
-/* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
+/* See radio_switch_complete_and_rx() for the bounded implementation contract. */
 void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_tx,
 				  uint8_t flags_tx)
 {

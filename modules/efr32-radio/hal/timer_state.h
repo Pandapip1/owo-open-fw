@@ -16,8 +16,16 @@ struct efr32_radio_timer_state {
 	uint32_t start_tick;
 	uint32_t tifs_us;
 	uint32_t saved_aa;
+	/*
+	 * A TIFS switch needs a packet-end timestamp.  The current EFR32 port
+	 * can request a capture, but has no source-backed way to populate this
+	 * value, so end_tick_valid remains false until that hardware contract is
+	 * established.
+	 */
+	uint32_t end_tick;
 	bool aa_capture_requested;
 	bool end_capture_requested;
+	bool end_tick_valid;
 };
 
 void efr32_radio_timer_state_init(struct efr32_radio_timer_state *state);

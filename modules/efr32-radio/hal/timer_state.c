@@ -17,6 +17,7 @@ void efr32_radio_timer_state_status_reset(struct efr32_radio_timer_state *state)
 	 */
 	state->aa_capture_requested = false;
 	state->end_capture_requested = false;
+	state->end_tick_valid = false;
 }
 
 void efr32_radio_timer_state_tifs_set(struct efr32_radio_timer_state *state,
