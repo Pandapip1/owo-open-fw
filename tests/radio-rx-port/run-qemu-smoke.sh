@@ -26,16 +26,31 @@ fi
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-rx-port-qemu-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 
-set +e
-timeout --kill-after=1s "$RUN_SECONDS" "$QEMU_BIN" -M efr32bg22,flash="$IMAGE" \
+"$QEMU_BIN" -M efr32bg22,flash="$IMAGE" \
     -display none -monitor none -icount shift=5 -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
     -trace file="$RUNTIME_DIR/radio.trace" \
-    >"$RUNTIME_DIR/guest.log" 2>&1
+    >"$RUNTIME_DIR/guest.log" 2>&1 &
+qemu_pid=$!
+(
+    sleep "$RUN_SECONDS"
+    kill -TERM "$qemu_pid" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$qemu_pid" 2>/dev/null || true
+) &
+watchdog_pid=$!
+
+set +e
+wait "$qemu_pid"
 status=$?
 set -e
+kill "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
+if [ "$status" -eq 143 ] || [ "$status" -eq 137 ]; then
+    status=124
+fi
 if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     sed -n '1,80p' "$RUNTIME_DIR/guest.log" >&2
     exit "$status"
