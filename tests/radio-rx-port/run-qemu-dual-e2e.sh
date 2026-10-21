@@ -83,6 +83,21 @@ if [ -z "$rx_arm_line" ] || [ -z "$tx_snapshot_line" ] ||
     exit 1
 fi
 
+# A connectable advertiser must return from its first TX completion and launch
+# a later advertising event.  Require a second snapshot after the first RAC
+# TX->OFF transition; this remains a QEMU/Zephyr scheduler contract, not a
+# claim about silicon airtime.
+tx_off_line=$(grep -n 'RAC state 9 -> 0' "$RUNTIME_DIR/radio.trace" |
+    head -1 | cut -d: -f1)
+second_tx_snapshot_line=$(awk -v start="${tx_off_line:-0}" '
+    NR > start && /TX snapshot sequence=/ { print NR; exit }
+' "$RUNTIME_DIR/radio.trace")
+if [ -z "$tx_off_line" ] || [ -z "$second_tx_snapshot_line" ]; then
+    echo "radio-dual-e2e: advertiser did not launch a second TX after completion" >&2
+    grep -E 'RAC state|TX snapshot' "$RUNTIME_DIR/radio.trace" >&2 || true
+    exit 1
+fi
+
 if ! grep -Eq 'TX snapshot RX mailbox offers=[1-9][0-9]*' "$RUNTIME_DIR/radio.trace"; then
     echo "radio-dual-e2e: advertiser snapshot produced no positive RF-medium offer" >&2
     echo "radio-dual-e2e: current blocker is TX completion retiring the active transaction before peer RXSEARCH" >&2
