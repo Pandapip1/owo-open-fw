@@ -371,6 +371,19 @@ does explicitly clear and enable IRQ36 at `0x29a3a..0x29a50`; the provisioning
 blocked native boot has not reached that helper, so this does not establish
 that FRC, BUFC, or RAC NVIC enables have occurred in that stalled run.
 
+The shared-dispatch statement is direct instruction evidence, not just a
+matching handler shape: the first instruction at the installed BUFC,
+FRC_PRI, MODEM, PROTIMER, and RAC_SEQ entries is respectively `b.n 0x2865c`
+at `flash-stock.bin:0x28b9c`, `:0x28b9e`, `:0x28bc4`, `:0x28ba0`, and
+`:0x28ba2`.  FRC IRQ34's vector already names `0x2865c` itself.  Thus those
+six vector routes enter one dispatcher before it reads any FRC/BUFC/AGC
+pending register.  This proves installed control flow only: it neither proves
+that an NVIC line was enabled in the observed stalled boot nor assigns an RX
+meaning to any pending bit.  In contrast, IRQ31 begins an AGC-only
+mask/acknowledge sequence at `0x28bc6`, IRQ37 begins its separate RAC state
+path at `0x28ba4`, and IRQ39 begins a separate RDMAILBOX mask/acknowledge
+path at `0x28c0e` (all offsets are bytes in `flash-stock.bin`).
+
 The stock handler separates FRC status acknowledgement from descriptor
 delivery. It computes and W1C-acknowledges the entire enabled FRC pending mask
 at `0x28660..0x28672`, but its direct FRC branches test bits 16, 2, and 14
