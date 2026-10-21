@@ -1378,6 +1378,19 @@ static inline bool efr32_qemu_rx_descriptor_pending(void)
 		EFR32_BUFC_DESCRIPTOR_PENDING);
 }
 
+/*
+ * The descriptor ring is a QEMU-only circular FIFO. Keep its logical
+ * consumer pointer visible to the model as each record is consumed; without
+ * this acknowledgement, the model reports a full 512-byte ring after 64
+ * eight-byte records even though the scheduler has delivered them all.
+ */
+static inline void efr32_qemu_rx_descriptor_ack(uint16_t offset)
+{
+	*radio_reg32(EFR32_BUFC_BASE +
+		EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET + EFR32_BUFC_READOFFSET_OFFSET) =
+		offset & EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
+}
+
 static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -1421,6 +1434,8 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 			}
 			efr32_qemu_rx_descriptor.descriptor_read_offset =
 				efr32_radio_rx_descriptor_ring_advance(descriptor_offset);
+			efr32_qemu_rx_descriptor_ack(
+				efr32_qemu_rx_descriptor.descriptor_read_offset);
 
 			parse_err = efr32_radio_rx_descriptor_parse(raw, &descriptor);
 			if (parse_err) {
@@ -1508,6 +1523,7 @@ static void efr32_radio_qemu_rx_descriptor_setup(void)
 		(uint32_t)(uintptr_t)efr32_qemu_rx_descriptor_ring_storage;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_WRITEOFFSET) = 0U;
+	efr32_qemu_rx_descriptor_ack(0U);
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_DESCRIPTOR_THRESHOLD;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_SET_OFFSET +

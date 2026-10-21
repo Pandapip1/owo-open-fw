@@ -197,7 +197,8 @@ interval to contain exactly the normalized BLE header plus its length-selected
 payload before copying and releasing channel 1.
 
 The descriptor consumer keeps BUFC channel-2 `WRITEOFFSET` as its logical
-13-bit producer pointer, while masking only the guest-memory slot at the
+13-bit producer pointer and acknowledges each consumed record through
+channel-2 `READOFFSET`, while masking only the guest-memory slot at the
 configured 512-byte backing-ring boundary. This distinction matters after the
 64th eight-byte record: the physical slot wraps to zero, but producer/consumer
 equality must remain in the 13-bit pointer domain so a new record is not
