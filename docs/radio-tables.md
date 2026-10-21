@@ -734,8 +734,11 @@ routes BUFC bit 18 (`0x40000`) to the descriptor helper; the compatible public
 header names it `BUF2THR` (`efr32mg21_bufc.h:290-309`). It later clears only
 the sparse threshold positions `2,10,18,26` together. QEMU consequently
 keeps channel-1 payload storage and channel-2 descriptor-ring register latches
-separate, with a focused regression for the documented channel-2 setup; it
-does not fabricate hardware descriptor production.
+separate, with a focused regression for the documented channel-2 setup. Its
+in-process RF-medium test seam may additionally enqueue a record only after a
+guest configures channel 2 with a nonzero encoded capacity and backing address;
+that conditional enqueue is explicitly a QEMU convention, not a model of the
+unidentified hardware descriptor producer.
 
 The archive also bounds exactly what a normal producer would need to supply,
 without identifying that producer. `RAIL_GetRxPacketInfo` at archive
@@ -761,6 +764,25 @@ The eight-byte stock ring and separate channel-1 FIFO therefore match that
 public abstraction. The entry remains opaque, however, so this compatible
 API-level correlation does not prove its xG22 field encoding or producer
 trigger.
+
+The QEMU-only successful-RX convention is deliberately smaller than a silicon
+claim. Once its in-process medium has copied all offered bytes to BUFC channel
+1, and only when that explicit channel-2 configuration is present, it writes
+one eight-byte channel-2 record before it raises QEMU's already-synthetic FRC
+`RXDONE`: byte 0 is the low byte of the resulting channel-1 write endpoint,
+byte 1 carries endpoint bits 8..12, byte 2 is `0x06`, and bytes 3..7 are zero.
+The endpoint packing and byte-2 class position are grounded in the stock
+consumer at archive `[0x33a5c,0x33bc0)` above; the stock class-dispatch table
+at `flash-stock.bin` file offsets `0x28850..0x28856` maps classes 6 and 7 to
+the received-packet event. Selecting class 6, zeroing byte 3 and the reserved
+tail, making configured channel 2 the enable condition, and ordering the
+record before synthetic `RXDONE` are QEMU test conventions only. In
+particular, they establish neither silicon producer timing, normal metadata,
+BLE framing, CRC/trailer state, nor an IRQ/completion contract. The native
+dual-SoC qtest exercises both paths: an unconfigured channel 2 remains
+raw-byte-only, while the configured path observes the record and threshold
+before it observes `RXDONE`; it is a regression for this simulator boundary,
+not hardware validation.
 
 The public RAIL archive adds a narrow runtime observation for sync-word programming. In `librail_efr32xg22_gcc_release.a(rail_ble_rf_hal.o)`, section `.text.sli_rail_51695f5143b2a4311e2362c17f8fac96` starts at object file offset `0x334`. At section-relative `+0x4a..+0x5c`, it constructs a three-word configuration record with target `0xA8014068` and a source word loaded from its third argument at `+0x0c`. The generated model names that 32-bit target `MODEM.SYNC0.SYNC0` (`MODEM_S_field.py:1167-1174`); the public BLE table independently labels the same offset `MODEM.SYNC0` (`ble_efr32xg22_configurator_out.c:275-276`). QEMU retains this register and its 32-bit public mask.
 
