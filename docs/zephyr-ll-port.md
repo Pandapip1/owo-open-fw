@@ -282,6 +282,14 @@ returns zero and the native trace contains the HAL's software RX arm write,
 that a byte in QEMU's BUFC seam is a Bluetooth PDU, nor that a host RX callback,
 descriptor, CRC, or over-air receive path has completed.
 
+The full hardware-output configuration has an explicit RAM gate. After a
+`build/ram-probe` build, run `scripts/check-hardware-ram.sh`; it reads the
+linker map's complete `_image_ram_size` allocation rather than the incomplete
+section totals from `size`, and rejects use above 31,000 bytes. This reserves
+at least 1,760 bytes from the BG22 usable 32,760-byte RAM region for future
+radio work and prevents a nominally linking image from silently eroding its
+safety margin.
+
   The abort callback ownership rule has a separate host-only regression test;
   it needs neither QEMU nor radio MMIO and verifies that replacing an OpenISA
   callback cancels a previously pended abort before that abort can reach the
