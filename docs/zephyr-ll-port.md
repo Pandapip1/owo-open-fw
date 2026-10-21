@@ -196,6 +196,14 @@ ISR, accepts only descriptor classes 6/7, and uses the descriptor word-0 low
 interval to contain exactly the normalized BLE header plus its length-selected
 payload before copying and releasing channel 1.
 
+The descriptor consumer keeps BUFC channel-2 `WRITEOFFSET` as its logical
+13-bit producer pointer, while masking only the guest-memory slot at the
+configured 512-byte backing-ring boundary. This distinction matters after the
+64th eight-byte record: the physical slot wraps to zero, but producer/consumer
+equality must remain in the 13-bit pointer domain so a new record is not
+mistaken for an empty ring or replayed as stale data. The host contract test
+drains 65 records across that boundary and checks every record exactly once.
+
 For this QEMU-only seam, a successfully normalized class-6/7 record is also
 the synthetic CRC-success result. The worker marks that result before
 re-enabling FRC completion, so the existing scheduler-owned FRC callback sees

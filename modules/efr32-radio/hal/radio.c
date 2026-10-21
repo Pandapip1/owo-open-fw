@@ -1219,7 +1219,7 @@ static inline volatile uint8_t *efr32_qemu_rx_descriptor_ring(void)
 static inline uint8_t efr32_qemu_rx_descriptor_ring_byte(
 	volatile uint8_t *ring, uint16_t offset)
 {
-	return ring[offset & EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_MASK];
+	return ring[efr32_radio_rx_descriptor_ring_storage_offset(offset)];
 }
 
 static inline bool efr32_qemu_rx_descriptor_pending(void)
@@ -1270,8 +1270,7 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 					ring, descriptor_offset + index);
 			}
 			efr32_qemu_rx_descriptor.descriptor_read_offset =
-				(descriptor_offset + EFR32_RADIO_RX_DESCRIPTOR_BYTES) &
-				EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
+				efr32_radio_rx_descriptor_ring_advance(descriptor_offset);
 
 			parse_err = efr32_radio_rx_descriptor_parse(raw, &descriptor);
 			if (parse_err) {

@@ -28,6 +28,10 @@
 #define EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_MASK \
 	(EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES - 1U)
 
+_Static_assert((EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES %
+		EFR32_RADIO_RX_DESCRIPTOR_BYTES) == 0U,
+	"descriptor ring must contain whole records");
+
 struct efr32_radio_rx_descriptor {
 	uint16_t endpoint;
 	uint8_t event_class;
@@ -73,10 +77,30 @@ static inline uint16_t efr32_radio_rx_descriptor_distance(uint16_t read,
 	return (endpoint - read) & EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
 }
 
+/*
+ * BUFC WRITEOFFSET is a logical 13-bit producer pointer.  The configured
+ * channel-2 backing store is only 512 bytes, so its physical slot wraps at
+ * the ring capacity. Keep those domains separate: the pointer is used for
+ * producer/consumer equality, while this helper is used only for indexing
+ * guest memory. Channel-1 packet endpoints continue to use the 13-bit
+ * endpoint mask above.
+ */
+static inline uint16_t efr32_radio_rx_descriptor_ring_storage_offset(
+	uint16_t pointer)
+{
+	return pointer & EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_MASK;
+}
+
+static inline uint16_t efr32_radio_rx_descriptor_ring_advance(uint16_t pointer)
+{
+	return (uint16_t)((pointer + EFR32_RADIO_RX_DESCRIPTOR_BYTES) &
+		EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK);
+}
+
 static inline uint8_t efr32_radio_rx_descriptor_fifo_byte(
 	const uint8_t *fifo, uint16_t offset)
 {
-	return fifo[offset & EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_MASK];
+	return fifo[efr32_radio_rx_descriptor_ring_storage_offset(offset)];
 }
 
 /*

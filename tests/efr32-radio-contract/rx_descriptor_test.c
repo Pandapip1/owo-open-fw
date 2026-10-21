@@ -48,5 +48,37 @@ int main(void)
 	assert(efr32_radio_rx_descriptor_normalize_pdu(target, fifo, 510U,
 			0x20U, 2U, &bytes) == -EMSGSIZE);
 
+	/*
+	 * The descriptor producer pointer is 13-bit, while its 512-byte backing
+	 * store wraps every 64 records. Drain each record as it arrives and verify
+	 * that the first post-wrap record uses slot zero without replaying an old
+	 * slot or skipping a record.
+	 */
+	{
+		uint8_t ring[EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES] = { 0 };
+		uint16_t producer = 0U;
+		uint16_t consumer = 0U;
+		unsigned int next_record = 0U;
+
+		for (unsigned int record = 0U; record < 65U; record++) {
+			ring[efr32_radio_rx_descriptor_ring_storage_offset(producer)] =
+				(uint8_t)record;
+			producer = efr32_radio_rx_descriptor_ring_advance(producer);
+
+			while (consumer != producer) {
+				assert(ring[efr32_radio_rx_descriptor_ring_storage_offset(
+					consumer)] == (uint8_t)next_record);
+				consumer = efr32_radio_rx_descriptor_ring_advance(consumer);
+				next_record++;
+			}
+		}
+
+		assert(next_record == 65U);
+		assert(producer == 65U * EFR32_RADIO_RX_DESCRIPTOR_BYTES);
+		assert(consumer == producer);
+		assert(efr32_radio_rx_descriptor_ring_storage_offset(
+			producer) == EFR32_RADIO_RX_DESCRIPTOR_BYTES);
+	}
+
 	return 0;
 }
