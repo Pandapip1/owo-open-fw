@@ -8,7 +8,9 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TX_BUILD_DIR=${TX_BUILD_DIR:-"$ROOT/build/radio-port-qemu"}
 RX_BUILD_DIR=${RX_BUILD_DIR:-"$ROOT/build/radio-rx-port-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
-RUN_SECONDS=${1:-5}
+# With one delivery per fresh transaction, allow enough modeled advertising
+# events to cross the 512-byte descriptor ring without replaying an active TX.
+RUN_SECONDS=${1:-10}
 # A 512-byte synthetic descriptor ring with eight-byte records wraps after
 # 64 records.  Keep this assertion bounded and overridable for slower hosts;
 # the default proves that the Zephyr consumer actually drains past one full
