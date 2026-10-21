@@ -563,11 +563,21 @@ The public `RAIL_RX_OPTION_REMOVE_APPENDED_INFO` is bit 4
 it updates active-handle `+0x90` and writes FRC `+0x054` with zero when that
 option is selected or 27 when it is clear. This proves the current RAIL
 library's hardware-observable option handling, not the stock firmware's
-choice. The currently located stock `FRC+0x054` literals at file offsets
-`0x1f7dc`, `0x28d68`, and `0x298a8` are read sites only; no literal-backed
-stock store or `RAIL_ConfigRxOptions` call has been established. Computed
-address writes remain possible, so absence of a located store is not evidence
-for either option state. A fresh bounded 25-second native-QEMU stock run
+choice. The complete stock-image little-endian word scan finds the secure
+`FRC+0x054` literal only at file offsets `0x1f7dc`, `0x28d68`, and `0x298a8`;
+it finds no normal, SET, CLR, or TGL alias literal for either secure or
+non-secure FRC. Their recovered uses are reads: instruction `0x1f31e` loads
+`0x1f7dc`, then `0x1f322` reads `[r0]`; `0x2889e` loads `0x28d68`, then
+`0x288a2` reads `[r1]`; and `0x297c8` loads `0x298a8`, then `0x297ca` reads
+`[r1]`. The fourth use of `0x28d68`, from `0x28660`, accesses only FRC
+`+0x14/+0x18` (`IF/IEN`). The sole nearby helper candidate passes
+`0xA800404c` at `0x1ea1c` to `0x1e22a`, which adds `0x2000` and stores to the
+`RXCTRL` SET alias `0xA800604c`, not to the trailer. Nearby FRC base literals
+`0xA8004040/4048/404c/4050` likewise have no recovered `+0x54` store. Thus no
+literal-backed stock store
+or `RAIL_ConfigRxOptions` call has been established. Computed-address writes
+or opaque helper use remain possible, so this absence is not evidence for
+either option state. A fresh bounded 25-second native-QEMU stock run
 likewise observed 19 radio writes but none to secure/non-secure `FRC+0x054` or
 its SET/CLR/TGL aliases; the temporary trace was discarded after inspection.
 That bounds the currently stalled pre-provisioning path only—it does not prove
