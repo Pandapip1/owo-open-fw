@@ -44,32 +44,36 @@ config EFR32_RADIO_STUB_REGISTERS
 
 config EFR32_RADIO_LL_STACK_SIZE
 	int "Lower link layer thread stack size"
-	default 1024
+	default 800
 	help
 	  Stack of the thread that runs the LLL and ULL contexts: the ticker and
 	  the mayflies (hal/ll_threads.c), work Zephyr's split controller otherwise
 	  runs in software interrupts. The contexts run one at a time; in the QEMU
 	  active-scan workload the ULL context peaked at 632 bytes and the LLL
-	  context at 136 bytes (thread analyzer). It shares one meta-IRQ priority
+	  context at 136 bytes (thread analyzer), so 800 leaves 32 bytes of
+	  headroom over that measured peak. It shares one meta-IRQ priority
 	  with the radio's persistent jobs (EFR32_LL_THREAD_PRIO).
 
 config EFR32_RADIO_LAUNCH_STACK_SIZE
 	int "Persistent radio TX/RX launch job stack size"
-	default 576
+	default 448
 	help
 	  TX and RX launch jobs only wait for a coalescing event latch, claim their generation,
 	  and perform the bounded radio arm write. They deliberately do not invoke
 	  controller callbacks. Keep their stacks separate from the
 	  completion job so its callback budget does not reserve RAM for both launch
 	  paths. Arming a wake-up through the scheduler clock service measures about
-	  300 bytes (-fstack-usage), plus up to 104 bytes of FP exception context.
+	  300 bytes (-fstack-usage), plus up to 104 bytes of FP exception context,
+	  so 448 leaves about 44 bytes of headroom.
 
 config EFR32_RADIO_COMPLETION_STACK_SIZE
 	int "Persistent radio completion job stack size"
-	default 640
+	default 512
 	help
 	  FRC completion work invokes the controller callback after leaving the
 	  interrupt context, so it retains a larger, independent stack budget.
+	  The dry ram-probe image ran the same completion path on a 512-byte
+	  stack.
 
 config EFR32_RADIO_QEMU_RX_DESCRIPTOR
 	bool "Enable the QEMU-only synthetic RX descriptor consumer"
