@@ -113,6 +113,54 @@ explicit that deadline ordering does not prove a job will meet a deadline
 (`vendor/zephyr/include/zephyr/kernel.h:1114-1141`).  Admission control,
 priority assignment, and bounded job work remain required.
 
+### Releases are not deadlines
+
+The current upstream timeout interface cannot implement an “arm too late, so
+run it now” policy by itself. `sys_clock_set_timeout(uint32_t ticks, bool
+idle)` receives only the earliest timeout delta (`kernel/timeout.c:126-172`),
+not a job identity, a preparation time, or a latest-completion bound. More
+importantly, `z_add_timeout()` deliberately rounds a relative timeout *up* by
+a tick so that it cannot fire before the requested interval
+(`kernel/timeout.c:181-217`). Making that timeout's blocked thread ready early
+would silently break the kernel's public timeout semantics.
+
+The needed generic scheduler abstraction is therefore a separately declared
+two-bound job request, rather than a radio exception or a new meaning for
+`k_sleep()`/`k_timer`:
+
+| Field | Meaning |
+| --- | --- |
+| `release` | Earliest time that running the CPU preparation is permitted. A job that is already released is runnable now. |
+| `deadline` | Latest useful completion/preparation time. It is not an instruction to defer execution until that instant. |
+| `emission` (optional) | A hardware-gated external action time. It must not be advanced merely because the CPU preparation job ran early. |
+
+The scheduler should run an eligible job immediately according to ordinary
+priority/deadline selection. A clock event is a last-chance wakeup only when
+the CPU has no selected runnable work and is about to idle; it is not a reason
+to keep an eligible job blocked while the CPU is active. This preserves normal
+preemption policy: making a job runnable asks the existing scheduler to choose
+it at the usual scheduling point and does not perform a manual context switch
+from an interrupt.
+
+Each selected clock-event backend must expose its minimum arm lead in the
+same physical-time domain as its compare operation. At idle entry the system
+timer compares `deadline - now` with that lead plus power-exit margin. If the
+remaining slack is shorter, it does **not** program an inevitably late
+compare: it leaves/marks the already-released preparation job runnable before
+idle. A receive-window preparation may safely take this path. A transmit job
+may prepare its FIFO/radio state early, but must not emit before its intended
+airtime without a separately proven hardware gate.
+
+This is deliberately not a new `sys_clock_set_timeout()` flag. That hook is
+also used to preserve ordinary timeout semantics while the CPU is running;
+`timeout.c` reprograms it whenever a newly inserted timeout becomes earliest.
+A future upstream implementation needs a scheduler-level release/deadline
+object and a clock-event capability interface, then can pass the selected
+idle wake request to the active or low-power backend. The backend capability
+must include at least arm lead, maximum arm span, power-state availability,
+and wake/exit latency; a tick count alone is insufficient for a 32-kHz/1-MHz
+handoff.
+
 Even a correct high-resolution scheduler cannot guarantee a *newly discovered*
 150-us radio turnaround: a packet-end IRQ leaves less than BURTC's 183-us
 write floor, and software dispatch/jitter consumes more budget.  If on-device
