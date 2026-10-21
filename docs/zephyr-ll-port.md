@@ -263,6 +263,25 @@ but intentionally does not forward them to a host character device
 available the script reports the queue state as unobserved rather than making
 that distinction falsely. Its repo-local temporary logs are cleaned on exit.
 
+`tests/radio-rx-port` is a separate, scanner-only Rust workload. Keeping it
+separate from `tests/radio-port` avoids allowing a scanner's timing to displace
+the advertiser from the bounded TX smoke. Its build and bounded run are:
+
+```sh
+nix develop . -c cmake -G Ninja -S tests/radio-rx-port -B build/radio-rx-port-qemu \
+  -DBOARD=bg22_ek4108a -DZEPHYR_BASE="$PWD/vendor/zephyr" \
+  -DZephyr_DIR="$PWD/vendor/zephyr/share/zephyr-package/cmake" \
+  -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust"
+nix develop . -c cmake --build build/radio-rx-port-qemu
+nix develop . -c tests/radio-rx-port/run-qemu-smoke.sh 3
+```
+
+The successful evidence boundary is intentionally narrow: `bt_le_scan_start`
+returns zero and the native trace contains the HAL's software RX arm write,
+`RAC.RXENSRCEN.SET.SWRXEN` (`0xa8021008 = 0x00000002`). It does **not** claim
+that a byte in QEMU's BUFC seam is a Bluetooth PDU, nor that a host RX callback,
+descriptor, CRC, or over-air receive path has completed.
+
   The abort callback ownership rule has a separate host-only regression test;
   it needs neither QEMU nor radio MMIO and verifies that replacing an OpenISA
   callback cancels a previously pended abort before that abort can reach the

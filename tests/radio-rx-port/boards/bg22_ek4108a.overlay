@@ -1,0 +1,25 @@
+/* Use Zephyr's split controller rather than Silicon Labs' binary controller. */
+&bt_hci_silabs {
+	status = "disabled";
+};
+
+&radio {
+	bt_hci_efr32: bt_hci_efr32 {
+		compatible = "zephyr,bt-hci-ll-sw-split";
+		status = "okay";
+	};
+};
+
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_efr32;
+	};
+
+	aliases {
+		ll-counter = &burtc0;
+	};
+};
+
+&burtc0 {
+	status = "okay";
+};
