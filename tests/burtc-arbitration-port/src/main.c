@@ -12,11 +12,13 @@
 #include <zephyr/drivers/counter/silabs_burtc.h>
 #include <zephyr/kernel.h>
 #include <zephyr/kernel/clock_event.h>
+#include <zephyr/kernel/deferred_release.h>
 #include <zephyr/sys/printk.h>
 
 static K_SEM_DEFINE(alarm_sem, 0, 1);
-static K_SEM_DEFINE(clock_event_sem, 0, 1);
 K_CLOCK_EVENT_DEFINE(clock_event);
+K_DEADLINE_EVENT_DEFINE(deferred_event);
+K_DEFERRED_RELEASE_DEFINE(deferred_release);
 
 static void alarm_callback(const struct device *dev, uint8_t chan_id,
 			   uint32_t ticks, void *user_data)
@@ -30,11 +32,10 @@ static void alarm_callback(const struct device *dev, uint8_t chan_id,
 	}
 }
 
-static void clock_event_callback(struct k_clock_event *event, void *user_data)
+static void unused_clock_event_callback(struct k_clock_event *event, void *user_data)
 {
 	ARG_UNUSED(event);
 	ARG_UNUSED(user_data);
-	k_sem_give(&clock_event_sem);
 }
 
 int main(void)
@@ -52,7 +53,9 @@ int main(void)
 		return 1;
 	}
 	if (counter_silabs_burtc_clock_event_init(counter, &clock_event,
-					   clock_event_callback, NULL) != 0) {
+					   unused_clock_event_callback, NULL) != 0 ||
+	    k_deferred_release_init(&deferred_release, &deferred_event,
+				    &clock_event) != 0) {
 		printk("burtc-arbitration: clock-event setup failed\n");
 		return 1;
 	}
@@ -73,7 +76,8 @@ int main(void)
 		printk("burtc-arbitration: alarm arm failed\n");
 		return 1;
 	}
-	if (k_clock_event_arm_abs(&clock_event, now + 48U) != 0) {
+	if (k_deferred_release_post(&deferred_release, now + 48U,
+				    K_DEADLINE(100U)) != 0) {
 		printk("burtc-arbitration: clock-event arm failed\n");
 		return 1;
 	}
@@ -84,7 +88,7 @@ int main(void)
 		printk("burtc-arbitration: callback missing\n");
 		return 1;
 	}
-	if (k_sem_take(&clock_event_sem, K_NO_WAIT) != 0) {
+	if (!deferred_event.pending) {
 		printk("burtc-arbitration: clock-event callback missing\n");
 		return 1;
 	}
