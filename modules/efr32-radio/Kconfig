@@ -66,4 +66,16 @@ config EFR32_RADIO_COMPLETION_STACK_SIZE
 	  FRC completion work invokes the controller callback after leaving the
 	  interrupt context, so it retains a larger, independent stack budget.
 
+config EFR32_RADIO_QEMU_RX_DESCRIPTOR
+	bool "Enable the QEMU-only synthetic RX descriptor consumer"
+	default n
+	help
+	  Enable the opt-in simulator seam that consumes BUFC channel-2 records
+	  (class 6/7), copies a bounded PDU from the channel-1 FIFO, and then
+	  allows the existing FRC completion callback to run. The normal EFR32
+	  hardware build must leave this disabled: the vendor descriptor producer,
+	  record validity, and RXDONE ordering are not established on silicon.
+	  This option is intended only for an explicitly configured in-tree QEMU
+	  test image.
+
 endif # BT_LLL_VENDOR_EFR32

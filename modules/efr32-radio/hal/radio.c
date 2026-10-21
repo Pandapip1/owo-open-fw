@@ -33,6 +33,9 @@
 #include "hal/debug.h"
 #include "packet_stage_lifecycle.h"
 #include "rx_pdu_delivery.h"
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+#include "rx_descriptor.h"
+#endif
 #include "timer_state.h"
 
 #include "util/mem.h"
@@ -144,6 +147,18 @@ static struct {
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
 
 static void efr32_radio_completion_job(void *a, void *b, void *c);
+
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+static void efr32_radio_qemu_rx_descriptor_isr(void *arg);
+static void efr32_radio_qemu_rx_descriptor_quiesce(void);
+static void efr32_radio_qemu_rx_descriptor_setup(void);
+static inline bool efr32_qemu_rx_descriptor_pending(void);
+K_SEM_DEFINE(efr32_qemu_rx_descriptor_sem, 0, 1);
+static struct {
+	uint16_t descriptor_read_offset;
+	bool descriptor_crc_valid;
+} efr32_qemu_rx_descriptor;
+#endif
 
 static void efr32_radio_tx_job(void *a, void *b, void *c)
 {
@@ -347,15 +362,22 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_BUFC_BASE 0xBA000000UL
 #define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
 #define EFR32_BUFC_RX_BASE_OFFSET 0x04CU
+#define EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET 0x08CU
 #define EFR32_BUFC_CFG_OFFSET 0x000U
 #define EFR32_BUFC_ADDR_OFFSET 0x004U
 #define EFR32_BUFC_WRITEOFFSET 0x008U
+#define EFR32_BUFC_READOFFSET_OFFSET 0x00CU
+#define EFR32_BUFC_WRITEDATA_OFFSET 0x018U
 #define EFR32_BUFC_THRESHOLD_OFFSET 0x024U
 #define EFR32_BUFC_CMD_OFFSET 0x028U
+#define EFR32_BUFC_IF_OFFSET 0x114U
+#define EFR32_BUFC_IEN_OFFSET 0x118U
 #define EFR32_BUFC_CMD_CLEAR 1U
 #define EFR32_BUFC_CMD_PREFETCH 2U
 #define EFR32_BUFC_FIFO_512_CONFIG 3U
 #define EFR32_BUFC_RX_THRESHOLD 0x0FFFU
+#define EFR32_BUFC_DESCRIPTOR_THRESHOLD 7U
+#define EFR32_BUFC_DESCRIPTOR_PENDING BIT(18)
 
 #define EFR32_RADIO_EN_OFFSET 0x004U
 
@@ -382,6 +404,9 @@ static void efr32_packet_stage_arm(enum efr32_radio_packet_direction direction)
 	if (direction == EFR32_RADIO_PACKET_RX) {
 		LL_ASSERT(efr32_packet_stage.rx_target != NULL);
 		LL_ASSERT(efr32_packet_stage.rx_fifo_configured);
+	#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+		efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
+	#endif
 	} else {
 		LL_ASSERT(direction == EFR32_RADIO_PACKET_TX);
 		LL_ASSERT(efr32_packet_stage.tx_source != NULL);
@@ -788,6 +813,24 @@ void isr_radio(void *arg)
 		completion_direction = EFR32_RADIO_PACKET_RX;
 	}
 
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	/*
+	 * The opt-in QEMU seam publishes its descriptor before retaining the
+	 * synthetic RXDONE latch. If BUFC is still pending, hold FRC completion
+	 * masked until the scheduler worker has copied/rejected that record. This
+	 * preserves the existing LLL callback ordering without assigning that
+	 * ordering to real EFR32 hardware.
+	 */
+	if (completion_direction == EFR32_RADIO_PACKET_RX &&
+	    (pending & EFR32_FRC_IF_RXDONE) &&
+	    efr32_qemu_rx_descriptor_pending()) {
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_RXDONE;
+		k_sem_give(&efr32_qemu_rx_descriptor_sem);
+		return;
+	}
+#endif
+
 	/* A stale or wrong-direction completion must not leave FRC_IRQn asserted. */
 	if ((pending & ~expected) || (!efr32_radio_abort.callback && pending)) {
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
@@ -853,6 +896,9 @@ static void efr32_radio_completion_quiesce(void)
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	k_irq_clear_pending(LL_RADIO_IRQn);
+	#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	efr32_radio_qemu_rx_descriptor_quiesce();
+	#endif
 
 	irq_unlock(key);
 }
@@ -910,6 +956,11 @@ void radio_setup(void)
 
 	/* Match OpenISA's initially available radio-clock contract. */
 	atomic_set(&efr32_radio_power_ref, 1);
+
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	/* The descriptor path is an explicit simulator-only test contract. */
+	efr32_radio_qemu_rx_descriptor_setup();
+#endif
 }
 
 /* [regs-vendor] Retain the source-backed reset prefix; see radio-tables.md §4.1. */
@@ -919,6 +970,11 @@ void radio_reset(void)
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	/* Do not carry a simulator descriptor or its synthetic CRC across reset. */
+	efr32_qemu_rx_descriptor.descriptor_read_offset = 0U;
+	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
+#endif
 	efr32_radio_completion_quiesce();
 
 	/*
@@ -1131,6 +1187,179 @@ static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
 	return 0;
 }
 
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+/*
+ * This is an explicitly synthetic receive boundary.  The worker is the only
+ * code that reads descriptor or FIFO bytes; the BUFC IRQ merely masks the
+ * source and wakes it.  That keeps packet copying and channel-1 release out
+ * of interrupt context and lets the existing FRC completion job remain the
+ * sole caller of the OpenISA LLL callback.
+ */
+static inline volatile uint8_t *efr32_qemu_rx_descriptor_ring(void)
+{
+	uint32_t address = *radio_reg32(EFR32_BUFC_BASE +
+		EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET + EFR32_BUFC_ADDR_OFFSET);
+
+	if (address == 0U) {
+		return NULL;
+	}
+
+	return (volatile uint8_t *)(uintptr_t)address;
+}
+
+static inline uint8_t efr32_qemu_rx_descriptor_ring_byte(
+	volatile uint8_t *ring, uint16_t offset)
+{
+	return ring[offset & EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_MASK];
+}
+
+static inline bool efr32_qemu_rx_descriptor_pending(void)
+{
+	return !!(*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_IF_OFFSET) &
+		EFR32_BUFC_DESCRIPTOR_PENDING);
+}
+
+static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	for (;;) {
+		volatile uint8_t *ring;
+		uint32_t fifo_address;
+		uint16_t write_offset;
+
+		k_sem_take(&efr32_qemu_rx_descriptor_sem, K_FOREVER);
+		ring = efr32_qemu_rx_descriptor_ring();
+		fifo_address = *radio_reg32(EFR32_BUFC_BASE +
+			EFR32_BUFC_RX_BASE_OFFSET + EFR32_BUFC_ADDR_OFFSET);
+		if (!ring || fifo_address != (uint32_t)(uintptr_t)efr32_rx_fifo ||
+		    efr32_packet_stage.lifecycle.active_direction != EFR32_RADIO_PACKET_RX) {
+			/* A stale synthetic event is not a packet. */
+			*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+				EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+			continue;
+		}
+
+		write_offset = *radio_reg32(EFR32_BUFC_BASE +
+			EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET + EFR32_BUFC_WRITEOFFSET) &
+			EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
+		while (efr32_qemu_rx_descriptor.descriptor_read_offset != write_offset) {
+			uint8_t raw[EFR32_RADIO_RX_DESCRIPTOR_BYTES];
+			struct efr32_radio_rx_descriptor descriptor;
+			uint8_t pdu[PDU_AC_LL_SIZE_MAX];
+			uint16_t pdu_bytes = 0U;
+			uint16_t descriptor_offset =
+				efr32_qemu_rx_descriptor.descriptor_read_offset;
+			int parse_err;
+			int pdu_err;
+
+			for (uint8_t index = 0U;
+			     index < EFR32_RADIO_RX_DESCRIPTOR_BYTES; index++) {
+				raw[index] = efr32_qemu_rx_descriptor_ring_byte(
+					ring, descriptor_offset + index);
+			}
+			efr32_qemu_rx_descriptor.descriptor_read_offset =
+				(descriptor_offset + EFR32_RADIO_RX_DESCRIPTOR_BYTES) &
+				EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
+
+			parse_err = efr32_radio_rx_descriptor_parse(raw, &descriptor);
+			if (parse_err) {
+				/* Non-received classes are queue events, never PDUs. */
+				continue;
+			}
+
+			pdu_err = efr32_radio_rx_descriptor_normalize_pdu(
+				pdu, efr32_rx_fifo,
+				(uint16_t)*radio_reg32(EFR32_BUFC_BASE +
+					EFR32_BUFC_RX_BASE_OFFSET + EFR32_BUFC_READOFFSET_OFFSET),
+				descriptor.endpoint, efr32_packet_stage.max_len, &pdu_bytes);
+			if (pdu_err || efr32_packet_stage_rx_complete(pdu, pdu_bytes)) {
+				efr32_rx_delivery_invalid = true;
+				continue;
+			}
+			/*
+			 * Class 6/7 is the synthetic QEMU success result. It stands in
+			 * for the missing hardware trailer/CRC producer and is never
+			 * enabled in a hardware configuration.
+			 */
+			efr32_qemu_rx_descriptor.descriptor_crc_valid = true;
+
+			/* The endpoint is the source-backed channel-1 release point. */
+			*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET +
+				EFR32_BUFC_READOFFSET_OFFSET) = descriptor.endpoint;
+		}
+
+		*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+		*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_SET_OFFSET +
+			EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+		/* Only now may a retained FRC.RXDONE wake the completion ISR. */
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+			EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	}
+}
+
+K_THREAD_DEFINE(efr32_qemu_rx_descriptor_thread,
+		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
+		efr32_radio_qemu_rx_descriptor_job, NULL, NULL, NULL,
+		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
+
+/* BUFC IRQ work is scheduler-owned; this ISR only masks and wakes. */
+static void efr32_radio_qemu_rx_descriptor_isr(void *arg)
+{
+	uint32_t pending;
+
+	ARG_UNUSED(arg);
+	pending = *radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_IF_OFFSET) &
+		*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_IEN_OFFSET);
+	if (!(pending & EFR32_BUFC_DESCRIPTOR_PENDING)) {
+		return;
+	}
+
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+	k_sem_give(&efr32_qemu_rx_descriptor_sem);
+}
+
+static void efr32_radio_qemu_rx_descriptor_setup(void)
+{
+	unsigned int key = irq_lock();
+
+	efr32_qemu_rx_descriptor.descriptor_read_offset = 0U;
+	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
+	k_sem_reset(&efr32_qemu_rx_descriptor_sem);
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
+		EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
+		EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
+		EFR32_BUFC_ADDR_OFFSET) = EFR32_RADIO_QEMU_RX_DESCRIPTOR_ROOT;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
+		EFR32_BUFC_WRITEOFFSET) = 0U;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
+		EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_DESCRIPTOR_THRESHOLD;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_SET_OFFSET +
+		EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+	IRQ_CONNECT(BUFC_IRQn, CONFIG_BT_CTLR_LLL_PRIO,
+			efr32_radio_qemu_rx_descriptor_isr, NULL, 0);
+	irq_enable(BUFC_IRQn);
+	irq_unlock(key);
+}
+
+static void efr32_radio_qemu_rx_descriptor_quiesce(void)
+{
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
+	k_irq_clear_pending(BUFC_IRQn);
+}
+#endif /* CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR */
+
 /*
  * [regs-partial] Configure only the source-backed BUFC TX staging FIFO.
  * FRC's consumption of that FIFO and sequencer handoff remain unproven (T5).
@@ -1287,6 +1516,9 @@ void radio_status_reset(void)
 	/* The LLL has sampled completion/CRC state before asking to clear it. */
 	(void)efr32_packet_lifecycle_status_reset(&efr32_packet_stage.lifecycle);
 	efr32_rx_delivery_invalid = false;
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
+#endif
 }
 
 /*
@@ -1338,6 +1570,11 @@ void radio_crc_configure(uint32_t polynomial, uint32_t iv)
  */
 uint32_t radio_crc_is_valid(void)
 {
+	#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	if (efr32_qemu_rx_descriptor.descriptor_crc_valid) {
+		return 1U;
+	}
+	#endif
 	return !efr32_rx_delivery_invalid &&
 	       !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) &
 		 EFR32_FRC_TRAILRXDATA_CRCOK);
