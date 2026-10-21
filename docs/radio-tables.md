@@ -204,6 +204,19 @@ power table or independently validated calibration/configuration contract, and
 QEMU should only model the resulting registers once that contract establishes
 their externally visible behavior.
 
+The public xG22 sources reinforce that boundary rather than supplying the
+missing decoder. `sl_rail_pa_power_setting_t` is explicitly an abstract
+32-bit setting decoded into one or more hardware register values
+(`sl_rail_types.h:2433`), while `sl_rail_tx_power_config_t` exposes PA mode,
+supply voltage, and ramp time but no register location
+(`sl_rail_types.h:2658-2677`). The 0 dBm and 6 dBm xG22 mapping tables contain
+opaque setting values (`sl_rail_util_pa_dbm_powersetting_mapping_table_0dbm.h:41-46`
+and `sl_rail_util_pa_dbm_powersetting_mapping_table_6dbm.h:41-46`), and the
+public conversion code returns one of those settings without performing a
+visible MMIO write (`pa_conversions_efr32.c:260-310`). Thus even a board-matched
+public PA table is not a documented PA-register decoder; it is not evidence
+for adding a guessed HAL write or QEMU register model.
+
 ### 3.3 Initialization does not recover reset sequencing [F]
 
 `RAIL_Init` is an 136-byte wrapper at archive file offset `0x149144` in
