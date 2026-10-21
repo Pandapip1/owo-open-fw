@@ -60,6 +60,7 @@ int main(void)
 		return 1;
 	}
 	if (k_clock_event_min_arm_cycles(&clock_event) != 6U ||
+	    k_clock_event_provider_select(K_CLOCK_EVENT_POWER_DEEP_SLEEP, 6U) == NULL ||
 	    counter_get_value(counter, &now) != 0 ||
 	    k_clock_event_arm_abs(&clock_event, now + 5U) != -ETIME) {
 		printk("burtc-arbitration: clock-event min lead invalid\n");
