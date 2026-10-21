@@ -690,8 +690,15 @@ not a substitute for that stock selection: its archive has SHA-256
 the stock image is a distinct stripped artifact. The public default leaves
 `REMOVE_APPENDED_INFO` clear (and does not request CRC storage), but stock may
 override it. In the archive's clear-option path, `0x1b` selects public
-`TRAILRXDATA` fields RSSI, CRCOK, and PROTIMER CC0 wrap-low/wrap-high—not CC0
-base or RTC stamp. None of those defaults or field names establishes the
+`TRAILRXDATA` fields RSSI, CRCOK, PROTIMER CC0 wrap-low/wrap-high, and
+`RTCSTAMP` (the generated rev-B1 xG22 model names these six one-bit fields at
+`host_py_rm_studio_internal/full/efr32xg22/revB1/FRC_NS_field.py:978-1038`; the
+register is `FRC_NS.TRAILRXDATA` at `+0x054`, reset `0`, writable mask
+`0x3f`, in `FRC_NS_register.py:498-507`). This is a stronger register-layout
+fact than the earlier abbreviated field list, but the generated names do not
+define what event populates any field or how the timestamp is scaled. In
+particular, it does not establish that `RTCSTAMP` is an EVENT_TMR value or
+that the PROTIMER CC0 fields identify packet end. None of those defaults or field names establishes the
 fully provisioned stock firmware's actual trailer policy.
 
 Archive call tracing adds no BLE-specific selection. Aside from the public
