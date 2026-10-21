@@ -289,6 +289,25 @@ does explicitly clear and enable IRQ36 at `0x29a3a..0x29a50`; the provisioning
 blocked native boot has not reached that helper, so this does not establish
 that FRC, BUFC, or RAC NVIC enables have occurred in that stalled run.
 
+The stock handler separates FRC status acknowledgement from descriptor
+delivery. It computes and W1C-acknowledges the entire enabled FRC pending mask
+at `0x28660..0x28672`, but its direct FRC branches test bits 16, 2, and 14
+only (`0x28708..0x28780`); it does not branch on FRC `RXDONE` bit 4 before the
+whole-mask acknowledgement. Conversely, BUFC pending bit 18 branches at
+`0x2883e..0x28846` to `0x29664`. That helper selects an eight-byte record from
+the software ring rooted at RAM `0x20001178` (literal at `0x29860`), advances
+the ring by eight bytes, writes the updated position to BUFC `0xaa0000b0`,
+acknowledges BUFC flag `0x40000` through `0xaa002114`, and publishes the
+selected record pointer at state `+0x08` (`0x29664..0x296a4`). Its return is
+the selected record's byte `+2` low three bits; the ISR dispatches values 1–7
+through the table at `0x28846..0x28880`. It subsequently invokes deferred
+record handling at `0x296a6` before clearing the BUFC pending mask
+(`0x28b28..0x28b36`). Thus BUFC channel-2 threshold is the concrete stock
+descriptor-delivery route; FRC `RXDONE` is not, on the current evidence, a
+direct PDU-delivery condition. The meaning of record byte `+2`, its payload
+framing, and which dispatched result represents a CRC-valid BLE packet remain
+unrecovered.
+
 The open port consequently binds `LL_RADIO_IRQn` to direct `FRC_IRQn` and enables only `FRC.IEN.TXDONE|RXDONE` during `radio_setup()`. The generated revB2 model places `IEN` at `+0x06C`, exposes the standard SET alias, and names those two bits (`FRC_S_register.py:684-704`, `FRC_S_field.py:1197-1254`). This is deliberately narrower than the vendor handler: it gives the existing `radio_is_done()` completion policy an identical IRQ source, without treating an arbitrary sequencer, buffer, error, or RAC state flag as successful completion. It does not establish receive production or the rest of RAIL's packet-state dispatch.
 
 The generic OpenISA LLL, not the radio HAL, installs and enables this route: `lll_init()` uses `IRQ_CONNECT(LL_RADIO_IRQn, ..., isr_radio, NULL, 0)` then enables `LL_RADIO_IRQn` (`lll/lll.c:142-155`). Since this port maps that macro to `FRC_IRQn` (`include/hal/efr32/ll_irqs.h:14-18`), `radio_isr_set()` only swaps the callback parameter and `isr_radio()` invokes it. The FRC enable policy above confines that callback path to TXDONE/RXDONE in this port; it does not make any other FRC source a completion.
