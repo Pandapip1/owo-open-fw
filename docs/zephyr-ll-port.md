@@ -234,6 +234,20 @@ QEMU-only scheduler seam; it does not claim an EFR32 packet-end timestamp,
 PROTIMER compare, RAC sequencer latency, or silicon HCTO behavior, and the
 option remains disabled for hardware builds.
 
+Active scanning has the opposite-looking ordering. The OpenISA scanner records
+TX as the *next* sequencer action while setting up its initial RX
+(`lll_scan.c:176-180`). On a received packet, the RV32M1 reference consumes
+that recorded action and programs T1 for packet-end plus TIFS minus warm-up
+before its LLL callback (`hal/RV32M1/radio/radio.c:233-272,388-395`). The
+callback then clears completion status (`lll_scan.c:367-387`; `lll.c:464-473`),
+stages `SCAN_REQ`, and records RX as the following action
+(`lll_scan.c:882-947`). Because this port deliberately defers the LLL callback
+to a scheduler thread, its QEMU-only path must rendezvous a generation-guarded
+prepared `SCAN_REQ` with a bounded scheduler job after that callback. It must
+not treat the later `radio_switch_complete_and_rx()` call as an RX launch or
+claim silicon-accurate 150-us timing. `radio_disable()`, `radio_tmr_stop()`,
+reset, and `radio_switch_complete_and_disable()` cancel that generation.
+
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
