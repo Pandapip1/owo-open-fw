@@ -16,6 +16,10 @@ config BT_LLL_VENDOR_EFR32
 	# subsystem so the devicetree-enabled Silabs BURTC driver is linked in both
 	# the dry-run/QEMU profile and the hardware-output profile.
 	select COUNTER
+	# The radio launch and QEMU TIFS dispatchers each bind a BURTC clock-event
+	# client; the driver continues to arbitrate both with the system clock.
+	select COUNTER_SILABS_BURTC_CLOCK_EVENT
+	select CLOCK_EVENT
 	select BT_CTLR_ENTROPY_SUPPORT
 	select BT_CTLR_CRYPTO_SUPPORT
 	select BT_CTLR_LE_ENC_SUPPORT if BT_CTLR_CRYPTO_SUPPORT && !BT_CTLR_DATA_LENGTH_CLEAR

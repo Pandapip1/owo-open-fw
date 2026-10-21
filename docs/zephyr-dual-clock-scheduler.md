@@ -29,26 +29,35 @@ only by tests. `k_deferred_release_post_selected()` selects a registered
 provider (`vendor/zephyr/kernel/deferred_release.c:75-128`), and the BURTC
 driver registers its provider only when
 `CONFIG_COUNTER_SILABS_BURTC_CLOCK_EVENT` is enabled
-(`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:604-614`). The
-arbitration test enables that option together with `CLOCK_EVENT` and
-`DEFERRED_RELEASE` (`tests/burtc-arbitration-port/prj.conf:9-12`) and calls
-the selected-release API (`tests/burtc-arbitration-port/src/main.c:81-83`).
+(`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:647`). The
+arbitration test binds two clock events directly to BURTC
+(`tests/burtc-arbitration-port/src/main.c:79-82`); selection is covered by
+`vendor/zephyr/tests/kernel/deferred_release`.
 The production configuration enables tickless mode and PM
-(`prj.conf:43-49`), but does not enable that provider or deferred release.
+(`prj.conf:43-49`); the radio module selects the BURTC clock-event provider
+(`modules/efr32-radio/Kconfig:19-22`) but not deferred release.
 
-Production radio launch scheduling remains on the explicit `cntr.c` BURTC
-Counter/CC0 mux: `cntr_radio_cmp_set()` records and programs the absolute
-radio compare (`modules/efr32-radio/hal/cntr.c:43-65,154-169`), and its alarm
-callback makes the persistent RX or TX job runnable only after expiry
-(`modules/efr32-radio/hal/cntr.c:72-100`; `hal/radio.c:363-425`). This is not
-an implicit use of the generic provider selector.
+Radio launch and the QEMU TIFS release are two independent BURTC clock events
+bound directly to the BURTC device (`modules/efr32-radio/hal/cntr.c:38-39,
+134-135`); only the LL ticker still uses the Counter alarm. The BURTC driver is
+the single owner of `COMP` and arbitrates the system clock, the Counter alarm
+and its clock-event clients (`counter_silabs_rearm_compare()`,
+`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:107`). Because `COMP` is
+shared, a latched `COMP` flag only says that *some* client matched: the ISR
+delivers each client only once its own deadline has passed (`:712`), a client
+already due without its own match is delivered by pending the IRQ rather than
+by writing a past `COMP` (`:163`), and only the programmed `COMP` value is
+clamped to the six-cycle LFSYNC floor. Delivering on the flag alone released
+the ticker alarm early after a cancelled clock event's match, which the radio
+then dropped; `tests/burtc-arbitration-port` covers that case.
 
-Do not wire selected deferred release into that path until two facts are made
-explicit. First, one owner must arbitrate BURTC `COMP`: the generic provider
-also shares it with the Counter API and system clock
-(`vendor/zephyr/drivers/counter/Kconfig.silabs:74-82`), so it cannot be added
-alongside the existing direct Counter-alarm mux. Second, the caller must have
-a documented PM-policy mapping from its requested wake work to the
+The QEMU dual-endpoint harnesses run with `-icount shift=5,sleep=off`. With
+the default `sleep=on`, idle virtual time follows host time and BURTC compares
+were delivered 35-42 LF cycles (about 1.2 ms) late, which looked like missed
+scheduler deadlines.
+
+Provider *selection* is still not used by the radio. Before it is, the
+caller must have a documented PM-policy mapping from its requested wake work to the
 `K_CLOCK_EVENT_POWER_ACTIVE` or `K_CLOCK_EVENT_POWER_DEEP_SLEEP` capability.
 The default PM policy selects a Zephyr `pm_state` from idle residency and
 state availability (`vendor/zephyr/subsys/pm/policy/policy_default.c:12-49`);
