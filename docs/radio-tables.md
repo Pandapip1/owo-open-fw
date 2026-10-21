@@ -501,6 +501,24 @@ the raw latch. The public TXDONE bit assignment therefore remains the safe
 basis for the open port's narrow completion path, while this archive trace
 supplies the stock acknowledgement/order evidence only.
 
+The direct dataflow resolves the remaining TXDONE question: raw `r7` is not
+copied into the combiner's first word. After the nonzero test at section
+offset `0x00a4` (archive `0x527fc`), the handler tests only `r7 & 0x8000` at
+`0x00aa` (`0x52802`). For a nonzero mask without that bit—including a mask
+containing only public `FRC.IF.TXDONE` bit 0—the branch reaches `0x025c`
+(`0x529b4`), moves the zero test result into `fp`, and then unconditionally
+sets `fp` to `0x01000000` at `0x0104` (`0x5285c`). The final call moves this
+derived `fp` to the first argument at `0x067e` (`0x52dd6`); the raw-derived
+value is instead passed as the third argument from `r7` at `0x067c`
+(`0x52dd4`). The event-mask helper preserves that separation (`r0` is masked
+at archive `0x51ac2`, while `r2` is masked at `0x51ab6`). The combiner tests
+bit 0 only in its first argument (`rail_rf_hal.o` archive `0x13390`), while
+its uses of the third argument test bits 31 and 1..3, not bit 0. Thus the
+archive proves FRC TXDONE is acknowledged and can gate entry into the shared
+path, but does not prove—and in this direct path excludes—a raw TXDONE-bit-0
+mapping into the combiner's TX-event bit. The open port's separate TXDONE
+completion policy remains necessary.
+
 Both latches share `FRC_IRQn`, but OpenISA TX callbacks advance their state
 machine without independently testing `radio_is_done()` (`lll_adv.c:511-542`).
 The EFR32 HAL therefore records TX or RX direction before arming its respective
