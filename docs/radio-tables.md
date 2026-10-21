@@ -41,9 +41,12 @@ does not establish endpoint cross-routing, RDMAILBOX assertion timing, or
 normal RX descriptor production. Stock does use the secure B endpoint in
 `RDMAILBOX_IRQHandler`: it loads `0xA8028000` from the literal at
 `flash-stock.bin:0x28dd0`, reads its `+0x040`/`+0x044` status-enable pair,
-and acknowledges its masked result through the literal `0xA802005c` at
-`0x28dd8`. This establishes stock mailbox servicing, not a packet path: the
-bounded handler analysis has not shown a buffer-2 `WRITEDATA` write or a
+and acknowledges its masked result through the B-endpoint clear alias
+`0xA802A040` (literal at `0x28dd4`; instructions `0x28c10..0x28c1a`). The
+later literal `0xA802005c` at `0x28dd8` is read only after the bit-1 service
+path and tested for bit 5 (`0x28c40..0x28c5e`); its block/meaning is not
+inferred here. This establishes stock mailbox servicing, not a packet path:
+the bounded handler analysis has not shown a buffer-2 `WRITEDATA` write or a
 descriptor record producer.
 
 ## 2. RAIL PHY configuration table format (`ble_efr32xg22_configurator_out.c`, Zlib licence) [F]
