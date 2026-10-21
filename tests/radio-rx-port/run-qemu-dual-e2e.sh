@@ -95,9 +95,18 @@ if ! grep -q 'addr=0xa8021008 value=0x00000002' "$RUNTIME_DIR/radio.trace"; then
     exit 1
 fi
 
-if ! printf '%s\n' "$console" | grep -q '^rx_callback: len='; then
-    echo "radio-dual-e2e: positive RF offer did not reach a Zephyr scan callback" >&2
-    echo "radio-dual-e2e: expected a QEMU descriptor-normalized PDU" >&2
+expected_callback='rx_callback: len=3 first=2 second=1 third=6'
+# radio-port publishes one Flags AD structure: length=2, type=0x01, value=0x06.
+# Zephyr's host callback receives those three AD bytes, so require the complete
+# marker rather than accepting an unrelated callback or malformed payload.
+if ! printf '%s\n' "$console" | grep -Fqx "$expected_callback"; then
+    echo "radio-dual-e2e: expected advertiser Flags AD callback was not observed" >&2
+    echo "radio-dual-e2e: expected: $expected_callback" >&2
+    exit 1
+fi
+if printf '%s\n' "$console" | grep -E '^rx_callback:' | \
+    grep -Fvx "$expected_callback"; then
+    echo "radio-dual-e2e: observed a callback with an unexpected payload marker" >&2
     exit 1
 fi
 

@@ -46,11 +46,18 @@ unsafe extern "C" fn scan_recv(
         // SAFETY: The length check above proves the second byte is present.
         unsafe { *packet.data.add(1) }
     };
+    let third = if packet.data.is_null() || packet.len < 3 {
+        0
+    } else {
+        // SAFETY: The length check above proves the third byte is present.
+        unsafe { *packet.data.add(2) }
+    };
     printkln!(
-        "rx_callback: len={} first={} second={}",
+        "rx_callback: len={} first={} second={} third={}",
         packet.len,
         first,
-        second
+        second,
+        third
     );
 }
 
