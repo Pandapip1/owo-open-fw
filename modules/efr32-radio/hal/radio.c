@@ -156,14 +156,9 @@ static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
  * commands and timeout handling remain scheduler-owned.
  */
 static struct efr32_qemu_tifs_state efr32_qemu_tifs;
-static bool efr32_qemu_tifs_tx_completion;
+/* The LLL records the action after the operation it is now preparing. */
+static enum efr32_qemu_tifs_next_action efr32_qemu_tifs_next_action;
 static bool efr32_qemu_tifs_transition_requested;
-/*
- * The OpenISA scan prepare path records this before RX starts.  It is not a
- * silicon sequencer claim: the completion worker consumes it only in the
- * QEMU configuration, stops RX, and wakes the bounded software TIFS job.
- */
-static bool efr32_qemu_tifs_rx_to_tx_prearmed;
 /* RXDIS has claimed a recorded turn-around; wait for the callback to stage TX. */
 static bool efr32_qemu_tifs_rx_to_tx_staging;
 K_SEM_DEFINE(efr32_qemu_tifs_sem, 0, 1);
@@ -673,15 +668,20 @@ static void efr32_qemu_tifs_start_staged_tx(void)
  */
 static void efr32_qemu_tifs_begin_rx_to_tx(void)
 {
-	bool prearmed;
+	bool claimed;
 	unsigned int key;
 
 	k_mutex_lock(&efr32_qemu_tifs_op_lock, K_FOREVER);
 	key = irq_lock();
-	prearmed = efr32_qemu_tifs_rx_to_tx_prearmed;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
+	claimed = efr32_qemu_tifs_next_action_claim(
+		&efr32_qemu_tifs_next_action, EFR32_QEMU_TIFS_NEXT_TX);
+	/* A received PDU wins over the no-response deadline. */
+	if (claimed) {
+		efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+	}
 	irq_unlock(key);
-	if (prearmed) {
+	if (claimed) {
+		cntr_qemu_tifs_cmp_cancel();
 		/* Do not call radio_disable(): RXDIS here is not an LLL abort. */
 		*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 		key = irq_lock();
@@ -1215,9 +1215,8 @@ void radio_setup(void)
 	efr32_rx_delivery_invalid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_state_init(&efr32_qemu_tifs);
-	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
 	efr32_qemu_tifs_transition_requested = false;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
 	efr32_qemu_tifs_rx_to_tx_staging = false;
 #endif
 	efr32_radio_completion_quiesce();
@@ -1281,9 +1280,8 @@ void radio_reset(void)
 	efr32_radio_launch_disarm();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
-	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
 	efr32_qemu_tifs_transition_requested = false;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
 #endif
 	/* A hardware reset invalidates both BUFC channel configurations. */
 	efr32_packet_stage_reset();
@@ -1822,9 +1820,8 @@ void radio_disable(void)
 	efr32_radio_launch_disarm();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
-	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
 	efr32_qemu_tifs_transition_requested = false;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
 #endif
 
 	/*
@@ -1869,9 +1866,17 @@ void radio_status_reset(void)
 	completed_direction = efr32_packet_stage.lifecycle.completion_direction;
 	completed = efr32_packet_lifecycle_status_reset(&efr32_packet_stage.lifecycle);
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
-	/* Setup paths have no retired TX completion; only those paths may arm TIFS. */
-	efr32_qemu_tifs_tx_completion = completed &&
-		completed_direction == EFR32_RADIO_PACKET_TX;
+	/*
+	 * A TX-completion callback prepares the RX packet and timeout after it
+	 * clears status. Claim the RX prearm now, before that callback records a
+	 * later RX-to-TX request. The HCTO call made by the callback consumes this
+	 * flag and arms the bounded BURTC RX job.
+	 */
+	if (completed && completed_direction == EFR32_RADIO_PACKET_TX &&
+	    efr32_qemu_tifs_next_action_claim(&efr32_qemu_tifs_next_action,
+					       EFR32_QEMU_TIFS_NEXT_RX)) {
+		efr32_qemu_tifs_transition_requested = true;
+	}
 #endif
 	efr32_rx_delivery_invalid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
@@ -1975,14 +1980,14 @@ void radio_switch_complete_and_rx(uint8_t phy_rx)
 	ARG_UNUSED(phy_rx);
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
-	 * Connectable legacy advertising uses TX->RX here (for a scan response).
-	 * Only a completed TX may arm the simulator turn-around; initial event
-	 * setup and unrelated RX transitions retain the hardware TODO below.
+	 * This is an instruction for the operation following the one currently
+	 * being prepared. For example, advertising records RX before its initial
+	 * TX; an active scanner records RX before it stages its SCAN_REQ. Do not
+	 * tie that instruction to a completion marker: the LLL intentionally
+	 * replaces it while handling the preceding completion.
 	 */
-	if (efr32_qemu_tifs_tx_completion) {
-		efr32_qemu_tifs_tx_completion = false;
-		efr32_qemu_tifs_transition_requested = true;
-	}
+	efr32_qemu_tifs_next_action_set(&efr32_qemu_tifs_next_action,
+					EFR32_QEMU_TIFS_NEXT_RX);
 #endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
@@ -1997,17 +2002,12 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 	ARG_UNUSED(flags_tx);
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
-	 * Setup before RX records the reference HAL's next TX command. The
-	 * scheduler-owned completion job consumes it only on a real RXDONE and
-	 * gives the callback one QEMU-only TIFS to stage its response PDU. A
-	 * post-TXDONE call retains the existing TX->RX transition below.
+	 * A scanner or advertiser may record this before RX begins. A real RXDONE
+	 * claims it before invoking the LLL callback, gives that callback time to
+	 * stage its response PDU, then lets the bounded QEMU TIFS job issue TXEN.
 	 */
-	if (efr32_qemu_tifs_tx_completion) {
-		efr32_qemu_tifs_tx_completion = false;
-		efr32_qemu_tifs_transition_requested = true;
-	} else {
-		efr32_qemu_tifs_rx_to_tx_prearmed = true;
-	}
+	efr32_qemu_tifs_next_action_set(&efr32_qemu_tifs_next_action,
+					EFR32_QEMU_TIFS_NEXT_TX);
 #endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
@@ -2016,11 +2016,12 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 void radio_switch_complete_and_disable(void)
 {
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
-	/* A non-turn-around event must not inherit a pending simulator timer. */
-	efr32_qemu_tifs_cancel();
-	efr32_qemu_tifs_tx_completion = false;
-	efr32_qemu_tifs_transition_requested = false;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
+	/*
+	 * This clears the sequencer command that has not been consumed yet. It
+	 * must not cancel an RXDONE-claimed reservation: lll_adv uses this call
+	 * immediately before it stages the SCAN_RSP that owns that reservation.
+	 */
+	efr32_qemu_tifs_next_action_clear(&efr32_qemu_tifs_next_action);
 #endif
 	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
@@ -2194,9 +2195,8 @@ void radio_tmr_stop(void)
 	efr32_radio_launch_disarm();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
-	efr32_qemu_tifs_tx_completion = false;
+	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
 	efr32_qemu_tifs_transition_requested = false;
-	efr32_qemu_tifs_rx_to_tx_prearmed = false;
 #endif
 }
 

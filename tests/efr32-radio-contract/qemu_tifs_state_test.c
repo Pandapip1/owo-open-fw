@@ -9,10 +9,21 @@
 int main(void)
 {
 	struct efr32_qemu_tifs_state state;
+	enum efr32_qemu_tifs_next_action next;
 	uint32_t generation;
 
 	efr32_qemu_tifs_state_init(&state);
 	assert(state.phase == EFR32_QEMU_TIFS_IDLE);
+	next = EFR32_QEMU_TIFS_NEXT_NONE;
+	efr32_qemu_tifs_next_action_set(&next, EFR32_QEMU_TIFS_NEXT_RX);
+	assert(!efr32_qemu_tifs_next_action_claim(&next,
+		EFR32_QEMU_TIFS_NEXT_TX));
+	assert(efr32_qemu_tifs_next_action_claim(&next,
+		EFR32_QEMU_TIFS_NEXT_RX));
+	assert(next == EFR32_QEMU_TIFS_NEXT_NONE);
+	efr32_qemu_tifs_next_action_set(&next, EFR32_QEMU_TIFS_NEXT_TX);
+	efr32_qemu_tifs_next_action_clear(&next);
+	assert(next == EFR32_QEMU_TIFS_NEXT_NONE);
 
 	generation = efr32_qemu_tifs_state_arm(&state, 227U);
 	assert(state.phase == EFR32_QEMU_TIFS_WAIT_RX);

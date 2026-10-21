@@ -16,6 +16,43 @@ enum efr32_qemu_tifs_phase {
 	EFR32_QEMU_TIFS_WAIT_HCTO,
 };
 
+/*
+ * OpenISA records the radio operation that should follow the operation it is
+ * currently preparing.  Keep that request distinct from the scheduler phase:
+ * on RXDONE a TX request is claimed before the LLL callback, while the
+ * callback itself may clear the *next* sequencer command after the claim.
+ */
+enum efr32_qemu_tifs_next_action {
+	EFR32_QEMU_TIFS_NEXT_NONE,
+	EFR32_QEMU_TIFS_NEXT_RX,
+	EFR32_QEMU_TIFS_NEXT_TX,
+};
+
+static inline void efr32_qemu_tifs_next_action_set(
+	enum efr32_qemu_tifs_next_action *next,
+	enum efr32_qemu_tifs_next_action action)
+{
+	*next = action;
+}
+
+static inline bool efr32_qemu_tifs_next_action_claim(
+	enum efr32_qemu_tifs_next_action *next,
+	enum efr32_qemu_tifs_next_action action)
+{
+	if (*next != action) {
+		return false;
+	}
+
+	*next = EFR32_QEMU_TIFS_NEXT_NONE;
+	return true;
+}
+
+static inline void efr32_qemu_tifs_next_action_clear(
+	enum efr32_qemu_tifs_next_action *next)
+{
+	*next = EFR32_QEMU_TIFS_NEXT_NONE;
+}
+
 struct efr32_qemu_tifs_state {
 	enum efr32_qemu_tifs_phase phase;
 	uint32_t generation;
