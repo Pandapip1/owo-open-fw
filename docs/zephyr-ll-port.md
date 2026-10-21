@@ -186,7 +186,9 @@ The scanner QEMU profile now opts into one explicit synthetic producer,
 the channel-2 threshold source (`BUFC.IF` bit 18), using a dedicated aligned
 512-byte static buffer owned by the Zephyr image. The stock-observed ring root
 `0x20001178` remains evidence about the vendor firmware only; it is not a
-Zephyr RAM placement requirement. The consumer reads the channel-2 `ADDR`
+Zephyr RAM placement requirement. The runtime setup asserts that the
+descriptor range is disjoint from the channel-1 FIFO, and the dual harness
+prints and checks both half-open 512-byte ranges. The consumer reads the channel-2 `ADDR`
 register and refuses the event unless channel 1 still points at the HAL-owned
 512-byte RX FIFO. The worker is woken by `BUFC_IRQn`, masks the source in the
 ISR, accepts only descriptor classes 6/7, and uses the descriptor word-0 low

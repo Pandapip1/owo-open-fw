@@ -99,9 +99,29 @@ fi
 # (0x20001178) is evidence about the vendor firmware, not a Zephyr RAM ABI.
 descriptor_addr_line=$(grep -E 'addr=0x(aa|ba)000090 value=0x2000[0-9a-f]+' \
     "$RUNTIME_DIR/radio.trace" | head -1 || true)
-if [ -z "$descriptor_addr_line" ] ||
-   printf '%s\n' "$descriptor_addr_line" | grep -q 'value=0x20001178'; then
+rx_fifo_addr_line=$(grep -E 'addr=0x(aa|ba)000050 value=0x2000[0-9a-f]+' \
+    "$RUNTIME_DIR/radio.trace" | head -1 || true)
+descriptor_addr=$(printf '%s\n' "$descriptor_addr_line" |
+    sed -n 's/.*value=0x\([0-9a-f][0-9a-f]*\).*/\1/p')
+rx_fifo_addr=$(printf '%s\n' "$rx_fifo_addr_line" |
+    sed -n 's/.*value=0x\([0-9a-f][0-9a-f]*\).*/\1/p')
+if [ -z "$descriptor_addr" ] || [ -z "$rx_fifo_addr" ]; then
     echo "radio-dual-e2e: scanner did not program an image-owned descriptor ring" >&2
+    exit 1
+fi
+descriptor_start=$((16#$descriptor_addr))
+descriptor_end=$((descriptor_start + 512))
+rx_fifo_start=$((16#$rx_fifo_addr))
+rx_fifo_end=$((rx_fifo_start + 512))
+printf 'radio-dual-e2e: descriptor=[0x%08x,0x%08x) rx_fifo=[0x%08x,0x%08x)\n' \
+    "$descriptor_start" "$descriptor_end" "$rx_fifo_start" "$rx_fifo_end"
+if [ "$descriptor_start" -lt "$rx_fifo_end" ] &&
+   [ "$rx_fifo_start" -lt "$descriptor_end" ]; then
+    echo "radio-dual-e2e: descriptor and RX FIFO backing regions overlap" >&2
+    exit 1
+fi
+if [ "$descriptor_start" -eq $((16#20001178)) ]; then
+    echo "radio-dual-e2e: descriptor ring reused stock firmware root" >&2
     exit 1
 fi
 

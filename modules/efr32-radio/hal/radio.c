@@ -1335,6 +1335,15 @@ static void efr32_radio_qemu_rx_descriptor_isr(void *arg)
 static void efr32_radio_qemu_rx_descriptor_setup(void)
 {
 	unsigned int key = irq_lock();
+	uintptr_t descriptor_start =
+		(uintptr_t)efr32_qemu_rx_descriptor_ring_storage;
+	uintptr_t descriptor_end = descriptor_start +
+		EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES;
+	uintptr_t fifo_start = (uintptr_t)efr32_rx_fifo;
+	uintptr_t fifo_end = fifo_start + 512U;
+
+	/* Catch a linker/layout regression before QEMU can DMA across regions. */
+	LL_ASSERT(descriptor_end <= fifo_start || fifo_end <= descriptor_start);
 
 	efr32_qemu_rx_descriptor.descriptor_read_offset = 0U;
 	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
