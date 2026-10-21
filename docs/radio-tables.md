@@ -567,7 +567,11 @@ choice. The currently located stock `FRC+0x054` literals at file offsets
 `0x1f7dc`, `0x28d68`, and `0x298a8` are read sites only; no literal-backed
 stock store or `RAIL_ConfigRxOptions` call has been established. Computed
 address writes remain possible, so absence of a located store is not evidence
-for either option state.
+for either option state. A fresh bounded 25-second native-QEMU stock run
+likewise observed 19 radio writes but none to secure/non-secure `FRC+0x054` or
+its SET/CLR/TGL aliases; the temporary trace was discarded after inspection.
+That bounds the currently stalled pre-provisioning path only—it does not prove
+the configuration selected by a fully provisioned stock boot.
 
 Archive call tracing adds no BLE-specific selection. Aside from the public
 `RAIL_ConfigRxOptions` entry, the only direct archive caller of that helper is
