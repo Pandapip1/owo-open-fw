@@ -318,6 +318,17 @@ it reaches `0x1e39c` after masking its event sets. That call is shared with
 non-RX paths, so it is a next trace target—not evidence that a Bluetooth
 receive callback has already run.
 
+The next generic layer remains shared rather than an RX callback. At
+`0x27b3e..0x27b54` it masks three event sets against fields of the state object
+at literal `0x28474` before calling `0x1e39c`. The latter reaches its
+client-style indirect call through context `+0x08` only when the post-policy
+event pair intersects callback masks at context `+0xe8/+0xec`
+(`0x1e448..0x1e460`); its arguments are the context and those two masks.
+Neither condition is exclusive to the BUFC descriptor class. There is a
+potential bridge through the ISR's `r7` bit 10 at `0x28b10..0x28b1c`, which
+calls `0x2847c(2)` and contributes its result to the third generic event-set
+argument, but its relation to the descriptor return class is not yet proven.
+
 The open port consequently binds `LL_RADIO_IRQn` to direct `FRC_IRQn` and enables only `FRC.IEN.TXDONE|RXDONE` during `radio_setup()`. The generated revB2 model places `IEN` at `+0x06C`, exposes the standard SET alias, and names those two bits (`FRC_S_register.py:684-704`, `FRC_S_field.py:1197-1254`). This is deliberately narrower than the vendor handler: it gives the existing `radio_is_done()` completion policy an identical IRQ source, without treating an arbitrary sequencer, buffer, error, or RAC state flag as successful completion. It does not establish receive production or the rest of RAIL's packet-state dispatch.
 
 The generic OpenISA LLL, not the radio HAL, installs and enables this route: `lll_init()` uses `IRQ_CONNECT(LL_RADIO_IRQn, ..., isr_radio, NULL, 0)` then enables `LL_RADIO_IRQn` (`lll/lll.c:142-155`). Since this port maps that macro to `FRC_IRQn` (`include/hal/efr32/ll_irqs.h:14-18`), `radio_isr_set()` only swaps the callback parameter and `isr_radio()` invokes it. The FRC enable policy above confines that callback path to TXDONE/RXDONE in this port; it does not make any other FRC source a completion.
