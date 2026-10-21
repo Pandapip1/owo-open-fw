@@ -164,16 +164,24 @@ static bool efr32_qemu_tifs_transition_requested;
  * QEMU configuration, stops RX, and wakes the bounded software TIFS job.
  */
 static bool efr32_qemu_tifs_rx_to_tx_prearmed;
+/* RXDIS has claimed a recorded turn-around; wait for the callback to stage TX. */
+static bool efr32_qemu_tifs_rx_to_tx_staging;
 K_SEM_DEFINE(efr32_qemu_tifs_sem, 0, 1);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
 
-static void efr32_qemu_tifs_timer_expiry(struct k_timer *timer)
+static uint32_t efr32_qemu_tifs_deadline(uint32_t delay_us)
 {
-	ARG_UNUSED(timer);
-	k_sem_give(&efr32_qemu_tifs_sem);
+	/* cntr_init() selects the QEMU scheduler's 32.768 kHz BURTC clock. */
+	uint32_t ticks = (uint32_t)(((uint64_t)delay_us * 32768U + 999999U) /
+				      1000000U);
+
+	return cntr_cnt_get() + (ticks ? ticks : 1U);
 }
 
-K_TIMER_DEFINE(efr32_qemu_tifs_timer, efr32_qemu_tifs_timer_expiry, NULL);
+static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation)
+{
+	cntr_qemu_tifs_cmp_set(efr32_qemu_tifs_deadline(delay_us), generation);
+}
 
 static void efr32_qemu_tifs_cancel(void)
 {
@@ -182,10 +190,11 @@ static void efr32_qemu_tifs_cancel(void)
 	unsigned int key = irq_lock();
 
 	efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+	efr32_qemu_tifs_rx_to_tx_staging = false;
 	irq_unlock(key);
 
-	/* A stale expiry is harmless: the worker rechecks phase and generation. */
-	k_timer_stop(&efr32_qemu_tifs_timer);
+	/* A stale BURTC wake is harmless: the worker rechecks phase/generation. */
+	cntr_qemu_tifs_cmp_cancel();
 	k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 }
 
@@ -195,14 +204,13 @@ static void efr32_qemu_tifs_arm(uint32_t hcto_us)
 	uint32_t generation;
 	bool stale;
 
-	/* Stop before publishing the new generation, then verify after start. */
-	k_timer_stop(&efr32_qemu_tifs_timer);
+	/* Stop before publishing the new generation, then verify after arm. */
+	cntr_qemu_tifs_cmp_cancel();
 	key = irq_lock();
 	generation = efr32_qemu_tifs_state_arm(&efr32_qemu_tifs, hcto_us);
 	irq_unlock(key);
 
-	k_timer_start(&efr32_qemu_tifs_timer, K_USEC(efr32_radio_timer.tifs_us),
-			      K_NO_WAIT);
+	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation);
 
 	/* If reset/teardown raced the start, do not resurrect the cancelled job. */
 	key = irq_lock();
@@ -210,11 +218,12 @@ static void efr32_qemu_tifs_arm(uint32_t hcto_us)
 		efr32_qemu_tifs.generation != generation;
 	irq_unlock(key);
 	if (stale) {
-		k_timer_stop(&efr32_qemu_tifs_timer);
+		cntr_qemu_tifs_cmp_cancel();
 	}
 }
 
 static void efr32_qemu_tifs_begin_rx_to_tx(void);
+static void efr32_qemu_tifs_arm_staged_rx_to_tx(void);
 static bool efr32_qemu_tifs_tx_staged(void);
 static void efr32_qemu_tifs_start_staged_tx(void);
 
@@ -270,7 +279,7 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 			if (efr32_qemu_tifs.phase == EFR32_QEMU_TIFS_WAIT_HCTO &&
 			    efr32_qemu_tifs.generation == generation) {
 				irq_unlock(key);
-				k_timer_start(&efr32_qemu_tifs_timer, K_USEC(hcto_us), K_NO_WAIT);
+				efr32_qemu_tifs_schedule(hcto_us, generation);
 			} else {
 				irq_unlock(key);
 			}
@@ -306,6 +315,24 @@ K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 		efr32_qemu_tifs_job, NULL, NULL, NULL,
 		CONFIG_EFR32_RADIO_SCHEDULER_PRIO, 0, 0);
 #endif
+
+/* Called from the shared BURTC CC0 alarm: publish work only, never RAC MMIO. */
+void efr32_radio_qemu_tifs_wake(uint32_t generation)
+{
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	bool valid;
+	unsigned int key = irq_lock();
+
+	valid = efr32_qemu_tifs.phase != EFR32_QEMU_TIFS_IDLE &&
+		efr32_qemu_tifs.generation == generation;
+	irq_unlock(key);
+	if (valid) {
+		k_sem_give(&efr32_qemu_tifs_sem);
+	}
+#else
+	ARG_UNUSED(generation);
+#endif
+}
 
 static void efr32_radio_completion_job(void *a, void *b, void *c);
 
@@ -601,20 +628,19 @@ static void efr32_qemu_tifs_arm_tx(void)
 	uint32_t generation;
 	bool stale;
 
-	/* The completion job has stopped RX before publishing this timer. */
-	k_timer_stop(&efr32_qemu_tifs_timer);
+	/* The completion job has stopped RX before publishing this deadline. */
+	cntr_qemu_tifs_cmp_cancel();
 	key = irq_lock();
 	generation = efr32_qemu_tifs_state_arm_tx(&efr32_qemu_tifs);
 	irq_unlock(key);
-	k_timer_start(&efr32_qemu_tifs_timer, K_USEC(efr32_radio_timer.tifs_us),
-		      K_NO_WAIT);
+	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation);
 
 	key = irq_lock();
 	stale = efr32_qemu_tifs.phase != EFR32_QEMU_TIFS_WAIT_TX ||
 		efr32_qemu_tifs.generation != generation;
 	irq_unlock(key);
 	if (stale) {
-		k_timer_stop(&efr32_qemu_tifs_timer);
+		cntr_qemu_tifs_cmp_cancel();
 	}
 }
 
@@ -641,9 +667,9 @@ static void efr32_qemu_tifs_start_staged_tx(void)
 
 /*
  * Called by the scheduler-owned FRC completion job before it invokes the LLL
- * RX callback.  The RV32M1 reference has already programmed its next command
- * by this point; QEMU instead gives that callback one TIFS interval to stage
- * the response PDU, then performs the final TXEN in its persistent worker.
+ * RX callback. The RV32M1 reference has already programmed its next command
+ * by this point; QEMU reserves this turn-around and stops RX now, but does
+ * not start its TIFS timer until the callback has staged the response PDU.
  */
 static void efr32_qemu_tifs_begin_rx_to_tx(void)
 {
@@ -658,6 +684,29 @@ static void efr32_qemu_tifs_begin_rx_to_tx(void)
 	if (prearmed) {
 		/* Do not call radio_disable(): RXDIS here is not an LLL abort. */
 		*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
+		key = irq_lock();
+		efr32_qemu_tifs_rx_to_tx_staging = true;
+		irq_unlock(key);
+	}
+	k_mutex_unlock(&efr32_qemu_tifs_op_lock);
+}
+
+/*
+ * Run after the LLL completion callback. A callback may have rejected the
+ * packet or torn the event down, so re-check both the reservation and the
+ * staged PDU while holding the same lock used by teardown before arming TIFS.
+ */
+static void efr32_qemu_tifs_arm_staged_rx_to_tx(void)
+{
+	bool staged;
+	unsigned int key;
+
+	k_mutex_lock(&efr32_qemu_tifs_op_lock, K_FOREVER);
+	key = irq_lock();
+	staged = efr32_qemu_tifs_rx_to_tx_staging;
+	efr32_qemu_tifs_rx_to_tx_staging = false;
+	irq_unlock(key);
+	if (staged && radio_is_idle() && efr32_qemu_tifs_tx_staged()) {
 		efr32_qemu_tifs_arm_tx();
 	}
 	k_mutex_unlock(&efr32_qemu_tifs_op_lock);
@@ -1002,6 +1051,11 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		}
 #endif
 		callback(param);
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+		if (!abort) {
+			efr32_qemu_tifs_arm_staged_rx_to_tx();
+		}
+#endif
 		if (abort) {
 			key = irq_lock();
 			efr32_radio_abort_finish(&efr32_radio_abort);
@@ -1164,6 +1218,7 @@ void radio_setup(void)
 	efr32_qemu_tifs_tx_completion = false;
 	efr32_qemu_tifs_transition_requested = false;
 	efr32_qemu_tifs_rx_to_tx_prearmed = false;
+	efr32_qemu_tifs_rx_to_tx_staging = false;
 #endif
 	efr32_radio_completion_quiesce();
 
