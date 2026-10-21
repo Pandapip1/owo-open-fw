@@ -65,6 +65,17 @@ static inline bool efr32_qemu_tifs_state_rx_permit(
 		state->generation == generation;
 }
 
+/* Reserve the RX side effect while the caller holds the operation lock. */
+static inline bool efr32_qemu_tifs_state_claim_rx(
+	struct efr32_qemu_tifs_state *state, uint32_t generation)
+{
+	if (!efr32_qemu_tifs_state_rx_permit(state, generation)) {
+		return false;
+	}
+	state->phase = EFR32_QEMU_TIFS_WAIT_HCTO;
+	return true;
+}
+
 static inline bool efr32_qemu_tifs_state_begin_timeout(
 	struct efr32_qemu_tifs_state *state, uint32_t generation)
 {

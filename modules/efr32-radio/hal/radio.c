@@ -159,6 +159,7 @@ static struct efr32_qemu_tifs_state efr32_qemu_tifs;
 static bool efr32_qemu_tifs_tx_completion;
 static bool efr32_qemu_tifs_transition_requested;
 K_SEM_DEFINE(efr32_qemu_tifs_sem, 0, 1);
+K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
 
 static void efr32_qemu_tifs_timer_expiry(struct k_timer *timer)
 {
@@ -170,6 +171,8 @@ K_TIMER_DEFINE(efr32_qemu_tifs_timer, efr32_qemu_tifs_timer_expiry, NULL);
 
 static void efr32_qemu_tifs_cancel(void)
 {
+	/* Serialize cancellation with the worker's final claim and RXEN side effect. */
+	k_mutex_lock(&efr32_qemu_tifs_op_lock, K_FOREVER);
 	unsigned int key = irq_lock();
 
 	efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
@@ -177,6 +180,7 @@ static void efr32_qemu_tifs_cancel(void)
 
 	/* A stale expiry is harmless: the worker rechecks phase and generation. */
 	k_timer_stop(&efr32_qemu_tifs_timer);
+	k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 }
 
 static void efr32_qemu_tifs_arm(uint32_t hcto_us)
@@ -229,21 +233,27 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 			 * disable, or timer stop may have invalidated this dequeued work
 			 * while the worker was waiting to run.
 			 */
+			/* Cancellation cannot interleave between claim and RXEN. */
+			k_mutex_lock(&efr32_qemu_tifs_op_lock, K_FOREVER);
 			key = irq_lock();
-			bool permit = efr32_qemu_tifs_state_rx_permit(
+			bool claimed = efr32_qemu_tifs_state_claim_rx(
 				&efr32_qemu_tifs, generation);
 			irq_unlock(key);
-			if (!permit) {
+			if (!claimed) {
+				k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 				continue;
 			}
 
 			/* radio_pkt_rx_set() was completed before HCTO was configured. */
-			radio_rx_enable();
-
-			key = irq_lock();
-			(void)efr32_qemu_tifs_state_advance_to_hcto(&efr32_qemu_tifs,
-							 generation);
-			irq_unlock(key);
+			if (radio_is_idle()) {
+				radio_rx_enable();
+			} else {
+				/* Do not hold the cancellation lock while waiting on RAC. */
+				key = irq_lock();
+				efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
+				irq_unlock(key);
+			}
+			k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 
 			/* Arm the same persistent job for the bounded no-response path. */
 			key = irq_lock();
