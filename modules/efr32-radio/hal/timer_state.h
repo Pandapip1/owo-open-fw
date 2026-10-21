@@ -15,6 +15,7 @@
 struct efr32_radio_timer_state {
 	uint32_t start_tick;
 	uint32_t tifs_us;
+	uint32_t hcto_us;
 	uint32_t saved_aa;
 	/*
 	 * A TIFS switch needs a packet-end timestamp.  The current EFR32 port
@@ -26,12 +27,16 @@ struct efr32_radio_timer_state {
 	bool aa_capture_requested;
 	bool end_capture_requested;
 	bool end_tick_valid;
+	/* The request is retained for a future scheduler mapping, not armed. */
+	bool hcto_requested;
 };
 
 void efr32_radio_timer_state_init(struct efr32_radio_timer_state *state);
 void efr32_radio_timer_state_status_reset(struct efr32_radio_timer_state *state);
 void efr32_radio_timer_state_tifs_set(struct efr32_radio_timer_state *state,
 				      uint32_t tifs_us);
+void efr32_radio_timer_state_hcto_set(struct efr32_radio_timer_state *state,
+				      uint32_t hcto_us);
 void efr32_radio_timer_state_start_set(struct efr32_radio_timer_state *state,
 				       uint32_t start_tick);
 void efr32_radio_timer_state_aa_capture_request(struct efr32_radio_timer_state *state);

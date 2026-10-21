@@ -1804,11 +1804,23 @@ void radio_tmr_stop(void)
 	efr32_radio_launch_disarm();
 }
 
-/* [software] Request a later end capture; capture itself remains unknown (T8). */
+/*
+ * OpenISA arms GENFSK.T2_CMP with an EVENT_TMR-relative value here
+ * (vendor/zephyr/.../radio.c:1149-1173).  Its callers compute that value from
+ * radio_tmr_tifs_base_get() and PHY/address delays (for example
+ * lll_adv.c:552-557 and lll_peripheral.c:197-211).  Those inputs are not a
+ * BURTC timestamp: this port's start path coarsens the fractional launch
+ * remainder, and its packet-end/TIFS base remains unresolved.
+ *
+ * Keep the request as software bookkeeping, but do not arm the shared BURTC
+ * compare or synthesize a timeout IRQ.  A correct scheduler-owned timeout
+ * still needs an event epoch conversion, cancellation/generation arbitration
+ * with the launch compare, and a bounded timeout completion job.  QEMU also
+ * intentionally models no PROTIMER compare flag or autonomous RAC timeout.
+ */
 void radio_tmr_hcto_configure(uint32_t hcto)
 {
-	ARG_UNUSED(hcto);
-	EFR32_RADIO_TODO("PROTIMER (timebase, compare, captures) and RTC syn");
+	efr32_radio_timer_state_hcto_set(&efr32_radio_timer, hcto);
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */

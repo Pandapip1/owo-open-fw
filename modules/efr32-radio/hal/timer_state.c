@@ -18,6 +18,8 @@ void efr32_radio_timer_state_status_reset(struct efr32_radio_timer_state *state)
 	state->aa_capture_requested = false;
 	state->end_capture_requested = false;
 	state->end_tick_valid = false;
+	/* A future scheduler timeout must not survive the LLL reset boundary. */
+	state->hcto_requested = false;
 }
 
 void efr32_radio_timer_state_tifs_set(struct efr32_radio_timer_state *state,
@@ -25,6 +27,18 @@ void efr32_radio_timer_state_tifs_set(struct efr32_radio_timer_state *state,
 {
 	/* OpenISA RV32M1 radio.c:1021-1024 retains this for ISR TIFS arithmetic. */
 	state->tifs_us = tifs_us;
+}
+
+void efr32_radio_timer_state_hcto_set(struct efr32_radio_timer_state *state,
+				      uint32_t hcto_us)
+{
+	/*
+	 * The OpenISA caller supplies an EVENT_TMR-relative value.  Keep the
+	 * request visible without claiming that it is a BURTC deadline or that
+	 * the RAC has consumed it.
+	 */
+	state->hcto_us = hcto_us;
+	state->hcto_requested = true;
 }
 
 void efr32_radio_timer_state_start_set(struct efr32_radio_timer_state *state,

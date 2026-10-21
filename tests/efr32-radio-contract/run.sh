@@ -12,8 +12,9 @@ mux_bin="$build_dir/cntr_mux_test"
 stage_bin="$build_dir/packet_stage_lifecycle_test"
 dispatch_bin="$build_dir/completion_dispatch_test"
 tifs_switch_bin="$build_dir/tifs_switch_prereq_test"
+hcto_state_bin="$build_dir/hcto_state_test"
 mkdir -p "$build_dir"
-trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$mux_bin" "$stage_bin" "$dispatch_bin" "$tifs_switch_bin"; rmdir "$build_dir" 2>/dev/null || :' EXIT HUP INT TERM
+trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$mux_bin" "$stage_bin" "$dispatch_bin" "$tifs_switch_bin" "$hcto_state_bin"; rmdir "$build_dir" 2>/dev/null || :' EXIT HUP INT TERM
 
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
 	-I"$test_dir/../../modules/efr32-radio/hal" \
@@ -56,3 +57,9 @@ trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$mux_b
 	"$test_dir/tifs_switch_prereq_test.c" \
 	"$test_dir/../../modules/efr32-radio/hal/timer_state.c" -o "$tifs_switch_bin"
 "$tifs_switch_bin"
+
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+	-I"$test_dir/../../modules/efr32-radio/hal" \
+	"$test_dir/hcto_state_test.c" \
+	"$test_dir/../../modules/efr32-radio/hal/timer_state.c" -o "$hcto_state_bin"
+"$hcto_state_bin"
