@@ -3,8 +3,8 @@
  *
  * The three software interrupts are the device's SW0..SW3 lines (efr32bg22c224f512im40.h,
  * IRQn_Type), meant to be pended from software. The worker (ticker) interrupt is the compare
- * interrupt of the 32.768 kHz tick counter (hal/cntr.c, BURTC: RTCC is the Silicon Labs sleeptimer
- * of the system clock, dts/arm/silabs/xg22/xg22.dtsi `silabs,sleeptimer = &rtcc0`).
+ * interrupt of the 32.768 kHz BURTC tick counter (hal/cntr.c). In the radio configurations BURTC
+ * is also Zephyr's tickless system clock; its combined Counter/system-clock driver owns COMP/IRQ18.
  */
 #include <soc.h>
 

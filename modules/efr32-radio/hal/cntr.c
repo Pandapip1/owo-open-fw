@@ -2,9 +2,10 @@
  * 32.768 kHz tick counter of the ticker (Zephyr's hal/cntr.h contract), built on the Zephyr Counter
  * API so it needs no register knowledge. SPDX-License-Identifier: Apache-2.0
  *
- * Devicetree alias `ll-counter` must point at a free-running 32-bit counter clocked at 32768 Hz that
- * is not the system clock (the board overlay: `&burtc0`, since RTCC is the sleeptimer). The compare
- * interrupt is relayed to the ticker worker through the software interrupt HAL_SWI_WORKER_IRQ
+ * Devicetree alias `ll-counter` points at the free-running 32-bit BURTC clocked at 32768 Hz. For the
+ * radio configurations, that same device is Zephyr's tickless system clock; its driver is the sole
+ * COMP/IRQ18 owner and arbitrates Counter clients with kernel deadlines. The Counter callback is
+ * relayed to the ticker worker through the software interrupt HAL_SWI_WORKER_IRQ
  * (hal/efr32/swi.h), because the lower link layer connects its own handler to that interrupt number.
  *
  * UNVALIDATED: not run on a counter, only compiled.

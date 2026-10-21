@@ -59,11 +59,15 @@ route.  That route remains unproven.
 
 ## Driver architecture
 
-1. Choose a fixed kernel tick rate of 32,768 Hz for this SoC family.  It is a
-   logical unit, not a promise of 32,768 interrupts per second: tickless mode
-   still arms only the earliest timeout.  The kernel documentation defines
-   this setting as the minimum timing granularity in tickless mode
-   (`vendor/zephyr/kernel/Kconfig:728-746`).
+1. Make 32,768 Hz the candidate fixed kernel tick rate only after the
+   clock-event driver supports it.  It is a logical unit, not a promise of
+   32,768 interrupts per second: tickless mode still arms only the earliest
+   timeout.  The kernel documentation defines this setting as the minimum
+   timing granularity in tickless mode (`vendor/zephyr/kernel/Kconfig:728-746`).
+   The current BG22 configuration is 1,024 Hz, and the current BURTC driver
+   intentionally rejects a kernel tick shorter than its six-cycle arm lead
+   (`counter_silabs_burtc.c:458-465`).  Therefore simply changing Kconfig is
+   not an implementation of this design.
 2. Keep a protected logical-clock state: last announced kernel tick, fractional
    LF remainder, selected backend, and an epoch sample for each hardware
    counter.  Both backend ISRs convert their raw count to that same logical
