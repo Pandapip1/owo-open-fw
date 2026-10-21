@@ -51,10 +51,13 @@ clamped to the six-cycle LFSYNC floor. Delivering on the flag alone released
 the ticker alarm early after a cancelled clock event's match, which the radio
 then dropped; `tests/burtc-arbitration-port` covers that case.
 
-The QEMU dual-endpoint harnesses run with `-icount shift=5,sleep=off`. With
-the default `sleep=on`, idle virtual time follows host time and BURTC compares
-were delivered 35-42 LF cycles (about 1.2 ms) late, which looked like missed
-scheduler deadlines.
+With icount `sleep=on`, QEMU used to charge host wakeup latency to guest time
+whenever every vCPU idled: on macOS (no `ppoll`) BURTC compares were delivered
+35-42 LF cycles (about 1.2 ms) late, which looked like missed scheduler
+deadlines. The patched icount warp now stops at the next virtual deadline
+(`vendor/qemu/accel/tcg/icount-common.c`, `icount_warp_rt()`). The
+dual-endpoint harnesses additionally use `sleep=off` so a run's virtual
+timeline does not depend on host scheduling.
 
 Provider *selection* is still not used by the radio. Before it is, the
 caller must have a documented PM-policy mapping from its requested wake work to the

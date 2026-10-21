@@ -18,8 +18,8 @@ MIN_EXCHANGES=${MIN_EXCHANGES:-3}
 # The QEMU TIFS worker's measured 150-us interval needs shift=5; shift=1
 # stretches it to about 1.5 ms and lets the LLL clean up before TXEN.
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-5}
-# sleep=off: with both CPUs in WFI, icount otherwise advances virtual time in
-# host real time, and host timer slack delivered BURTC compares ~1.2 ms late.
+# sleep=off: idle time jumps straight to the next deadline instead of tracking
+# host time, so a run's virtual timeline does not depend on host scheduling.
 # This is a QEMU scheduler-observability bound, not a silicon TIFS claim.
 # It bounds QEMU virtual time from IRQ18 assertion to the persistent job's
 # RAC RXSEARCH transition: three 32.768-kHz cycles, rounded up.
