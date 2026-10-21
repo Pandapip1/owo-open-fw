@@ -90,6 +90,24 @@ if ! grep -Eq 'TX snapshot RX mailbox offers=[1-9][0-9]*' "$RUNTIME_DIR/radio.tr
     exit 1
 fi
 
+# The scanner's real Zephyr descriptor worker must acknowledge the synthetic
+# channel-2 FIFO, not merely receive one host callback.  WRITEOFFSET setup is
+# the producer-side boundary; successive READOFFSET writes prove that the
+# scheduler-owned consumer drained repeated records and can cross a physical
+# 512-byte ring wrap.  This is a QEMU-only trace contract, not silicon BUFC
+# semantics.
+descriptor_write_offset_line=$(grep -E \
+    'addr=0x(aa|ba)000094 value=0x00000000' "$RUNTIME_DIR/radio.trace" |
+    head -1 || true)
+descriptor_ack_count=$(grep -Ec \
+    'addr=0x(aa|ba)000098 value=0x000000(08|10)' "$RUNTIME_DIR/radio.trace" || true)
+if [ -z "$descriptor_write_offset_line" ] || [ "$descriptor_ack_count" -lt 2 ]; then
+    echo "radio-dual-e2e: scanner did not acknowledge repeated QEMU RX descriptors" >&2
+    echo "radio-dual-e2e: expected channel-2 WRITEOFFSET setup and at least two READOFFSET writes" >&2
+    grep -E 'addr=0x(aa|ba)00009[48]' "$RUNTIME_DIR/radio.trace" | head -20 >&2 || true
+    exit 1
+fi
+
 # The advertiser's QEMU-only TIFS seam is exercised only when its TX state
 # retires before a later software-RX arm.  The trace is intentionally a
 # machine-level boundary: it does not identify a silicon packet-end event.
