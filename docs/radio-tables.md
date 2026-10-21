@@ -518,6 +518,19 @@ descriptor for data-buffer presentation and release, not a normalized PDU;
 the descriptor's proven fields still do not establish on-air framing or CRC
 metadata.
 
+The completed-record path also resolves descriptor word 0's data relationship.
+At helper-relative `+0x94..+0xf2` it reads channel-1 `READOFFSET`
+(`0xBA000058`) and low-13-bit `STATUS` (`0xBA0000ac`), rejects descriptor word
+0 values at least `0x4000`, then treats word 0 low 13 bits as a channel-1
+circular-FIFO endpoint. It computes the capacity-wrapped distance from the
+current read cursor to that endpoint and stores it as packet-info
+`packetBytes` at `+2`; it constructs one or two backing-RAM spans from the
+same cursor. Therefore the word is neither a direct BLE length nor a channel-2
+offset. This fully explains RAIL packet-info/copy mechanics, but still cannot
+normalize the bytes for Zephyr: RAIL does not parse a BLE header here, and
+packetBytes may include appended radio detail under the unresolved active
+RX-options configuration.
+
 The installed public RAIL headers corroborate the API-side layout without
 filling that hardware gap: `rail_types.h:6172-6231` names the fields as
 `packetStatus`, `packetBytes`, two portion lengths/pointers, and `filterMask`,
