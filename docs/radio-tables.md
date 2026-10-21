@@ -475,6 +475,32 @@ Two adjacent OpenISA helpers have a deliberately narrower contract than their na
 
 The public FRC completion latches make a narrow status implementation safe: `IF.TXDONE` is bit 0 and `IF.RXDONE` bit 4 (`revB2/FRC_S_field.py:1197-1254`). `radio_is_done()` consequently observes either latch, while `radio_status_reset()` acknowledges exactly those two bits through the standard CLR alias; this does not decide which IRQ should invoke the LLL callback or how receive completion is produced. QEMU's 150-us TX timer remains a simulator abstraction, but on expiry it now raises the public `FRC.IF.TXDONE` latch and returns RAC to OFF; `TXDIS`/`RXDIS` cancel that pending synthetic completion. Its regression verifies the visible latch and final RAC state.
 
+The stock TXDONE hand-off can be traced one step further in the same archive.
+In `generic_phy.o:FRC_IRQHandler`, the enabled FRC mask is retained in `r7`
+after the read/AND at section offset `0x0006` (archive offset `0x5275e`) and
+is cleared through the FRC `+0x2000` alias at section offset `0x0010`
+(`0x52768`). Near the common exit, section offsets `0x067c..0x0682`
+(`0x52dd4..0x52dda`) pass the accumulated event word, the secondary event
+word, and the retained FRC-derived word to
+`sli_rail_978af8e4393fb6ecb4e92f5256373899` (section/archive offset
+`0x001e4`/`0x51aac`). That helper masks each word with its registered event
+masks before calling the RAIL event combiner.
+
+The combiner is `sli_rail_2c0c7ba0065447faa0ab7205349f5d73` in
+`rail_rf_hal.o`, whose section starts at archive offset `0x13384` (the
+`rail_rf_hal.o` member begins at `0x10dd4`). Its section offsets
+`0x0008..0x001a` (`0x1338c..0x1339e`) explicitly test bit 0 of the first,
+already-filtered event word and enter the TX-event path when that bit is set;
+bit 9 of the second word is tested alongside it. This establishes the vendor
+ordering: read `FRC.IF`, mask with `FRC.IEN`, clear the enabled FRC bits, then
+translate the resulting event state through the registered event masks and
+combiner. It does not establish that every FRC bit is translated into that
+first event word: the handler has no direct branch on public
+`FRC.IF.TXDONE` bit 0, and the combiner receives accumulated words rather than
+the raw latch. The public TXDONE bit assignment therefore remains the safe
+basis for the open port's narrow completion path, while this archive trace
+supplies the stock acknowledgement/order evidence only.
+
 Both latches share `FRC_IRQn`, but OpenISA TX callbacks advance their state
 machine without independently testing `radio_is_done()` (`lll_adv.c:511-542`).
 The EFR32 HAL therefore records TX or RX direction before arming its respective
