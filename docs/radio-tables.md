@@ -262,6 +262,33 @@ The stock Series-2 installer has a `RAC_SEQ` route: xG22 devicetree assigns `rac
 
 The vendor archive refines that route. In `librail_efr32xg22_gcc_release.a(generic_phy.o)`, the four-byte `RAC_SEQ_IRQHandler` section starts at archive file offset `0x52f48` and branches directly to `FRC_IRQHandler`, whose section begins at `0x52758`. The four-byte `BUFC_IRQHandler` section likewise branches to `FRC_IRQHandler`; both branches are directly disassembled from that archive member. That shared handler begins by computing and acknowledging enabled FRC (`IF +0x068` AND `IEN +0x06C`) and BUFC (`IF +0x114` AND `IEN +0x118`) pending sets before its larger packet/state dispatch. The device tree routes their direct IRQs separately—BUFC 32 and FRC 34—so QEMU asserts the corresponding direct line from each pending-and-enabled pair, while retaining RAC_SEQ line 38 for RAC sequencer flags. The same device header assigns AGC its separate direct IRQ 31; QEMU likewise drives that line from `AGC.IF +0x044` AND `AGC.IEN +0x048`, including the standard aliases, but does not synthesize an AGC event. The distinct 48-byte `RAC_RSM_IRQHandler` section starts at `0x52f68`; it masks RAC `IF` with `IEN`, clears the handled flags through the `+0x2000` alias, and calls the RAIL state-change callback only when the state-change flag is present. Thus `RAC_SEQ` is a shared FRC/BUFC/sequencer handler route, not a direct state-change ISR.
 
+The stock application independently has that interrupt shape. During boot,
+`flash-stock.bin:0x1bad8..0x1bae8` writes `0x00016000` (literal at
+`0x1bb64`) to `SCB.VTOR` (`0xe000ed08`, literal at `0x1bb68`), selecting the
+application vector table rather than the bootloader table at flash zero. Its
+entries prove these installed radio-adjacent handlers: AGC IRQ31 →
+`0x28bc6`, BUFC IRQ32 → `0x28b9c`, FRC_PRI IRQ33 → `0x28b9e`, FRC IRQ34 →
+`0x2865c`, MODEM IRQ35 → `0x28bc4`, PROTIMER IRQ36 → `0x28ba0`, RAC_RSM
+IRQ37 → `0x28ba4`, RAC_SEQ IRQ38 → `0x28ba2`, RDMAILBOX IRQ39 → `0x28c0e`,
+RFSENSE IRQ40 → `0x496e0`, PRORTC IRQ41 → `0x2a75c`, and SYNTH IRQ42 →
+`0x28c00` (vector words at `flash-stock.bin:0x160bc..0x160e8`; table values
+carry the Thumb bit). The IRQ32/33/34/35/36/38 entries converge on the common
+dispatcher at `0x2865c`: its first instructions read, mask, and acknowledge
+three pending/enable register pairs (`0x28660..0x28692`), beginning with FRC
+`IF/IEN` at `0xa8004068/+0x06c` (base/ack literals at `0x28d68/0x28d6c`) and
+BUFC `IF/IEN` at `0xaa000114/+0x118` (literals at `0x28d70/0x28d74`); the
+third pair is AGC. BUFC pending bit 18 selects a call to `0x29664` at
+`0x2883e..0x28846`, the already-located descriptor route. This is strong
+evidence that an RX completion is intended to enter an interrupt-driven shared
+radio path, with FRC/BUFC and timer/sequencer sources participating. It still
+does not identify which pending bit means a valid RX packet or its byte layout.
+IRQ37 is a distinct state-change path (`0x28ba4..0x28bc2`); IRQ31 and IRQ35
+share a smaller mask/ack path at `0x28bc6..0x28bf6`; IRQ42 is a minimal
+mask/ack handler at `0x28c00..0x28c0c`. The later stock PROTIMER start helper
+does explicitly clear and enable IRQ36 at `0x29a3a..0x29a50`; the provisioning
+blocked native boot has not reached that helper, so this does not establish
+that FRC, BUFC, or RAC NVIC enables have occurred in that stalled run.
+
 The open port consequently binds `LL_RADIO_IRQn` to direct `FRC_IRQn` and enables only `FRC.IEN.TXDONE|RXDONE` during `radio_setup()`. The generated revB2 model places `IEN` at `+0x06C`, exposes the standard SET alias, and names those two bits (`FRC_S_register.py:684-704`, `FRC_S_field.py:1197-1254`). This is deliberately narrower than the vendor handler: it gives the existing `radio_is_done()` completion policy an identical IRQ source, without treating an arbitrary sequencer, buffer, error, or RAC state flag as successful completion. It does not establish receive production or the rest of RAIL's packet-state dispatch.
 
 The generic OpenISA LLL, not the radio HAL, installs and enables this route: `lll_init()` uses `IRQ_CONNECT(LL_RADIO_IRQn, ..., isr_radio, NULL, 0)` then enables `LL_RADIO_IRQn` (`lll/lll.c:142-155`). Since this port maps that macro to `FRC_IRQn` (`include/hal/efr32/ll_irqs.h:14-18`), `radio_isr_set()` only swaps the callback parameter and `isr_radio()` invokes it. The FRC enable policy above confines that callback path to TXDONE/RXDONE in this port; it does not make any other FRC source a completion.
