@@ -301,6 +301,40 @@ returns zero and the native trace contains the HAL's software RX arm write,
 that a byte in QEMU's BUFC seam is a Bluetooth PDU, nor that a host RX callback,
 descriptor, CRC, or over-air receive path has completed.
 
+### Dual-image QEMU RX callback harness
+
+The dual-image harness is a stronger, but still explicitly simulator-only,
+boundary. Build both images with the commands above (using
+`build/radio-port-qemu` for the advertiser and `build/radio-rx-port-qemu` for
+the scanner), then run:
+
+```sh
+nix develop . -c tests/radio-rx-port/run-qemu-dual-e2e.sh 5
+```
+
+`tests/radio-rx-port/run-qemu-dual-e2e.sh` runs
+`efr32bg22-dual,flash0=...,flash1=...` with TCG `-icount shift=1` by default
+(`ICOUNT_SHIFT` may be overridden). The small round-robin quantum is a startup
+scheduling convention: it lets the receiver execute its software-RX arm before
+the advertiser's one-shot transmission. It is not a silicon clock or a claim
+about RF timing.
+
+A passing trace must establish this order and all of these boundaries:
+
+1. scanner RX arm: `addr=0xa8021008 value=0x00000002`;
+2. advertiser `TX snapshot sequence=...` after that arm;
+3. a positive modeled medium offer: `TX snapshot RX mailbox offers=[1-9]...`;
+4. the scanner's normal Zephyr callback marker: `rx_callback: len=...`.
+
+The harness also requires advertiser `RAC.CMD=0x00000001` (TXEN). The callback
+is therefore evidence that the QEMU medium's normalized offer traversed the
+scanner's descriptor worker, FRC completion publication, Zephyr controller,
+and scan callback. It is not evidence of silicon TX/RX timing, BUFC descriptor
+layout, FRC/CRC semantics, or an over-air packet. Those remain bounded by the
+stock/archive observations already cited in `docs/radio-tables.md` §4 (the
+sequencer RXRAWDATA stores at capture offsets `0x0ce4` and `0x0d5a..0x0d6a`)
+and by the documented unresolved FRC/BUFC producer contract.
+
 The full hardware-output configuration has an explicit RAM gate. After a
 `build/ram-probe` build, run `scripts/check-hardware-ram.sh`; it reads the
 linker map's complete `_image_ram_size` allocation rather than the incomplete
