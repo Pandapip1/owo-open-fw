@@ -531,6 +531,13 @@ normalize the bytes for Zephyr: RAIL does not parse a BLE header here, and
 packetBytes may include appended radio detail under the unresolved active
 RX-options configuration.
 
+`rail_data.o` makes the copy boundary equally explicit: its packet-copy helper
+is archive `[0x15bf34,0x15bf5c)` (member starts `0x15bccc`, section `+0x268`)
+and performs only one `memcpy` for span 0 plus an optional second `memcpy` for
+the wrapped span. It performs no header, length, or CRC parsing. This confirms
+that neither RAIL's packet copy nor the descriptor endpoint supplies the
+normalization Zephyr requires.
+
 The installed public RAIL headers corroborate the API-side layout without
 filling that hardware gap: `rail_types.h:6172-6231` names the fields as
 `packetStatus`, `packetBytes`, two portion lengths/pointers, and `filterMask`,
