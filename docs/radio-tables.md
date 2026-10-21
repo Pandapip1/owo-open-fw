@@ -228,6 +228,12 @@ there is no channel-2 literal in the capture (whose SHA-256 is
 This is only a literal-search fact: it does not exclude a computed channel-2
 address, and it is not evidence that any listed access executes. It does rule
 out claiming a plainly encoded sequencer descriptor producer from this image.
+It also bounds the capture's TX evidence: its sole channel-0 literal,
+`0xAA000018` at member offset `0x328c`, is `READOFFSET`; there is no static
+channel-0 `ADDR`, `WRITEOFFSET`, or `WRITEDATA` literal. The nearby
+`0xA8004088` literal at `0x1164` is FRC `AUXDATA`, not a TX FIFO port. Thus
+the capture does not establish an FRC/BUFC TX consumer or framing route; the
+QEMU TXEN snapshot remains explicitly synthetic.
 
 One branch of that downstream bookkeeping is now exactly located.  With BUFC
 threshold bit 18 pending, `generic_phy.o:FRC_IRQHandler` calls
