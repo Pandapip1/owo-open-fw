@@ -944,8 +944,10 @@ at archive byte offset `0x3c5c8` and calls the atomic counter reader at
 offset, shared with the secure window.  It is driven by its own modeled 2 MHz
 `PROTIMERCLK` input and QEMU's `ptimer` (rather than the CPU clock or host
 time); its regression advances virtual time just beyond 1000 ns and observes
-two ticks, then verifies reset returns it to zero. This is an emulator
-timebase approximation only. It is not interchangeable with the
+two ticks, then verifies reset returns it to zero. A companion regression
+runs the same interval with the separate BURTC clock enabled, confirming that
+PROTIMER remains driven by `PROTIMERCLK` rather than BURTC. These are emulator
+timebase approximations only. They are not interchangeable with the
 OpenISA HAL's `radio_tmr_start(trx, ticks_start, remainder)`: the reference
 port first adjusts a coarse RTC tick and a microsecond remainder, then
 programs its own RTC comparator (`hal/RV32M1/radio/radio.c:1026-1126`). The
