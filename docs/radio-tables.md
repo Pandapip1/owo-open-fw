@@ -305,8 +305,17 @@ record handling at `0x296a6` before clearing the BUFC pending mask
 (`0x28b28..0x28b36`). Thus BUFC channel-2 threshold is the concrete stock
 descriptor-delivery route; FRC `RXDONE` is not, on the current evidence, a
 direct PDU-delivery condition. The meaning of record byte `+2`, its payload
-framing, and which dispatched result represents a CRC-valid BLE packet remain
-unrecovered.
+framing remains unrecovered. Its low three-bit class does have an independently
+source-backed event meaning: the branch table bytes at `0x28850..0x28856` map
+classes 1/3 to `r8 |= 0x10000`, 2 to `0x800`, 4 to `0x400`, 5 to `0x100`, and
+6/7 to `0x8`. The public RAIL event ABI names those bits respectively
+`RX_PACKET_ABORTED`, `RX_ADDRESS_FILTERED`, `RX_FIFO_OVERFLOW`,
+`RX_FIFO_FULL`, and `RX_PACKET_RECEIVED`
+(`vendor/hal_silabs/gecko/platform/radio/rail_lib/common/rail_types.h:745-778,
+907-915,968-1012,1068-1076`). The binary is stripped, so this is an ABI
+correlation rather than a recovered symbol name; its numeric mapping is direct.
+In particular, classes 6 and 7 provide the missing concrete stock path from
+BUFC channel-2 threshold to the generic RAIL receive event.
 
 The deferred call is descriptor release, not an RX-client callback. `0x296a6`
 calls `0x29574` only for a retained, untagged record pointer, then clears the
