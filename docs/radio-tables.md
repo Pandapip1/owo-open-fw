@@ -296,9 +296,11 @@ only (`0x28708..0x28780`); it does not branch on FRC `RXDONE` bit 4 before the
 whole-mask acknowledgement. Conversely, BUFC pending bit 18 branches at
 `0x2883e..0x28846` to `0x29664`. That helper selects an eight-byte record from
 the software ring rooted at RAM `0x20001178` (literal at `0x29860`), advances
-the ring by eight bytes, writes the updated position to BUFC `0xaa0000b0`,
-acknowledges BUFC flag `0x40000` through `0xaa002114`, and publishes the
-selected record pointer at state `+0x08` (`0x29664..0x296a4`). Its return is
+the ring by eight bytes, updates BUFC channel-2 `THRESHOLDCTRL` at
+`0xaa0000b0`, acknowledges BUFC flag `0x40000` through `0xaa002114`, and
+publishes the selected record pointer at state `+0x08` (`0x29664..0x296a4`).
+The compatible public layout identifies `+0x0b0` as the threshold/watermark,
+not a producer/consumer pointer (`efr32bg21_bufc.h:208-222`). Its return is
 the selected record's byte `+2` low three bits; the ISR dispatches values 1–7
 through the table at `0x28846..0x28880`. It subsequently invokes deferred
 record handling at `0x296a6` before clearing the BUFC pending mask
