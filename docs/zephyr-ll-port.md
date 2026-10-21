@@ -470,6 +470,39 @@ safety margin.
   validation only, not an on-device or QEMU radio validation.
 
 ## 4. Known gaps/risks (not resolved)
+
+### OpenISA radio delay hooks
+
+`radio_tx_ready_delay_get()`, `radio_rx_ready_delay_get()`,
+`radio_tx_chain_delay_get()`, and `radio_rx_chain_delay_get()` remain explicit
+TODO stubs returning zero in the EFR32 HAL
+(`modules/efr32-radio/hal/radio.c:1788-1822`). Their units are microseconds:
+the OpenISA ULL stores their results in `ready_delay_us` when reserving radio
+slots (for example `vendor/zephyr/subsys/bluetooth/controller/ll_sw/ull_conn.c:1329-1372`),
+and uses the chain values as additions/subtractions in its microsecond HCTO
+calculation (`vendor/zephyr/subsys/bluetooth/controller/ll_sw/openisa/lll/lll_conn.c:363-375`).
+They therefore are not cosmetic constants: they influence reservation,
+packet-end timestamp correction, and TIFS/header-timeout boundaries.
+
+The RV32M1 reference cannot supply EFR32 values. It reads that device's
+TX/RX wakeup timing from its own hardware and returns a device-specific RX
+watermark/ISR-latency expression for the RX chain delay
+(`vendor/zephyr/subsys/bluetooth/controller/ll_sw/openisa/hal/RV32M1/radio/radio.c:775-798`).
+The local EFR32 RAIL headers instead document configurable state-turnaround
+and PA-ramp inputs; they warn that changing ramp time can change the minimum
+turnaround (`vendor/hal_silabs/simplicity_sdk/platform/radio/rail_lib/common/sl_rail.h:2744-2751,2957-2969`).
+They do not establish the EFR32 PHY-, PA-, or capture-path-specific values of
+these four hooks. In particular, the xG22 PA utility's configured 2-us ramp is
+not a radio-ready or chain-delay measurement. QEMU's synthetic 150-us
+completion is likewise a simulator boundary, not hardware timing evidence
+(`docs/radio-tables.md:476`).
+
+Keep the stubs until a hardware capture or a recovered RAIL timing contract
+identifies each returned quantity for the supported PHY and PA configuration,
+including which packet-end/capture reference its chain correction uses. A
+non-zero substitution, or treating zero as a proven value, would invent BLE
+timing and can change ULL scheduling.
+
 1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §6; RFSENSE is documented separately in §5 and is not on the startup/RX/TX critical path.
 2. **Hardware TIFS on a Cortex-M33** remains unproven, including RAC latency, packet-end capture, and HCTO semantics. The QEMU-only scheduler seam above is only a bounded model transition; if T_IFS (150 us +-2) cannot be met from the interrupt/job path on hardware, a hardware path (PRS/PROTIMER -> RAC) is required.
 3. **HFXO / sleep**: `lll_clock_wait` is a no-op; `EVENT_OVERHEAD_XTAL_US` etc. in `lll/lll_vendor.h` are OpenISA placeholders. Interaction with Zephyr PM (EM2) is unexamined.
