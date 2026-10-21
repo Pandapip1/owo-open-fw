@@ -15,7 +15,7 @@ model; **[I]** = inference, not confirmed. No blob bytes or disassembly are repr
 | SYNTH | 0xA8018000 [S] / 0xB8018000 [NS] | [F] same |
 | PROTIMER | 0xA801C000 | [F] RAIL archive object access; see §4.3 |
 | RAC | 0xA8020000 [S] / 0xB8020000 [NS] | [F] public table plus stock disassembly literals; generated `RAC_S.py` / `RAC_NS.py` |
-| RF mailbox | 0xB8028000, 0xB802C000 | [F] xG22 RAIL archive mailbox access; see §1.1 |
+| RF mailbox | 0xA8028000/0xA802C000 [S], 0xB8028000/0xB802C000 [NS] | [F] xG22 RAIL archive and stock IRQ access; see §1.1 |
 | BUFC | 0xAA000000 | [F] layout matches the xG21 public header; matched by stock init trace |
 
 The public rev-B2 models establish a narrower, usable fact: FRC, AGC, RFCRC, MODEM, SYNTH, and RAC each have writable one-bit `EN.EN` at `+0x004` (their respective `*_S_register.py:24-37` and `*_S_field.py:17-24` files). `radio_setup()` enables exactly those six blocks, and QEMU masks the matching latches to bit zero with a native regression. Separately, the stock helper writes `1` at secure BUFC and PROTIMER `+0x004` at `flash-stock.bin` offsets `0x26de4` and `0x26dfc` (target literals `0xAA000004` and `0xA801C004` at `0x2723c` and `0x2724c`); the HAL mirrors those direct writes through the established non-secure aliases because it uses both blocks. This is not a claim that either bit is named `EN`, nor does it establish ordering, reset sequencing, or interrupt policy. No conclusion is drawn for PRORTC. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
@@ -37,10 +37,14 @@ The service path waits on bit 1 at `0xB8028040`, acknowledges it through
 intersects the latter status/enable pair, clears active bit 1 through the
 alias, and consumes byte zero (archive `0x52fdc..0x53048`). This proves an
 eight-bit command/response-style exchange and doorbell/ack convention. It
-does not establish endpoint cross-routing, RDMAILBOX assertion timing, normal
-RX descriptor production, or stock use: no relevant static mailbox literal
-occurs in the stripped stock image, and the archive paths do not write buffer
-2 `WRITEDATA`.
+does not establish endpoint cross-routing, RDMAILBOX assertion timing, or
+normal RX descriptor production. Stock does use the secure B endpoint in
+`RDMAILBOX_IRQHandler`: it loads `0xA8028000` from the literal at
+`flash-stock.bin:0x28dd0`, reads its `+0x040`/`+0x044` status-enable pair,
+and acknowledges its masked result through the literal `0xA802005c` at
+`0x28dd8`. This establishes stock mailbox servicing, not a packet path: the
+bounded handler analysis has not shown a buffer-2 `WRITEDATA` write or a
+descriptor record producer.
 
 ## 2. RAIL PHY configuration table format (`ble_efr32xg22_configurator_out.c`, Zlib licence) [F]
 The public xG22 configurator source names every target register and makes the encoding unambiguous. Arrays contain `uint32_t` entries and end in `0xFFFFFFFF`.
