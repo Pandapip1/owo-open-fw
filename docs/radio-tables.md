@@ -1022,13 +1022,18 @@ programming, not for a proven autonomous PROTIMER-to-RAC/FRC launch route.
 
 The Zephyr port consequently uses its existing free-running BURTC ticker
 counter as a single alarm source: the ordinary LLL ticker compare and one
-pending radio-launch compare are multiplexed to the earlier wrap-safe deadline.
-The counter ISR only records the expiry and wakes a pre-created TX or RX
-Zephyr thread. Those persistent threads run the normal radio enable path only
-when selected by the kernel scheduler; disable/reset disarms the deadline and
+pending radio-launch compare are multiplexed to the earlier wrap-safe Counter
+deadline. In the QEMU profiles that same Counter-owned BURTC is also Zephyr's
+tickless system clock, so its combined driver is the sole `COMP`/IRQ18 owner
+and arbitrates the Counter deadline against the kernel deadline. The Counter
+ISR only records the radio expiry and wakes a pre-created TX or RX Zephyr
+thread; those persistent threads run the normal radio enable path only when
+selected by the kernel scheduler. Disable/reset disarms the deadline and
 invalidates its generation, but does not destroy the workers. This is an
 intentional scheduler integration choice, rather than a claim that it matches
-the unresolved vendor PROTIMER semantics.
+the unresolved vendor PROTIMER semantics. The focused QEMU regression
+`tests/burtc-arbitration-port` verifies that a Counter alarm and a kernel
+sleep complete through this single comparator owner.
 
 The retained stock trace records the concrete early configuration sequence: `radio-trace.log:64-73` writes `+0x008 = 0x00011102`, `+0x030 = 0x00001233`, `+0x038 = 0x80015558`, `+0x00c = 1`, `+0x100 = 0x01000003`, `+0x100 = 0x03000003`, `+0x110 = 0x00200003`, and `+0x060 = 0`; `:194-210` additionally reads `+0x130` and writes `+0x074/+0x078`, command `0x40000`, `+0x140`, and `+0x064`; `:301` reads `+0x120`. QEMU therefore gives this observed register set an explicit `PROTIMER` named latch model, with a regression for the exact trace values. These are access facts only: register field names, the correspondence between RAIL timer ticks and the raw PROTIMER counter, capture/compare semantics, command effects, IRQ behavior, and safe TIFS sequence remain unresolved, so neither the model nor the HAL synthesizes timer behavior.
 

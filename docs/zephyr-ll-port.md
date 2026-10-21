@@ -51,9 +51,15 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   (`HAL_TICKER_CNTR_CLK_UNIT_FSEC 30517578125`, `openisa/hal/RV32M1/ticker.h`), refcounted start, compare interrupt that
   runs `ticker_trigger(0)` (`openisa/lll/lll.c:78-95`). `mayfly.c`/`ticker.c` glue (`hal/RV32M1/mayfly.c`, `ticker.c`) is
   generic and is reused by derivation.
-* **Done** (`hal/cntr.c`): implemented on the Zephyr Counter API, devicetree alias `ll-counter` = `&burtc0` (BURTC, `dts/arm/silabs/xg22/xg22.dtsi:518-525`),
-  because RTCC is the system sleeptimer (`xg22.dtsi:18 silabs,sleeptimer = &rtcc0`). Not run on hardware; the frequency/top asserts are in `cntr_init`.
-  **Open:** BURTC clock source and its keeping time in EM2/EM3; local sleep-clock accuracy (`lll_clock.c` returns a fixed 500 ppm,
+* **Done** (`hal/cntr.c`): implemented on the Zephyr Counter API, devicetree alias `ll-counter` = `&burtc0` (BURTC, `dts/arm/silabs/xg22/xg22.dtsi:518-525`). The radio QEMU configurations select
+  `CONFIG_GECKO_BURTC_TIMER`, so the same free-running BURTC is now Zephyr's tickless system clock rather than RTCC/the Silicon Labs sleeptimer.
+  The combined upstream-side driver is the sole owner of BURTC `COMP` and IRQ18: it chooses the earlier wrap-safe deadline between the
+  kernel timeout and Counter's one-shot channel-0 alarm, clears/rearms that one comparator under its spinlock, announces elapsed kernel ticks,
+  and invokes an expired Counter callback after releasing the lock. This preserves Counter semantics without allowing two independent drivers
+  to program COMP or bind IRQ18. `tests/burtc-arbitration-port` is the focused QEMU regression: it arms a Counter alarm, enters a kernel
+  sleep on the same peripheral, and requires the callback before printing `burtc-arbitration: PASS`.
+  The Counter start is harmless and stop/top reprogramming are rejected while it is the monotonic system clock. Not run on hardware; the
+  frequency/top asserts are in `cntr_init`. **Open:** the physical BURTC clock source and its keeping time in EM2/EM3; local sleep-clock accuracy (`lll_clock.c` returns a fixed 500 ppm,
   `openisa/lll/lll_clock.c:16-33`, and `lll_clock_wait()` does nothing: HFXO start/stop is therefore not handled at all).
 
 ### 2.3 Crypto and entropy
@@ -229,11 +235,14 @@ The advertiser QEMU profile separately opts into
 HAL records that boundary and arms a persistent scheduler job: the job enables
 the staged RX path after the requested TIFS, then uses the supplied HCTO as a
 bounded no-response teardown. This job no longer has a private kernel timer.
-Instead it is the third client of the existing BURTC CC0 mux, alongside the
-ordinary LLL ticker and the scheduled radio-launch deadline
-(`modules/efr32-radio/hal/cntr.c:30-64,71-100,171-184`).  CC0 chooses the
-earliest wrap-safe deadline; its ISR clears the due client and publishes only
-the appropriate wakeup. In particular, the QEMU-TIFS branch calls
+Instead it is a radio-deadline client of the Counter API's BURTC owner, which
+also arbitrates the ordinary LLL ticker alarm and Zephyr's tickless system-clock
+deadline on the one hardware `COMP`/IRQ18 route. The Counter layer chooses the
+earlier wrap-safe Counter deadline against the kernel deadline, while the
+radio layer multiplexes ticker and radio-launch work into that Counter alarm
+(`modules/efr32-radio/hal/cntr.c:30-64,71-100,171-184`). Its ISR clears the
+due client and publishes only the appropriate wakeup. In particular, the
+QEMU-TIFS branch calls
 `efr32_radio_qemu_tifs_wake()` and never issues RAC MMIO in interrupt context
 (`cntr.c:85-99`; `radio.c:314-329`). Reset, `radio_disable()`, and
 `radio_tmr_stop()` invalidate the generation and cancel the mux client. This
