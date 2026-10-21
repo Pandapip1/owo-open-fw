@@ -34,7 +34,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 
 "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount "shift=$ICOUNT_SHIFT" -d guest_errors \
+    -display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
