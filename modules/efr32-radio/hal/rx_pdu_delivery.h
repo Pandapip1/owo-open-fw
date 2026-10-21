@@ -32,6 +32,18 @@ static inline void efr32_radio_rx_pdu_delivery_reset(
 }
 
 /*
+ * A descriptor consumer may observe more records than its current controller
+ * RX stage can own.  Expose that state explicitly so it can retire surplus
+ * producer records without turning an already accepted PDU into a failed
+ * completion.
+ */
+static inline bool efr32_radio_rx_pdu_delivery_is_complete(
+	const struct efr32_radio_rx_pdu_delivery *delivery)
+{
+	return delivery && delivery->delivered;
+}
+
+/*
  * Validate and copy one normalized PDU.  The current OpenISA contract uses
  * an octet-sized payload-length field, hence bits_len must be eight.  Reject
  * every invalid input before modifying target so an eventual hardware handoff

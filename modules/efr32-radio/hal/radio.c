@@ -1599,6 +1599,20 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 				/* Non-received classes are queue events, never PDUs. */
 				continue;
 			}
+			/*
+			 * A single OpenISA RX stage owns exactly one PDU until its
+			 * completion callback calls radio_status_reset().  The synthetic
+			 * QEMU producer can queue descriptor records faster than this
+			 * scheduler-owned consumer runs.  Retire any surplus successful
+			 * record and its source FIFO interval, but never let its expected
+			 * -EALREADY overwrite the first frame's CRC-valid outcome.
+			 */
+			if (efr32_radio_rx_pdu_delivery_is_complete(
+				    &efr32_packet_stage.rx_delivery)) {
+				*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET +
+					EFR32_BUFC_READOFFSET_OFFSET) = descriptor.endpoint;
+				continue;
+			}
 
 			pdu_err = efr32_radio_rx_descriptor_normalize_pdu(
 				pdu, efr32_rx_fifo,

@@ -58,8 +58,10 @@ int main(void)
 	/* A valid frame owns the RX stage until its caller resets that stage. */
 	memset(target, 0x5a, sizeof(target));
 	efr32_radio_rx_pdu_delivery_reset(&delivery);
+	assert(!efr32_radio_rx_pdu_delivery_is_complete(&delivery));
 	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu,
 						  sizeof(short_pdu), 8U, 2U) == 0);
+	assert(efr32_radio_rx_pdu_delivery_is_complete(&delivery));
 	memcpy(before, target, sizeof(target));
 	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, replacement_pdu,
 						  sizeof(replacement_pdu), 8U, 2U) == -EALREADY);
@@ -67,6 +69,7 @@ int main(void)
 
 	/* Rejection before a copy leaves the stage available to its real producer. */
 	efr32_radio_rx_pdu_delivery_reset(&delivery);
+	assert(!efr32_radio_rx_pdu_delivery_is_complete(&delivery));
 	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu, 3U,
 						  8U, 2U) == -EMSGSIZE);
 	assert(efr32_radio_rx_pdu_deliver_once(&delivery, target, short_pdu,
