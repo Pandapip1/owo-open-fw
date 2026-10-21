@@ -226,11 +226,18 @@ to BUFC channel 1, documented in `docs/radio-tables.md` §4 at capture offsets
 
 The advertiser QEMU profile separately opts into
 `CONFIG_EFR32_RADIO_QEMU_TIFS`. After the LLL has retired a TX completion, the
-HAL records that boundary and arms a persistent Zephyr timer/job: the job
-enables the staged RX path after the requested TIFS, then uses the supplied
-HCTO as a bounded no-response teardown. Reset, `radio_disable()`, and
-`radio_tmr_stop()` invalidate the generation and stop the timer. This is a
-QEMU-only scheduler seam; it does not claim an EFR32 packet-end timestamp,
+HAL records that boundary and arms a persistent scheduler job: the job enables
+the staged RX path after the requested TIFS, then uses the supplied HCTO as a
+bounded no-response teardown. This job no longer has a private kernel timer.
+Instead it is the third client of the existing BURTC CC0 mux, alongside the
+ordinary LLL ticker and the scheduled radio-launch deadline
+(`modules/efr32-radio/hal/cntr.c:30-64,71-100,171-184`).  CC0 chooses the
+earliest wrap-safe deadline; its ISR clears the due client and publishes only
+the appropriate wakeup. In particular, the QEMU-TIFS branch calls
+`efr32_radio_qemu_tifs_wake()` and never issues RAC MMIO in interrupt context
+(`cntr.c:85-99`; `radio.c:314-329`). Reset, `radio_disable()`, and
+`radio_tmr_stop()` invalidate the generation and cancel the mux client. This
+is a QEMU-only scheduler seam; it does not claim an EFR32 packet-end timestamp,
 PROTIMER compare, RAC sequencer latency, or silicon HCTO behavior, and the
 option remains disabled for hardware builds.
 
@@ -241,12 +248,19 @@ that recorded action and programs T1 for packet-end plus TIFS minus warm-up
 before its LLL callback (`hal/RV32M1/radio/radio.c:233-272,388-395`). The
 callback then clears completion status (`lll_scan.c:367-387`; `lll.c:464-473`),
 stages `SCAN_REQ`, and records RX as the following action
-(`lll_scan.c:882-947`). Because this port deliberately defers the LLL callback
-to a scheduler thread, its QEMU-only path must rendezvous a generation-guarded
-prepared `SCAN_REQ` with a bounded scheduler job after that callback. It must
-not treat the later `radio_switch_complete_and_rx()` call as an RX launch or
-claim silicon-accurate 150-us timing. `radio_disable()`, `radio_tmr_stop()`,
-reset, and `radio_switch_complete_and_disable()` cancel that generation.
+(`lll_scan.c:882-947`).
+
+Because this port deliberately defers the LLL callback to a scheduler thread,
+the QEMU profile claims the recorded RX-to-TX turn before the callback,
+issues `RXDIS`, and waits for that callback to stage the response PDU.  Only
+then does it place a generation-guarded TIFS deadline through the BURTC mux;
+the persistent worker rechecks both idle state and staging before its final
+`RAC.CMD=TXEN` (`modules/efr32-radio/hal/radio.c:663-712,1023-1057`). This is
+why the later `radio_switch_complete_and_rx()` is not treated as an immediate
+RX launch. `radio_disable()`, `radio_tmr_stop()`, reset, and
+`radio_switch_complete_and_disable()` cancel the generation. The mechanism
+proves an ordered, bounded **QEMU** exchange, not silicon-accurate 150-us
+timing, packet-end capture, or the hardware sequencer's PROTIMER/RAC route.
 
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
@@ -373,6 +387,41 @@ layout, FRC/CRC semantics, or an over-air packet. Those remain bounded by the
 stock/archive observations already cited in `docs/radio-tables.md` §4 (the
 sequencer RXRAWDATA stores at capture offsets `0x0ce4` and `0x0d5a..0x0d6a`)
 and by the documented unresolved FRC/BUFC producer contract.
+
+### Active-scan QEMU exchange harness
+
+The opt-in active-scanner profile adds `CONFIG_RADIO_RX_PORT_ACTIVE_SCAN=y`
+and `CONFIG_EFR32_RADIO_QEMU_TIFS=y` (`tests/radio-rx-port/prj-active-scan.conf:1-5`).
+Build that scanner separately, preserving the passive scanner as the ordinary
+RX test:
+
+```sh
+nix develop . -c cmake -G Ninja -S tests/radio-rx-port -B build/radio-rx-port-active-qemu \
+  -DBOARD=bg22_ek4108a -DZEPHYR_BASE="$PWD/vendor/zephyr" \
+  -DZephyr_DIR="$PWD/vendor/zephyr/share/zephyr-package/cmake" \
+  -DEXTRA_CONF_FILE=prj-active-scan.conf \
+  -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust"
+nix develop . -c cmake --build build/radio-rx-port-active-qemu
+nix develop . -c tests/radio-rx-port/run-qemu-active-scan-e2e.sh 5
+```
+
+Unlike the passive dual-image harness, this test defaults to `-icount shift=5`.
+That is a QEMU TCG pacing setting selected because the modeled 150-us
+turn-around otherwise stretches to roughly 1.5 ms at shift 1, allowing the
+LLL to clean up before the worker can issue TXEN
+(`run-qemu-active-scan-e2e.sh:13-16`). It is a reproducibility setting for the
+test's scheduler interleaving, not a calibrated radio clock or a statement
+about EFR32 timing.
+
+The active harness requires endpoint-tagged QEMU snapshots in this strict
+logical order: advertiser `ADV_IND` (endpoint 0, 11 bytes beginning
+`0x743a0940`), scanner `SCAN_REQ` (endpoint 1, 14 bytes beginning
+`0x1a1a0cc3`), then advertiser `SCAN_RSP` (endpoint 0, 8 bytes beginning
+`0x743a0644`; `run-qemu-active-scan-e2e.sh:70-103`). Endpoint tags are model
+identifiers—not guest MMIO facts—and the snapshots prove only that the staged
+LL PDUs crossed the QEMU RAC/BUFC/medium boundary in the expected order. They
+do not establish over-air reception, CRC/FRC production, packet-end timing,
+PROTIMER behavior, BLE channel access semantics, or a silicon TIFS guarantee.
 
 The full hardware-output configuration has an explicit RAM gate. After a
 `build/ram-probe` build, run `scripts/check-hardware-ram.sh`; it reads the
