@@ -17,6 +17,7 @@
 #include "ll_sw/lll.h"
 #include "hal/efr32/swi.h"
 #include "hal/efr32/ll_threads.h"
+#include "hal/efr32/cntr_efr32.h"
 
 /*
  * Two contexts, one per software interrupt. ULL high and low share the worker interrupt in this
@@ -48,13 +49,13 @@ static struct ll_context worker_ctx = {
 	.enabled = true,
 };
 
-static void ll_context_post(struct ll_context *ctx)
+static void ll_context_post(struct ll_context *ctx, int deadline)
 {
 	unsigned int key = irq_lock();
 
 	ctx->pending = true;
 	irq_unlock(key);
-	k_deadline_event_post(&ll_event, K_DEADLINE(0));
+	k_deadline_event_post(&ll_event, deadline);
 }
 
 /* Consume one pending run of @p ctx; returns the body to run, if its gate is open. */
@@ -84,6 +85,8 @@ static void ll_thread(void *a, void *b, void *c)
 		void (*body)(const void *arg);
 
 		k_deadline_event_wait(&ll_event);
+		/* The ticker deadline bounds the worker work this pass is about to run. */
+		efr32_radio_deadline_check((int)cntr_ticker_deadline(), "ll thread");
 		/*
 		 * Each pass serves both contexts, LLL first. Serving the LLL until it is idle would
 		 * starve the worker, whose ticker job drains the user operations the LLL queues. A
@@ -118,13 +121,13 @@ void efr32_ll_threads_bind(void (*worker)(const void *arg), void (*lll)(const vo
 void efr32_ll_worker_doorbell_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
-	ll_context_post(&worker_ctx);
+	ll_context_post(&worker_ctx, (int)cntr_ticker_deadline());
 }
 
 void efr32_ll_lll_doorbell_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
-	ll_context_post(&lll_ctx);
+	ll_context_post(&lll_ctx, (int)cntr_launch_deadline());
 }
 
 static struct ll_context *callee_context(uint8_t callee_id)

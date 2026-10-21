@@ -29,6 +29,8 @@ BUILD_ASSERT(CONFIG_CLOCK_EVENT_SCHED_FREQUENCY % TICK_HZ == 0,
 
 static uint8_t refcount;
 static atomic_t cmp_fired;
+/* Start-by deadline of the ticker work, for the LL thread's lateness check. */
+static atomic_t ticker_deadline;
 
 K_CLOCK_EVENT_DEFINE(ticker_event);
 K_CLOCK_EVENT_DEFINE(radio_launch_event);
@@ -37,11 +39,13 @@ static struct k_spinlock radio_event_lock;
 static struct {
 	uint32_t event_generation;
 	uint32_t generation;
+	uint32_t deadline;
 	uint8_t trx;
 } radio_launch;
 static struct {
 	uint32_t event_generation;
 	uint32_t generation;
+	uint32_t deadline;
 } qemu_tifs;
 
 /* Logical time of the 32-bit tick @p tick nearest to now. */
@@ -79,6 +83,7 @@ static void radio_launch_expired(struct k_clock_event *event, uint32_t event_gen
 {
 	uint32_t armed_generation;
 	uint32_t generation;
+	uint32_t deadline;
 	uint8_t trx;
 
 	ARG_UNUSED(event);
@@ -86,10 +91,11 @@ static void radio_launch_expired(struct k_clock_event *event, uint32_t event_gen
 	K_SPINLOCK(&radio_event_lock) {
 		armed_generation = radio_launch.event_generation;
 		generation = radio_launch.generation;
+		deadline = radio_launch.deadline;
 		trx = radio_launch.trx;
 	}
 	if (armed_generation == event_generation) {
-		efr32_radio_launch_wake(trx, generation);
+		efr32_radio_launch_wake(trx, generation, deadline);
 	}
 }
 
@@ -98,15 +104,17 @@ static void qemu_tifs_expired(struct k_clock_event *event, uint32_t event_genera
 {
 	uint32_t armed_generation;
 	uint32_t generation;
+	uint32_t deadline;
 
 	ARG_UNUSED(event);
 	ARG_UNUSED(user_data);
 	K_SPINLOCK(&radio_event_lock) {
 		armed_generation = qemu_tifs.event_generation;
 		generation = qemu_tifs.generation;
+		deadline = qemu_tifs.deadline;
 	}
 	if (armed_generation == event_generation) {
-		efr32_radio_qemu_tifs_wake(generation);
+		efr32_radio_qemu_tifs_wake(generation, deadline);
 	}
 }
 
@@ -150,12 +158,28 @@ void cntr_cmp_set(uint8_t cmp, uint32_t value)
 	uint64_t deadline = tick_to_logical(value);
 
 	LL_ASSERT(cmp == 0);
+	atomic_set(&ticker_deadline, (uint32_t)deadline);
 	/* Like a Counter alarm with EXPIRE_WHEN_LATE: a late compare fires now. */
 	if (too_close(&ticker_event, deadline) ||
 	    k_clock_event_arm_abs(&ticker_event, (uint32_t)deadline) != 0) {
 		k_clock_event_cancel(&ticker_event);
 		ticker_fire();
 	}
+}
+
+/* Start-by deadline of the ticker work the LL thread is about to run. */
+uint32_t cntr_ticker_deadline(void)
+{
+	return (uint32_t)atomic_get(&ticker_deadline);
+}
+
+/* Start-by deadline of the radio launch work the LLL context is about to run. */
+uint32_t cntr_launch_deadline(void)
+{
+	uint32_t deadline;
+
+	K_SPINLOCK(&radio_event_lock) { deadline = radio_launch.deadline; }
+	return deadline;
 }
 
 void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
@@ -172,7 +196,7 @@ void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
 	    k_clock_event_arm_abs_with_generation(&radio_launch_event, (uint32_t)deadline,
 						  &event_generation) != 0) {
 		irq_unlock(key);
-		efr32_radio_launch_wake(trx, generation);
+		efr32_radio_launch_wake(trx, generation, (uint32_t)deadline);
 		return;
 	}
 	/* IRQs remain locked: the handler cannot observe a half-published arm. */
@@ -180,6 +204,7 @@ void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
 		radio_launch.event_generation = event_generation;
 		radio_launch.trx = trx;
 		radio_launch.generation = generation;
+		radio_launch.deadline = (uint32_t)deadline;
 	}
 	irq_unlock(key);
 }
@@ -217,11 +242,12 @@ void cntr_qemu_tifs_arm_after_us(uint32_t delay_us, uint32_t generation)
 		delay = MAX(delay, (uint64_t)k_clock_event_min_arm_cycles(&qemu_tifs_event) + 1U);
 		ret = k_clock_event_arm_abs_with_generation(&qemu_tifs_event, (uint32_t)(now + delay),
 							    &event_generation);
-	}
-	if (ret == 0) {
-		K_SPINLOCK(&radio_event_lock) {
-			qemu_tifs.event_generation = event_generation;
-			qemu_tifs.generation = generation;
+		if (ret == 0) {
+			K_SPINLOCK(&radio_event_lock) {
+				qemu_tifs.event_generation = event_generation;
+				qemu_tifs.generation = generation;
+				qemu_tifs.deadline = (uint32_t)(now + delay);
+			}
 		}
 	}
 	irq_unlock(key);

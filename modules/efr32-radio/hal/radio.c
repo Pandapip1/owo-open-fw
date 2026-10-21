@@ -138,6 +138,9 @@ static atomic_t efr32_radio_launch_active;
 /* Generation mailboxes pair the coalescing event latch with its expiry. */
 static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
+/* Start-by deadlines of the pending launch work, for the jobs' lateness check. */
+static atomic_t efr32_radio_tx_pending_deadline;
+static atomic_t efr32_radio_rx_pending_deadline;
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_completion_event);
@@ -147,6 +150,7 @@ static struct {
 	radio_isr_cb_t callback;
 	void *param;
 	bool abort;
+	int deadline;
 } efr32_radio_completion_work;
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
 
@@ -165,6 +169,8 @@ static bool efr32_qemu_tifs_rx_to_tx_staging;
 /* Coalesces an IRQ publication while the persistent TIFS job is running. */
 K_DEADLINE_EVENT_DEFINE(efr32_qemu_tifs_event);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
+/* Start-by deadline of the pending TIFS turn-around, for the job's lateness check. */
+static atomic_t efr32_qemu_tifs_deadline;
 
 static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation)
 {
@@ -239,6 +245,8 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 
 		/* Atomically consume a TIFS publication or become its idle consumer. */
 		k_deadline_event_wait(&efr32_qemu_tifs_event);
+		efr32_radio_deadline_check((int)atomic_get(&efr32_qemu_tifs_deadline),
+					   "qemu tifs");
 		key = irq_lock();
 		phase = efr32_qemu_tifs.phase;
 		generation = efr32_qemu_tifs.generation;
@@ -316,7 +324,7 @@ K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 #endif
 
 /* Called from the shared BURTC CC0 alarm: publish work only, never RAC MMIO. */
-void efr32_radio_qemu_tifs_wake(uint32_t generation)
+void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 {
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	bool valid;
@@ -327,14 +335,16 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation)
 	irq_unlock(key);
 	if (valid) {
 		/*
-		 * BURTC expiry is this job's release event. K_DEADLINE(0) gives the
-		 * now-eligible worker an immediate start-by key at its static priority;
-		 * it does not advance the RXEN/TXEN action before the compare expiry.
+		 * BURTC expiry is this job's release event. The compare target is the
+		 * job's start-by deadline: it orders the now-eligible worker among
+		 * equal-priority ready jobs and is checked for lateness on entry.
 		 */
-		k_deadline_event_post(&efr32_qemu_tifs_event, K_DEADLINE(0));
+		atomic_set(&efr32_qemu_tifs_deadline, deadline);
+		k_deadline_event_post(&efr32_qemu_tifs_event, (int)deadline);
 	}
 #else
 	ARG_UNUSED(generation);
+	ARG_UNUSED(deadline);
 #endif
 }
 
@@ -359,9 +369,12 @@ static void efr32_radio_tx_job(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 	for (;;) {
 		atomic_val_t generation;
+		atomic_val_t deadline;
 
 		k_deadline_event_wait(&efr32_radio_tx_event);
 		generation = atomic_get(&efr32_radio_tx_pending_generation);
+		deadline = atomic_get(&efr32_radio_tx_pending_deadline);
+		efr32_radio_deadline_check((int)deadline, "tx launch");
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
 			radio_tx_enable();
@@ -376,9 +389,12 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 	for (;;) {
 		atomic_val_t generation;
+		atomic_val_t deadline;
 
 		k_deadline_event_wait(&efr32_radio_rx_event);
 		generation = atomic_get(&efr32_radio_rx_pending_generation);
+		deadline = atomic_get(&efr32_radio_rx_pending_deadline);
+		efr32_radio_deadline_check((int)deadline, "rx launch");
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
 			radio_rx_enable();
@@ -400,19 +416,21 @@ K_THREAD_DEFINE(efr32_radio_completion_job_thread,
 		EFR32_LL_THREAD_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
-void efr32_radio_launch_wake(uint8_t trx, uint32_t generation)
+void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t deadline)
 {
 	if ((uint32_t)atomic_get(&efr32_radio_launch_active) != generation) {
 		return;
 	}
 	if (trx) {
 		atomic_set(&efr32_radio_tx_pending_generation, generation);
-		/* Compare expiry is the release event; do not defer eligible launch work. */
-		k_deadline_event_post(&efr32_radio_tx_event, K_DEADLINE(0));
+		atomic_set(&efr32_radio_tx_pending_deadline, deadline);
+		/* Compare expiry is the release event; the target is the start-by deadline. */
+		k_deadline_event_post(&efr32_radio_tx_event, (int)deadline);
 	} else {
 		atomic_set(&efr32_radio_rx_pending_generation, generation);
+		atomic_set(&efr32_radio_rx_pending_deadline, deadline);
 		/* The EDF key orders equal-priority ready jobs; it cannot start early. */
-		k_deadline_event_post(&efr32_radio_rx_event, K_DEADLINE(0));
+		k_deadline_event_post(&efr32_radio_rx_event, (int)deadline);
 	}
 }
 
@@ -1030,7 +1048,8 @@ static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 	efr32_radio_completion_work.param = param;
 	efr32_radio_completion_work.abort = abort;
 	/* FRC completion has occurred; make the callback worker eligible now. */
-	k_deadline_event_post(&efr32_radio_completion_event, K_DEADLINE(0));
+	efr32_radio_completion_work.deadline = K_DEADLINE(0);
+	k_deadline_event_post(&efr32_radio_completion_event, efr32_radio_completion_work.deadline);
 }
 
 static void efr32_radio_completion_job(void *a, void *b, void *c)
@@ -1051,6 +1070,8 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			callback = efr32_radio_completion_work.callback;
 			param = efr32_radio_completion_work.param;
 			abort = efr32_radio_completion_work.abort;
+			efr32_radio_deadline_check(efr32_radio_completion_work.deadline,
+						   "completion");
 		}
 		irq_unlock(key);
 
