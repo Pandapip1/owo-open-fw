@@ -63,8 +63,49 @@
 	};
 };
 
+/* Scheduler clock providers: BURTC across deep sleep, TIMER0 (EM01GRPACLK) while running. */
 &burtc0 {
 	status = "okay";
+};
+
+/* TIMER0, the only 32-bit TIMER, belongs to the scheduler clock. */
+&timer0 {
+	counter {
+		status = "okay";
+	};
+};
+
+&timer0_pwm {
+	status = "disabled";
+};
+
+/*
+ * The kit LED (PA4) moves to the 16-bit TIMER1, CC0. Divided by 32 from EM01GRPACLK
+ * (76.8 MHz), it keeps the kit's 20 ms period within 16 bits.
+ */
+&pinctrl {
+	kit_led_pwm: kit_led_pwm {
+		group0 {
+			pins = <TIMER1_CC0_PA4>;
+			drive-push-pull;
+			output-high;
+		};
+	};
+};
+
+&timer1 {
+	status = "okay";
+	clock-div = <32>;
+
+	timer1_pwm: pwm {
+		status = "okay";
+		pinctrl-0 = <&kit_led_pwm>;
+		pinctrl-names = "default";
+	};
+};
+
+&pwm_led0 {
+	pwms = <&timer1_pwm 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
 };
 
 &sram0 {
@@ -97,7 +138,5 @@
 
 	aliases {
 		watchdog0 = &wdog0;
-		/* 32.768 kHz 32-bit ticker counter; RTCC is the sleeptimer. */
-		ll-counter = &burtc0;
 	};
 };

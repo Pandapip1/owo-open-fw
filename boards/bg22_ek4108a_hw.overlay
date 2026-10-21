@@ -48,7 +48,7 @@
 
 	suit_boost: suit_boost {
 		group0 {
-			pins = <TIMER1_CC0_PC7>;
+			pins = <TIMER3_CC0_PC7>;
 			drive-push-pull;
 			output-low;
 		};
@@ -120,7 +120,11 @@
 	};
 };
 
-&timer1 {
+/*
+ * Boost converter PWM on the 16-bit TIMER3: of the TIMERs left free by the scheduler clock
+ * (TIMER0) and the kit LED (TIMER1), only TIMER3 routes to port C (xg22-pinctrl.h).
+ */
+&timer3 {
 	status = "okay";
 
 	suit_boost_pwm: pwm {
@@ -158,12 +162,6 @@
 		enable-gpios = <&suit_expander 3 GPIO_ACTIVE_HIGH>;
 	};
 
-	chosen {
-		/* Zephyr's timing API, backed by a counter that keeps counting in every sleep state
-			 * (BURTC, 32768 Hz; see the pinned Zephyr submodule). */
-		zephyr,timing-counter = &burtc0;
-	};
-
 	suit_output: suit-output {
 		compatible = "owo,suit-output";
 		/* PB0..PB3: high side A, high side B, low side A, low side B */
@@ -174,8 +172,6 @@
 		/* One word per electrode channel 0..10 (stock table, recovered by emulation). */
 		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
 				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
-		/* 1 us ticks (32 MHz / 32), only runs while the supply is on */
-		phase-timer = <&timer0_counter>;
 		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
 		boost-duty-percent = <50>;
 		io-channels = <&suit_dac 15>, <&adc0 0>;
@@ -188,19 +184,3 @@
 	};
 };
 
-/* The kit's LED PWM uses TIMER0; the suit needs it as the phase timer instead. */
-&timer0 {
-	clock-div = <32>;
-
-	timer0_counter: counter {
-		status = "okay";
-	};
-};
-
-&timer0_pwm {
-	status = "disabled";
-};
-
-&burtc0 {
-	status = "okay";
-};
