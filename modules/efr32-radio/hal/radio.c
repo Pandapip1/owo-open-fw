@@ -139,7 +139,7 @@ static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
-K_SEM_DEFINE(efr32_radio_completion_sem, 0, 1);
+K_DEADLINE_EVENT_DEFINE(efr32_radio_completion_event);
 
 /* The FRC vector publishes this mailbox; only the persistent job calls LLL. */
 static struct {
@@ -1020,7 +1020,8 @@ static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 	efr32_radio_completion_work.callback = callback;
 	efr32_radio_completion_work.param = param;
 	efr32_radio_completion_work.abort = abort;
-	k_sem_give(&efr32_radio_completion_sem);
+	/* FRC completion has occurred; make the callback worker eligible now. */
+	k_deadline_event_post(&efr32_radio_completion_event, K_DEADLINE(0));
 }
 
 static void efr32_radio_completion_job(void *a, void *b, void *c)
@@ -1035,7 +1036,7 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		bool abort = false;
 		unsigned int key;
 
-		k_sem_take(&efr32_radio_completion_sem, K_FOREVER);
+		k_deadline_event_wait(&efr32_radio_completion_event);
 		key = irq_lock();
 		if (efr32_radio_completion_dispatch_take(&efr32_radio_completion_dispatch)) {
 			callback = efr32_radio_completion_work.callback;
