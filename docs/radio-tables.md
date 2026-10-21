@@ -1059,6 +1059,16 @@ The BG22 device header assigns `RFSENSE_IRQn = 40` in
 the same IRQ ordering is recorded in `docs/zephyr-ll-port.md:40-44`. The clock
 gate is `CMU_CLKEN1_RFSENSE`, bit 14 (`0x4000`), in
 `/Users/gavin/Projects/zephyr-modules/hal/silabs/simplicity_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22_cmu.h:636-640`.
+The stock image has the IRQ40 vector-table word at
+`evidence/stock/stock-7.9.07.bin+0x000000e0`; its little-endian value is
+`0x000496e1`, a Thumb entry at `0x000496e0`. This establishes a nonzero
+RFSENSE vector target, not an observed detector event or the handler's
+register protocol. The ignored local `scratch-radio.tgz` archive contains only
+`radioram.dump` (0x8000 bytes); an exact 32-bit little-endian scan finds neither
+`0x4009c000` nor `0x5009c000` at any archive-member offset. The stock image
+likewise contains neither literal. Absence of those literals is not evidence
+that the firmware does not use RFSENSE (addresses can be synthesized), so no
+register semantics are inferred from the scan.
 The generated device header does not provide a BG22 RFSENSE register struct;
 the base/offset table above therefore records the verified address evidence
 without pretending that a complete public register model exists.
