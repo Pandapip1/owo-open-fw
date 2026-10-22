@@ -14,6 +14,17 @@ config RADIO_RX_PORT_ACTIVE_SCAN
 	  select it for a hardware build; silicon packet-end/TIFS semantics are
 	  not established.
 
+config RADIO_RX_PORT_CENTRAL
+	bool "Exercise central connection establishment in the QEMU RX-port workload"
+	depends on BT_CENTRAL
+	default n
+	help
+	  Replace the scanner-only workload with a central that scans for the
+	  connectable advertiser and issues bt_conn_le_create(). This is solely
+	  an in-tree QEMU integration workload: it requires the QEMU RX-to-TX
+	  turn-around to deliver CONNECT_IND to the advertiser and the first
+	  connection-event packet back. Do not select it for a hardware build.
+
 endmenu
 
 source "Kconfig.zephyr"
