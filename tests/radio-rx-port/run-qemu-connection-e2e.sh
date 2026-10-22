@@ -22,9 +22,14 @@
 # central's host connected callback fires with HCI error 0. The advertiser then
 # switches to the connection's data channels. The sustained bidirectional
 # connection-event exchange (the central's EMPTY PDU acknowledged by a
-# peripheral data-channel packet) is NOT claimed: the QEMU model's TX-retire
-# before peer RXSEARCH ordering and its instruction-paced timing cannot meet a
-# real transmit window, so this harness asserts establishment only.
+# peripheral data-channel packet) is NOT claimed. Tracing shows the two
+# endpoints' RAC windows do overlap and the medium still reports 0 RX offers for
+# the central's EMPTY PDU snapshot, i.e. the skip is a SYNTH CHCTRL channel
+# mismatch: the endpoints' connection-event data-channel grids are desynced
+# because the peripheral's first-event anchor comes from the PROTIMER AA/end
+# captures that hal/radio.c stubs return 0 for (docs/radio-tables.md T8). That is
+# a firmware/HAL unknown, not a model-timing bound, so this harness asserts
+# establishment only.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -130,4 +135,5 @@ if [ "$post_handoff_rx" -lt 1 ]; then
 fi
 
 echo "connection-e2e: established a QEMU connection (CONNECT_IND delivered, central err 0, advertiser armed $post_handoff_rx connection-event RX)"
-echo "connection-e2e: establishment only; the sustained connection-event exchange is a QEMU model-timing bound, not a silicon claim"
+echo "connection-e2e: establishment only; sustained connection events fail on a connection-event data-channel desync (overlapping RAC windows, 0 RX offers => channel mismatch)"
+echo "connection-e2e: that desync is rooted in the PROTIMER AA/end capture stubs (hal/radio.c radio_tmr_*_get, docs T8), not a QEMU model-timing bound, and not a silicon claim"
