@@ -25,6 +25,23 @@
  * changed it (docs/radio-tables.md SS7.4). */
 .equ EFR32_SEQ_TRACE_STATUS_BEFORE,   0x00004fb0
 .equ EFR32_SEQ_TRACE_STATUS_AFTER,    0x00004fb4
+/* Diagnostic only: the exact live inputs fn_0x894's own `flags`
+ * accumulator reads (docs/radio-tables.md SS7.3.1), captured at the same
+ * point its real reads happen rather than reconstructed from a
+ * post-hoc, decayed read -- the whole reason a 100ms-later debug-halt
+ * read could not answer this. Not part of the bounded production trace. */
+.equ EFR32_SEQ_TRACE_LOCAL_3F64,      0x00004fe4 /* clear of 0x4fb0..0x4fbf
+                                                   * (status/distance) and
+                                                   * 0x4fc0..0x4fdf (the
+                                                   * production trace
+                                                   * words); just past the
+                                                   * single-word identity
+                                                   * at 0x4fe0. */
+.equ EFR32_SEQ_TRACE_LOCAL_3F64_P8,   0x00004fe8
+.equ EFR32_SEQ_TRACE_AA00011C,        0x00004fec
+.equ EFR32_SEQ_TRACE_GATE_VAL,        0x00004ff0
+.equ EFR32_SEQ_LOCAL_3F64,            0x00003f64
+.equ EFR32_OBS_BLOCK_AA00011C,        0xaa00011c
 .equ EFR32_FRC_STATUS,                0xa8004008
 .equ EFR32_RAC_SEQIF,                 0xa8020028
 .equ EFR32_RAC_SEQIF_CLEAR,           0xa8022028
@@ -176,6 +193,26 @@ efr32_radio_seq_exception:
     ldr r0, =EFR32_FRC_STATUS
     ldr r1, [r0]
     ldr r0, =EFR32_SEQ_TRACE_STATUS_BEFORE
+    str r1, [r0]
+
+    /* Diagnostic only: fn_0x894's own flags-accumulator inputs, captured
+     * live instead of reconstructed after the fact; see each constant's
+     * own comment above. */
+    ldr r0, =EFR32_SEQ_LOCAL_3F64
+    ldr r1, [r0]
+    ldr r0, =EFR32_SEQ_TRACE_LOCAL_3F64
+    str r1, [r0]
+    ldr r0, =EFR32_SEQ_LOCAL_3F64
+    ldr r1, [r0, #8]
+    ldr r0, =EFR32_SEQ_TRACE_LOCAL_3F64_P8
+    str r1, [r0]
+    ldr r0, =EFR32_OBS_BLOCK_AA00011C
+    ldr r1, [r0]
+    ldr r0, =EFR32_SEQ_TRACE_AA00011C
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_TXWARM_GATE_BASE
+    ldr r1, [r0]
+    ldr r0, =EFR32_SEQ_TRACE_GATE_VAL
     str r1, [r0]
 
     mrs r3, ipsr

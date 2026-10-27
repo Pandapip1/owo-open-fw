@@ -1380,6 +1380,41 @@ path — gated on job-dispatch state this project has deliberately not
 reproduced — is now the specific remaining unknown blocking this lead,
 not the pulse itself or the distance computation.
 
+**Chasing that unknown further found something that reframes the whole
+`RAC.SR3` finding (§7.5.1/7.5.2): `fn_0xd38` reads `RAC.SR3` *before*
+reaching the distance computation at all, as part of an earlier gate
+guarding a `goto far_abort` that, if taken, skips straight to the
+function's exit — bypassing the distance computation, the `far_skip_table`
+lookup, and the bit-22 pulse entirely.** Working through that earlier
+gate with live-captured inputs from this project's own open sequencer
+(`flags` built from `EFR32_SEQ_TRACE_LOCAL_3F64_P8`-sourced bits, same
+diagnostic-capture technique as above) and `RAC.SR3` itself:
+
+* With stock's own observed `SR3=0x08F08A31` (bits 4 and 5 both `1`),
+  neither of `fn_0xd38`'s two conditional `flags &= ~BIT(n)` clears
+  fires, `flags` stays `0x14`, `flags & 0xb1 = 0x10` (nonzero) — `far_abort`
+  is **not** taken, and the function continues into the body this whole
+  section has been analyzing.
+* With `RAC.SR3=0` (confirmed live on this project's own open build,
+  `read_memory 0xb802004c` → `0x0`, not the one static byte-scan from
+  earlier — an actual register read on real hardware with the open
+  stack flashed), *both* clears fire, `flags` becomes `0x04`,
+  `flags & 0xb1 = 0` — `far_abort` **would** be taken.
+
+**This does not describe the open stack's current behavior** — `fn_0x894`/
+`fn_0xd38` are sequencer-object code this project has not ported at all
+(§7.3), so none of this dispatch logic runs on real hardware today
+regardless of `SR3`'s value. What it does establish: `RAC.SR3` is not
+merely a fidelity nicety independent of everything else in this section —
+it is a *precondition* for the dispatch logic this section keeps finding
+promising leads inside of to ever run its main body at all, on stock or on
+any future, more complete open port. Porting more of `fn_0x894`/`fn_0xd38`
+without first resolving `SR3`'s origin (§7.5.2, still unresolved: read-only
+everywhere on both cores, not found as a literal anywhere, value differs
+between stock-flashed and open-flashed states despite no software writing
+it on either) would hit the same `far_abort` exit stock avoids, for
+reasons unrelated to whether the ported logic itself is correct.
+
 ### 7.4 `FRC.STATUS.ACTIVETXFCD` is unset where it should be set
 
 `FRC.STATUS` (`0xA8004008`, read-only, mask `0x01FFFFFF`) was previously
