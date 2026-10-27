@@ -1649,9 +1649,18 @@ or the M0+ sequencer object ever gets control (a boot-ROM-level or
 otherwise pre-application mechanism), or via a write pattern this
 project's literal-pool-based searches would not have caught (e.g. an LDMA
 transfer with a register-computed rather than literal destination,
-already flagged as not fully ruled out in SS7.5.2). Neither has been
-investigated further; this remains the clearest open thread for whoever
-continues this.
+already flagged as not fully ruled out in SS7.5.2).
+
+**The LDMA half of that is now ruled out, cleanly.** `LDMA_BASE`
+(`0x40040000` secure / `0x44040000` non-secure, from the public device
+header) appears **zero times** anywhere in `stage2-m33.dis` — not a
+register-computed destination with an unresolved base, not used at all.
+This firmware does not use the LDMA peripheral for anything, so it
+cannot be how `SR3` gets its value. The remaining open possibility is
+narrower now: a boot-ROM-level or otherwise pre-application mechanism,
+since every write path within either user-controlled image (M33
+application, M0+ sequencer object) has now been checked and ruled out.
+This is the clearest open thread for whoever continues this.
 
 **Searched and not found as a literal:** `0x08f08a31` does not appear
 anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
