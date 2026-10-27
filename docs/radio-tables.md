@@ -1632,6 +1632,27 @@ test whether `SR3`'s value changes, only to rule out stale soft-reset
 state as the explanation for a *different* finding (§7.5.4's splice-hang
 investigation), which is not the same test.
 
+**Now done: a genuine power cycle, with stock flashed, specifically to
+test `SR3`.** Read `0xB802004C` immediately before, had the user power-
+cycle the board, read it again after: `0x08F08A31`, identical, both
+times. This rules out stale/retained state as the explanation
+definitively (not just "probably not stale," which is as far as §7.5.4's
+test could support) — the value is established fresh and identically on
+every real boot with stock flashed, not carried over from a previous
+session. Combined with the already-exhaustive software-write search
+(§7.5.2: every direct literal reference on both cores traced, all reads;
+the M33's own verified install sequence never touches it), the most
+likely remaining explanation has shifted from "retained state" to
+"established very early by something this project has not yet located
+the write site for" — plausibly before either the M33 application image
+or the M0+ sequencer object ever gets control (a boot-ROM-level or
+otherwise pre-application mechanism), or via a write pattern this
+project's literal-pool-based searches would not have caught (e.g. an LDMA
+transfer with a register-computed rather than literal destination,
+already flagged as not fully ruled out in SS7.5.2). Neither has been
+investigated further; this remains the clearest open thread for whoever
+continues this.
+
 **Searched and not found as a literal:** `0x08f08a31` does not appear
 anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
 `objdump` has real section/symbol metadata and reliably distinguishes
