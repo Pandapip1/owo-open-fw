@@ -1827,6 +1827,28 @@ is now a clean, timing-eliminated comparison: stock finishes a complete
 TX cycle and advances in well under 100 ms; the open stack does not
 advance at all given 10x that margin.
 
+**Tried and did not move the needle: `fn_0x894`'s own entry/exit gate
+bracket.** `fn_0x894` (the dispatcher §7.3 and §7.6 both correctly decline
+to port wholesale) unconditionally sets `RAC+0x44` bit 16
+(`RAC_0X44_BIT_FUNCTION_GATE`) on entry and clears it — plus does an
+unconditional *direct* (non-aliased) zero of the whole register — at
+exit, regardless of IRQ number or RAC state; confirmed in
+`sequencer-decomp/src/fn_0x894.c` lines 147/235/240. This bracket, unlike
+the dispatch logic inside it, is simple, unconditional, bounded hardware
+mechanics — the same category already established safe to port in §7.2 —
+and was entirely absent from `radio_seq.S`. Added it (bracketing the gap
+between the `0x7be`-equivalent gate clear and the `0x1bda`-equivalent
+three clears, matching the established call order exactly). QEMU 74/17/14
+still pass; confirmed present in the rebuilt sequencer binary's own
+disassembly before testing. **Result: no change at all** — the identical
+`FRC.STATUS=0x1100200`/`RAC.STATUS=0x9400000` at the identical 100 ms
+checkpoint, byte for byte. This is a genuine negative result, not a test
+artifact (the breakpoint address was re-verified unchanged and the new
+instructions were confirmed present in the binary actually flashed).
+Kept the fix anyway — it is still a faithful reproduction of stock's own
+unconditional behavior, not a guess, and does not regress anything — but
+it rules out this specific bracket as (the whole of) the missing piece.
+
 **Ruled out: software TIFS.** `radio_tmr_tifs_set()`, `radio_tmr_hcto_configure()`,
 and the rest of the `radio_tmr_*` family are pure software bookkeeping on
 real hardware — every hardware-facing line in them is guarded by

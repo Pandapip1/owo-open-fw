@@ -60,6 +60,14 @@
 /* Observed at 0xa802113c (SET alias of 0xa802003c); semantics unestablished. */
 .equ EFR32_RAC_0X3C_SET,              0xa802113c
 .equ EFR32_RAC_0X3C_SET_VALUE,        5
+/* fn_0x894's own unconditional entry/exit bracket (docs/radio-tables.md
+ * SS7.3/SS7.6): set on entry, cleared at exit, around the whole call --
+ * not part of the job-dispatch logic this project deliberately does not
+ * port, just the one bounded hardware gate fn_0x894 itself brackets its
+ * entire body with, regardless of IRQ number or RAC state. */
+.equ EFR32_RAC_0X44_BASE,              0xa8020044
+.equ EFR32_RAC_0X44_SET,               0xa8021044
+.equ EFR32_RAC_0X44_BIT_FUNCTION_GATE, (1 << 16)
 /* Three observed CLR-alias writes; semantics unestablished. */
 .equ EFR32_RAC_0X44_CLR,              0xa8022044
 .equ EFR32_RAC_0X44_CLR_MASK,         0x03
@@ -169,6 +177,23 @@ efr32_radio_seq_exception:
     str r1, [r0]
     ldr r0, =EFR32_RAC_TXWARM_GATE_CLR
     ldr r1, =EFR32_RAC_TXWARM_GATE_BIT
+    str r1, [r0]
+    /* fn_0x894's entry/exit gate bracket; see its own comment above. The
+     * dispatch logic that would run between these two writes in stock is
+     * deliberately not reproduced -- only the gate itself. */
+    ldr r0, =EFR32_RAC_0X44_SET
+    ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_0X44_CLR
+    ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
+    str r1, [r0]
+    /* fn_0x894's own "done:" also does an unconditional *direct* (not
+     * aliased) zero of the whole register, after the bit-16 clear above
+     * and before returning -- not the conditional SEQIEN-clear next to it
+     * in the original, which is RAC-state-dependent dispatch logic this
+     * project does not reproduce, just this one unconditional write. */
+    ldr r0, =EFR32_RAC_0X44_BASE
+    movs r1, #0
     str r1, [r0]
     ldr r0, =EFR32_RAC_0X44_CLR
     movs r1, #EFR32_RAC_0X44_CLR_MASK
