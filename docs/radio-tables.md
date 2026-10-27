@@ -1692,19 +1692,33 @@ startup, or corrupting SEQRAM content some other part of the system reads
 as persistent/retained state — are unchanged from the discussion above),
 but the lifts themselves no longer carry any of the blame.
 
-**Further isolation: any single-byte content change breaks it, even with
-the length unchanged.** Two more variants, both built and tested on real
-hardware: (a) the exact same `0x2f6c`→`0x320c` length extension with *one
-byte* flipped at a minimal copy increment (`0x2f6c`→`0x2f70`, 4 bytes) —
-hangs identically; (b) the length left **completely untouched** at
-`0x2f6c` (same as stock, object occupies the identical flash address
-range), with a single unrelated byte flipped at offset `0x2000` (far from
-every function this project has touched or verified) — **also hangs
-identically**, confirmed by direct register halt at the same PC, not just
-UART silence. This rules out the copy-length field itself as the
-mechanism; the system is sensitive to *any* modification of this blob's
-bytes, regardless of location, size, or whether the length field changes
-at all.
+**Further isolation: more than one, unrelated kind of modification breaks
+it, even with the length unchanged.** Two more variants, both built and
+tested on real hardware: (a) the exact same `0x2f6c`→`0x320c` length
+extension with *one byte* flipped at a minimal copy increment
+(`0x2f6c`→`0x2f70`, 4 bytes) — hangs identically; (b) the length left
+**completely untouched** at `0x2f6c` (same as stock, object occupies the
+identical flash address range), with a single byte flipped at offset
+`0x2000` — **also hangs identically**, confirmed by direct register halt
+at the same PC, not just UART silence.
+
+Caveat on (b), checked afterward rather than assumed: that specific byte
+is *not* inert padding — it is the low byte of a `movs r0, #0` immediate
+inside the object's own code (an early-return path), so the edit actually
+changed `r0`'s loaded value from `0` to `0xff` at that point, a real
+(if small and localized) code change, not a neutral content probe. That
+weakens (b) alone as evidence for "truly any byte, anywhere" — but it
+does not weaken the combination of (a) and (b): the null-call-site variant
+from the previous finding only appends unrelated bytes *past* the
+original 12140-byte object and touches nothing within it, including
+nothing near offset `0x2000`, and that variant also hangs identically.
+Three structurally different modifications (relocate real calls and
+extend the copy length; extend the copy length by 4 bytes with inert
+appended content and no call redirection; leave the length and everything
+in the appended region alone and change one real instruction's immediate
+deep inside the object) converge on the same failure, which is still best
+explained by some form of whole-object integrity gate rather than any one
+of these specific edits mattering on its own.
 
 **Lockstepped the exact divergence point with `bg22_reset_to_breakpoint`
 and single-stepping (hardware only; QEMU has no model of this proprietary
