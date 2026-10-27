@@ -1458,14 +1458,27 @@ somewhere earlier in channel/PHY configuration, closer to `sl_rail_util_pa_init(
 setup.
 
 **Searched and not found as a literal:** `0x08f08a31` does not appear
-anywhere in `stage2-m33.dis` (the full stock M33 disassembly) or in a full
-disassembly of the stock sequencer object, either as a direct `.word`
-literal, a `movw`/`movt` pair (checked both halfwords, `0x8a31`/`0x08f0`,
-separately), or any other recognizable constant-load idiom. There are a
-handful of `ldr/str ..., [Rn, #0x4c]` accesses in both objects, but their
-base registers are not yet traced to confirm or rule out `RAC.SR3`
-specifically — this is the honest state of the search, not a claim it was
-exhaustive.
+anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
+`objdump` has real section/symbol metadata and reliably distinguishes
+`.word` literal-pool data from code) as a direct literal or a `movw`/`movt`
+pair (checked both halfwords, `0x8a31`/`0x08f0`, separately). The stock
+sequencer object required a different check: it is a flat, metadata-less
+20 KiB binary, so `objdump -D -b binary` disassembles its embedded literal
+pools *as if they were code* (confirmed directly — the known gate-pulse
+literal `0xa8021040`, read correctly via raw bytes earlier in this same
+project, shows up in that disassembly's text as bogus instructions like
+`asrs r0, r0, #1` rather than any recognizable hex string), making a text
+grep over it worthless for this question. Scanning the raw 20 480 bytes
+directly for the exact 4-byte little-endian sequence — and separately for
+each of its two halfwords, in case of a `movw`/`movt`-style split load —
+finds zero matches anywhere in the object. So: genuinely absent from both
+objects, checked by a method appropriate to each's actual structure. One
+gap remains: traced M33-side register bases reaching a `#0x4c` offset
+access (`SYSTEM_GetUnique()`'s `DEVINFO+0x4C` read, `USART_Reset()`'s
+USART-relative write) ruled both out as unrelated; no exhaustive
+register-taint pass over every `RAC_BASE`-literal reference has been done,
+so a RAC-relative write built from a register computed far from its
+literal load is not fully ruled out, just not found by the checks above.
 
 **Working hypothesis, not yet confirmed:** the combination of (constant
 across the whole session) + (not a literal anywhere in either object)
