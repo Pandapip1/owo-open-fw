@@ -1474,24 +1474,32 @@ itself explain `0x08F08A31`'s *other* bits or where they come from — see
 §7.5.2 — but it stops this driver from actively destroying a value it
 doesn't understand, which the prior code did on every reset.
 
-### 7.5.2 `RAC.SR3`'s remaining bits: read-only in the sequencer, origin still unknown
+### 7.5.2 `RAC.SR3`'s remaining bits: read-only everywhere software touches it, origin still unknown
 
-Two of five literal-pool references to `RAC.SR3`'s base address in the
-stock sequencer object were traced by hand (raw byte offsets `0xa44` and
-`0x564`/`0x66c`, found via a direct byte scan of the binary rather than
-`objdump -D` — see the methodology note below): both are single-bit *reads*
-(`lsls`+`bmi` idioms testing bit 1 and bit 31 respectively) used as
-conditions, not writes. The remaining three reference sites (file offsets
-`0x1448`, `0x2d04`, `0x3dfc`) have not been traced. Combined with §7.5.1's
-M33-side result (stock's own, verified install sequence never touches
-`SR3`), the open question has narrowed from "who writes `SR3`" to "is it
-ever written by software at all, or does it carry a nonzero hardware reset
-value" — plausible for a chip-specific trim/calibration word, implausible
-for QEMU's current all-zero-on-reset model of it. Recommended next
-hardware step unchanged from the prior pass: dump this chip's own
-`DEVINFO` page (`0x0FE08000`..`0x0FE083FF`) and check whether any
-documented field there, or the register's own behavior across a real
-power-on reset (not just `SYSRESETREQ`), explains `0x08F08A31`.
+All five literal-pool references to `RAC.SR3`'s base address in the stock
+sequencer object have now been traced by hand (raw byte offsets `0xa44`,
+`0x564`/`0x66c`, `0x133a`, `0x13a0`, `0x2b44` — found via a direct byte
+scan of the binary rather than `objdump -D`; see the methodology note
+below). **All five are reads, never writes**: single-bit tests via
+`lsls`+`bmi`/`bne` idioms at bits 1, 31, 6 (twice, at two different call
+sites) and 25, every one used purely as a branch condition. Combined with
+§7.5.1's M33-side result (stock's own, verified install sequence never
+touches `SR3`), this is now a complete check of every direct literal
+reference to this register on *both* cores, and every single one is a
+read. The open question has narrowed from "who writes `SR3`" to "is it
+ever written by software at all, or does it carry a nonzero hardware
+reset value" — plausible for a chip-specific trim/calibration word,
+implausible for QEMU's current all-zero-on-reset model of it. One caveat:
+this checks every *direct* literal reference, not every conceivable
+indirect one (e.g. a value computed via register arithmetic from an
+already-loaded nearby base, the way `fn_0xd38`'s own `RAC_GATE_BASE_VAL_SRC`
+is computed from `RAC_0X18`'s literal rather than its own) — a targeted
+disassembly search for exactly that pattern around `SR3`'s address would
+be the natural next static-analysis step if hardware access remains
+unavailable. Recommended hardware step unchanged from the prior pass:
+dump this chip's own `DEVINFO` page (`0x0FE08000`..`0x0FE083FF`) and check
+whether any documented field there, or the register's own behavior across
+a real power-on reset (not just `SYSRESETREQ`), explains `0x08F08A31`.
 
 **Searched and not found as a literal:** `0x08f08a31` does not appear
 anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
