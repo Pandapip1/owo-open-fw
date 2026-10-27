@@ -606,6 +606,18 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_RAC_SR0_OFFSET 0x040U
 #define EFR32_RAC_SR1_OFFSET 0x044U
 #define EFR32_RAC_SR2_OFFSET 0x048U
+/*
+ * A live single-step trace of the working stock M33 (RAC_SEQ_IRQn, stage2-
+ * rail-starttx.json) clears bit 14 of this register as its very first
+ * store, before anything else in its TX-start sequence; this project's
+ * own QEMU test suite separately already documents stock clearing bit 30
+ * of it via its CLR window (test_rac_sr3_clear_alias). Static decomp of
+ * the open sequencer object (docs/radio-tables.md SS7) independently finds
+ * both fn_0x894 and fn_0xf9c read this exact register to gate their own
+ * behavior. Three independent sources agreeing this register matters, and
+ * zero lines in this driver that ever touch it before this change.
+ */
+#define EFR32_RAC_SR3_OFFSET 0x04CU
 #define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
 #define EFR32_RAC_SR0_TX_PREPARE_SET BIT(7)
 #define EFR32_RAC_SR0_TX_PREPARE_CLEAR BIT(3)
@@ -1639,11 +1651,14 @@ void radio_reset(void)
 	 * force-disable.  The open M0+ image is copied and verified below; retained
 	 * SEQRAM is explicitly never trusted.
 	 * This is the exact 0x12d58 initializer order, not a snapshot transplant.
+	 * SR3 added separately (EFR32_RAC_SR3_OFFSET's own comment): this
+	 * driver never previously wrote it at all, unlike SR0..SR2.
 	 */
 	efr32_radio_sequencer_install();
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR0_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR1_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR2_OFFSET) = 0U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR3_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
