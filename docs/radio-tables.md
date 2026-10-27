@@ -2205,17 +2205,25 @@ literal pool value).
 
 **Status: `fn_0x19d0`, `fn_0x2362`, `fn_0x2390`, `fn_0x23a0`, and
 `fn_0x2644` — all five of this object's vectors beyond IRQ8/IRQ9 that
-this pass turned up — are now fully lifted and verified.** The
-as-yet-unexamined callees this batch pulled in (`fn_0x1a18`, `fn_0xc02`,
-`fn_0x13b0`, `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be
-traced and lifted. None of this changes the `ACTIVETXFCD` picture yet —
-every one of
+this pass turned up — are now fully lifted and verified.** `fn_0xc02`
+(called from both `fn_0x2362` and `fn_0x2644`) is also now fully lifted
+and verified, in `sequencer-decomp/src/fn_0xc02.c`: on `RAC_GATE_BASE`
+bit 0 clear, clears two RAC bits via their CLR aliases, then
+unconditionally touches seven more RAC offsets — two of them (`0x10`,
+`0x140`) *direct*, un-aliased whole-register writes, unlike every other
+RAC access this project has decompiled so far. This single function names
+nine previously-unidentified RAC offsets
+(`0x10`/`0xE0`/`0x108`/`0x130`/`0x140`/`0x144`/`0x160`/`0x16C`/`0x174`).
+The remaining as-yet-unexamined callees (`fn_0x1a18`, `fn_0x13b0`,
+`fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
+lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
 and no direct evidence ties any of them to the real TXWARM/TX path this
-project's own hardware traces exercise. `fn_0x894`'s own
-`SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots (§7.3) remain a
-structurally plausible link for *some* dispatch path, but this object
-only *reads* those slots, never writes them, so their live value isn't
-something static analysis of this object alone can settle. The
-`PROTIMER+0x38` connection to `fn_0xd38` is the one new thread worth
-pulling on next.
+project's own hardware traces exercise. **Checked, not left open: the
+`SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots (§7.3) are ruled out
+as that link** — a whole-object scan finds them referenced nowhere outside
+`fn_0x894` itself, and a scan of stock's own known-working M33 image
+(`build-stage2/zephyr/zephyr.bin`) for every secure/non-secure alias of
+both addresses finds zero hits either, so nothing in any image this
+project can inspect ever initializes them. The `PROTIMER+0x38` connection
+to `fn_0xd38` is the one new thread worth pulling on next.
