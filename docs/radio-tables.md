@@ -2133,11 +2133,21 @@ comparison (one `movs`+`lsls` instead of a 32-bit literal load) — a
 cheaper, bit-identical encoding of the same comparison, confirmed
 equivalent, not a second bug.
 
-**Status: `fn_0x19d0`, `fn_0x2362`, `fn_0x2390`, and `fn_0x23a0` are now
-fully lifted and verified.** `fn_0x2644` (IRQ10) and the as-yet-unexamined
-callees this batch pulled in (`fn_0x1a18`, `fn_0xc02`, `fn_0x13b0`,
-`fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
-lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
+`fn_0x2644` (IRQ10) is the simplest of the four: calls `fn_0x894`, then
+conditionally calls `fn_0xc02` gated on bit 6 of `RAC+0x144` — a register
+this project hadn't named before — then unconditionally calls
+`fn_0x19d0(1)` and `fn_0x13b0`, then acks `RAC.SEQIF` bit 26. Now fully
+lifted and verified in `sequencer-decomp/src/fn_0x2644.c`, matching the
+original byte for byte (same shift immediates, same branch polarity, same
+literal pool value).
+
+**Status: `fn_0x19d0`, `fn_0x2362`, `fn_0x2390`, `fn_0x23a0`, and
+`fn_0x2644` — all five of this object's vectors beyond IRQ8/IRQ9 that
+this pass turned up — are now fully lifted and verified.** The
+as-yet-unexamined callees this batch pulled in (`fn_0x1a18`, `fn_0xc02`,
+`fn_0x13b0`, `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be
+traced and lifted. None of this changes the `ACTIVETXFCD` picture yet —
+every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
 and no direct evidence ties any of them to the real TXWARM/TX path this
 project's own hardware traces exercise. `fn_0x894`'s own
