@@ -2034,3 +2034,67 @@ prefetch-by-count scheme); then `efr32_packet_stage_arm()`; then the SR0
 TX-prepare set/clear and `SEQ_RX_AFTER_TX_INHIBIT` clear already discussed
 above; then, last, `RAC.CMD = TXEN`. So FIFO data is fully staged before
 TXEN in the compiled instruction stream, not merely in trace-log order.
+
+### 7.7 Broader decompilation pass: `fn_0x19d0` and the structure around it
+
+Per this project's own standing charter (full, genuine understanding of
+the proprietary blob, not just whatever slice bears on `ACTIVETXFCD`),
+revisited the object with a wider net: a raw byte scan for every
+literal-pool reference to `FRC.CMD` (`0xA800402C`) in
+`generic_efr32xg22_release_seq.o` finds **four** hits, not the one
+already covered by `fn_0x894` (§7.3's `FRC_CMD_FRAMEDETRESUME`, gated
+narrowly and already shown TXWARM/TX-irrelevant). The other three all sit
+inside one previously-unexamined function at local `0x19d0`
+(ends `0x1a04`), now fully lifted and verified in
+`sequencer-decomp/src/fn_0x19d0.c`.
+
+`fn_0x19d0` unconditionally, every time it runs: calls `fn_0x7d8()`,
+zeroes `0xAA0000D8` and sets `0xAA0000F4=10` (a `BUFC.BUF[N]` pair this
+project hasn't assigned an index to yet — doesn't match the
+already-identified `BUFC.BUF[1]` struct at `0xAA000040`), calls
+`fn_0x7ea()` with `fn_0x7d8`'s own return value (**not** a literal, as
+this lift's first draft wrongly assumed from memory instead of reading
+the real disassembly — caught only by diffing the compiled output
+against `generic_efr32xg22_release_seq.dis:0x19d0-0x1a04` byte for byte,
+per this project's standing verify-by-compiling rule), clears
+`RAC+0x40`'s CLR alias bits 16/17 and `RAC+0x44`'s CLR alias bits 2/31
+(four bits this project hadn't previously named — distinct from the
+already-documented bits 0/1/16/18 on these same two registers), sets the
+`0xA8005064`/`0xA8006064` "unclaimed" pair's bit 4 and
+(`+0x54`) bit 27, writes `FRC.CMD = TXSUBFRAMERESUME` (bit 6), and
+clears a SEQRAM-local byte at `0x3E72`. Its own incoming argument is
+confirmed dead (clobbered by `fn_0x7d8`'s return before it's ever read).
+
+`fn_0x19d0` has five call sites (`0x237e`, `0x2658`, `0x28bc`, `0x2900`,
+`0x2998`), none yet proven reachable from this project's own
+ADV_IND/TXWARM/TX scenario. The first, at `0x237e`, sits inside another
+previously-unexamined function at `0x2362` which itself opens with a
+direct `bl 0x894` — calling the shared dispatcher outright, not through
+IRQ8/IRQ9's own entry points (`0x2578`, already fully resolved in
+§7.2) — then tests `RAC.STATUS` bit 19 and branches between
+`fn_0x19d0`/`fn_0x1a18`/`fn_0xc02`/`fn_0x13b0`/`fn_0xd34` or, on the other
+side, acknowledges `RAC.SEQIF` bit 29 via the shared `fn_0x7c8` helper
+(§7.2) — a *different* bit than IRQ8's own bit 24. Two more structurally
+similar, adjacent functions follow at `0x2390` (calls `fn_0x894`, then
+acks bit 16) and `0x23a0`, which opens with the exact same
+`bl 0x7ac; movs r0,#5; str; bl 0x7be` gate-pulse sequence already
+documented for IRQ8 in §7.2 — at a *different* address than IRQ8's own
+`0x2578` entry point, meaning this is either a second, distinct IRQ
+vector's handler or an internal helper the IRQ8 path itself calls into
+(not yet determined which). `0x23a0`'s body is only partially traced
+(through roughly `0x2410`, with unresolved literal-pool references at
+`0x25b8`/`0x25bc`/`0x25c0`/`0x25c4`/`0x263c`/`0x2640` and an unexamined
+call to `fn_0xa76`) and is not yet lifted to a `.c` file.
+
+**Status: `fn_0x19d0` is the only one of this new batch fully lifted and
+verified so far.** `0x2362`/`0x2390`/`0x23a0` and their as-yet-unexamined
+callees (`fn_0x1a18`, `fn_0xc02`, `fn_0x13b0`, `fn_0xa76`) remain to be
+traced and lifted. None of this changes the `ACTIVETXFCD` picture yet —
+no direct evidence ties `0x2362`'s `RAC.STATUS` bit 19 branch, or any of
+`fn_0x19d0`'s five call sites, to the real TXWARM/TX path this project's
+own hardware traces exercise; `fn_0x894`'s own
+`SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots (§7.3) remain the
+only structurally plausible link, and this object only *reads* those
+slots, never writes them, so their live value (and therefore whether
+`0x2362` is really one of their targets) isn't something static analysis
+of this object alone can settle.
