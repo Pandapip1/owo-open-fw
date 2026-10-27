@@ -2240,7 +2240,22 @@ pass has found — diffing the compiled output against the original
 instruction-by-instruction, not trusting the hand-trace on the first
 pass.
 
-The remaining as-yet-unexamined callees (`fn_0x21d8`, `fn_0x13b0`,
+`fn_0x21d8` is now also fully lifted and verified, in
+`sequencer-decomp/src/fn_0x21d8.c`, confirming `fn_0x1a18`'s own
+"calibration-settle delay" guess outright: it is a pure CPU-cycle
+busy-wait with no hardware register access at all, parameterized
+linearly (`count = arg*195 - 111`, decrementing by `30` until negative)
+and always returning a dead `0`. The real-time duration is not asserted
+-- it depends on the M0+ core's actual clock rate, which this project has
+not confirmed, the same stance already taken for `fn_0x23a0`'s unitless
+`0xFF01` threshold. First draft compiled the loop away entirely (the
+optimizer correctly proved it has no observable effect other than the one
+that matters — consuming time), silently breaking this project's
+byte-for-byte control-flow verification standard; fixed by marking the
+loop counter `volatile`, which is also the behaviorally-correct
+annotation for a delay loop, not just a verification workaround.
+
+The remaining as-yet-unexamined callees (`fn_0x13b0`,
 `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
 lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
