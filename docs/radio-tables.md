@@ -1928,6 +1928,50 @@ firmware ever needs to pass through an equivalent mailbox-service gate
 and does not, the same failure mode is a plausible unifying explanation,
 though this has not been checked against the open stack directly.
 
+**Confirmed QEMU divergence, and confirmed (not just assumed) that it is
+currently inert for the open stack.** Checked directly: QEMU's model
+(`vendor/qemu/hw/arm/efr32bg22.c:1867-1879`) unconditionally returns `0`
+for `RFMAILBOX_FLAGS` on both endpoints regardless of any guest write —
+codified by its own existing test, `test_rfmailbox_no_peer`
+(`efr32bg22-test.c:1633`), which asserts exactly that: write bit 1 via the
+SET alias, read back `0` anyway. So the real-hardware busy-wait this
+section just lockstepped (spinning on bit 0 of this same register) can
+never be reproduced in QEMU — every read reports "ready," so the wait
+exits immediately regardless of whether the sequencer blob is intact or
+tampered with. **This is a real divergence from exact silicon semantics,
+being recorded here per this project's standing rule, not swept under the
+existing stale comment** ("the peer endpoint and its delivery timing have
+not been recovered" — written before this section's hardware lockstep
+findings existed).
+
+It is not, however, a quick fix. QEMU has no emulated M0+ core at all, so
+there is no peer to ever clear a real latch. Turning `FLAGS` into a
+genuine stored bit instead of a hardcoded `0` would not make the model
+*more* faithful — it would trade today's "always ready" simplification
+for a *different*, equally unfaithful "always stuck after the first
+write" hang, since nothing in the model would ever clear it again. A
+faithful fix needs either an emulated M0+ peer or a known trigger
+condition for the specific bit real silicon gates on — and bit 0's real
+derivation is exactly as unresolved as `RAC.SR3`'s (§7.5.2): not
+something to guess at just to make the model do *something* different.
+
+**Checked whether this matters for `ACTIVETXFCD` right now, rather than
+leaving the §7.5.4-opening speculation unresolved: it doesn't, currently.**
+Neither `radio.c` nor `radio_seq.S` contains any reference to the
+mailbox addresses (`0xA8028000`/`0xA802C000` or their aliases) anywhere —
+confirmed by direct search, zero hits beyond one unrelated provenance
+comment citing a *different* RAIL archive member
+(`sli_rail_dadf1c52f26190429dcacf7151424c68`, a `RXENSRCEN` write-pattern
+citation) than the one this hang lives inside
+(`sli_rail_cd65c06e3b1af867d6257be45870f13b`). The hang itself is in
+stock's M33-side RAIL power-curve calibration helper, which only stock's
+own RAIL library ever calls, at boot, before any TX attempt — the open
+stack replaces that whole call path with its own code and never executes
+it. So this specific gate is not currently on the open stack's own TX
+path in either QEMU or real hardware; it is a genuine, now more precisely
+understood limitation of the splice-test vehicle specifically, not (yet
+shown to be) a missing piece of stage 3 itself.
+
 ### 7.6 Hardware status: real progress confirmed, `ACTIVETXFCD` still unset
 
 **Update: the open stage-3 build (`build/radio-port-hardware-2`, with
