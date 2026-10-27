@@ -1773,22 +1773,43 @@ firmware ever needs to pass through an equivalent mailbox-service gate
 and does not, the same failure mode is a plausible unifying explanation,
 though this has not been checked against the open stack directly.
 
-A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
-(§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
-produced an on-air advertisement yet** — the hang after `RAC.CMD.TXEN` is
-unchanged in the one hardware boot observed with the §7.2 mechanics alone,
-and §7.5 has not yet been flashed to hardware at all. A reliable way to
-halt the M33 at an arbitrary instruction before resetting it (to catch
-`RAC.STATUS`/`FRC.STATUS` deterministically rather than racing a live
-single-step window) was still in progress, separately from this firmware
-work, when this section was last updated.
+### 7.6 Hardware status: real progress confirmed, `ACTIVETXFCD` still unset
+
+**Update: the open stage-3 build (`build/radio-port-hardware-2`, with
+both §7.5.1's `RAC.SR3` fix and §7.5.3's SEQIF-ack retry applied) was
+flashed and run on real hardware with its built-in bring-up trace
+(`CONFIG_EFR32_RADIO_BRINGUP_TRACE`, `tests/radio-port`).** Real,
+observable forward progress since the previous "hangs after `TXEN`"
+characterization: the trace reaches `txen status-before=0x10400000
+status-after=0x58000000` — decoding `RAC.STATUS.STATE` (bits `[27:24]`),
+`before=0x0` (OFF) → `after=0x8` (TXWARM) — and a direct post-mortem halt
+afterward reads `RAC.STATUS=0x9400000`, i.e. `STATE=9` (**TX**), *steady*,
+not aborted back to OFF. This is further than this project's own prior
+sessions recorded reaching.
+
+**But `ACTIVETXFCD` is still unset.** The same halt reads
+`FRC.STATUS=0x01100200`: `ACTIVETXFCD` (bit 5) = `0`, `FRAMEOK` (bit 9) =
+`1`, `FSMSTATE` (bits `[24:20]`) = `17`. Reading this project's own added
+`EFR32_SEQ_TRACE_STATUS_BEFORE`/`_AFTER` words (`0xB0004FB0`/`0xB0004FB4`,
+§7.5's gate-pulse instrumentation) shows **identical** values before and
+after the TXWARM gate-pulse sequence (`0x01100200` both times) — the gate
+pulse itself produces no observable `FRC.STATUS` change at the point
+measured. So: real RAC-level progress (reaches and holds TX, doesn't
+abort), but the FRC frame-coder engagement this project has been chasing
+since §7.4 still never happens. The SR3/SEQIF-ack fixes did not resolve
+the central open question; the `FRC.STATUS` value itself also differs
+from the one previously documented in §7.4 (`0x00001000`, `RXWORD=1`)
+for the same checkpoint, so *something* about the system's behavior has
+changed, just not the bit that matters.
 
 **Recommended next step:** a single-step poll of `FRC.STATUS` across the
 `RAC.CMD.TXEN` → first-IRQ8 window on the *working* stock controller (same
 technique as `trace_stores.py`, polling a read instead of recording writes)
 to find the exact instruction after which `ACTIVETXFCD` flips, then check
-whether the open path ever reaches an equivalent point. This was not
-attempted in this pass.
+whether the open path ever reaches an equivalent point. This still has not
+been attempted; now that the open stack reaches and holds `RAC.STATUS=TX`
+rather than aborting immediately, this comparison is more likely to be
+informative than it was when this note was first written.
 
 **Ruled out: software TIFS.** `radio_tmr_tifs_set()`, `radio_tmr_hcto_configure()`,
 and the rest of the `radio_tmr_*` family are pure software bookkeeping on
