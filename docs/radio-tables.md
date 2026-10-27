@@ -1620,6 +1620,25 @@ ever written by software at all, or does it carry a nonzero hardware
 reset value" — plausible for a chip-specific trim/calibration word,
 implausible for QEMU's current all-zero-on-reset model of it.
 
+**Strengthened the "both cores" check from "the verified install
+sequence" to "the entire RAIL library, every member object file":** raw
+byte-scanned all ~90 object files in
+`librail_efr32xg22_gcc_release.a` (unlinked, so each retains its own
+local literal pool, unlike the final linked `zephyr.elf` where pools get
+merged into a shared `.rodata` region beyond any single instruction's
+PC-relative reach — a real pitfall hit while trying this check against
+the linked binary first: four apparent byte-pattern "hits" there turned
+out to sit in `.rodata`, too far from any `.text` instruction for a
+Thumb `ldr` to ever reach, and don't exist in the unlinked archive at
+all, so they're coincidental data, not real references) for both
+`0xA802004C` and its non-secure alias `0xB802004C`. **Zero hits in any
+RAIL object file, in either form.** Only `generic_efr32xg22_release_seq.o`
+(the M0+ sequencer object, already fully traced above) references this
+address at all. So it is not just that stock's M33-side RAIL never
+*writes* `SR3` — it never references it in any way, not even a read; the
+M0+ sequencer is the only software on either core that touches this
+register at all.
+
 **Also checked and also negative:** the obvious indirect path — a write
 to `SR3` reached via register arithmetic from an already-loaded nearby
 base, the way `fn_0xd38`'s own `RAC_GATE_BASE_VAL_SRC` is computed from
