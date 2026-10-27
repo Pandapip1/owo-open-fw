@@ -1648,6 +1648,29 @@ verified by hand — and it is *this* test that fails. That is exactly why
 the user asked for it rather than trusting the per-function compile-time
 check alone.
 
+**Follow-up finding that complicates "the lifts are wrong":** the hang at
+`0x13056` is in M33-side RAIL code this patch never touches, not sequencer
+code. Rebuilding the identical patched blob with
+`CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE` swept across `0` (boots fine, reaches
+`main()`, later fails harmlessly on the pre-existing allocation issue),
+`1` (a *different* failure — a hard fault, bus fault on vector-table read,
+before `main()`), and `8192` (this section's silent hang) shows the outcome
+is sensitive to this unrelated Kconfig value. Comparing `arm-none-eabi-size`
+output rules out a RAM-pressure explanation directly: stock-with-`8192`
+(works) and this patch-with-`8192` (hangs) have **byte-identical
+`data`+`bss`** (`856`+`28761` both); the only difference is `.text` being
+672 bytes larger (exactly this patch's appended functions, which this exact
+early boot path never calls). The remaining plausible explanation is a
+marginal, pre-existing timing race already latent in stock's own RAIL init
+(the M33 polling a SEQRAM flag the M0+ is expected to set, with no apparent
+timeout) that this patch tips over via an incidental flash-layout/timing
+shift — not necessarily a logic error in the lifted C. This does not
+exonerate the lifts (the splice test still fails, and that is the result
+that matters for "does this work end to end"), but it means the failure
+mode may be a test-sensitive pre-existing fragility in stock's own
+synchronization, not proof the ported logic is behaviorally wrong. Not
+resolved either way; flagged for whoever continues this.
+
 A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
 (§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
 produced an on-air advertisement yet** — the hang after `RAC.CMD.TXEN` is
