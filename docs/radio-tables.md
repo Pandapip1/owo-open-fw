@@ -1436,7 +1436,58 @@ it should not be read as "the fix." The address itself, independently
 corroborated by the static M0+ decomp in §7.3, remains worth having
 correctly initialized — just not necessarily to this one captured value.
 
-### 7.5.1 Fixed: the SEQIF-ack wait didn't retry its own CLR write
+### 7.5.1 `RAC.SR3` holds a fixed nonzero value on stock that open never writes
+
+`tests/hardware-lockstep/*-rac.bin` (eight capture pairs, spanning
+pre-`TXEN`, the very first capture of the session, both channel-37 and
+channel-38 runs, and both the IRQ8 and IRQ9 checkpoints) all agree:
+`RAC.SR3` (`0xA802004C`, offset `+0x4C` in the dump) reads **exactly
+`0x08F08A31` on stock, every single time, including the capture taken
+before any `TXEN` or IRQ activity at all** — and reads `0x00000000` on
+open at every equivalent checkpoint. This is independent of (and in
+addition to) the `RAC.SR0..SR3`-cleared-at-install fix already in
+`radio.c` (that fix only establishes `SR3 = 0` at sequencer install;
+stock's value is examined well after that point and is nonzero).
+
+Being constant across every capture — including the very first one, before
+`TXEN` — rules out this being a per-cycle status snapshot; it is a value
+established once, early, and never changed afterward. That makes
+`radio_tx_enable()` (which already clears `SR0`/`SR3` at install, not at
+every TX) the wrong place to look for *where* it should be set; it belongs
+somewhere earlier in channel/PHY configuration, closer to `sl_rail_util_pa_init()`-equivalent
+setup.
+
+**Searched and not found as a literal:** `0x08f08a31` does not appear
+anywhere in `stage2-m33.dis` (the full stock M33 disassembly) or in a full
+disassembly of the stock sequencer object, either as a direct `.word`
+literal, a `movw`/`movt` pair (checked both halfwords, `0x8a31`/`0x08f0`,
+separately), or any other recognizable constant-load idiom. There are a
+handful of `ldr/str ..., [Rn, #0x4c]` accesses in both objects, but their
+base registers are not yet traced to confirm or rule out `RAC.SR3`
+specifically — this is the honest state of the search, not a claim it was
+exhaustive.
+
+**Working hypothesis, not yet confirmed:** the combination of (constant
+across the whole session) + (not a literal anywhere in either object)
+suggests this is *assembled at runtime from per-chip calibration/trim
+data* — most plausibly `DEVINFO` (`0x0FE08000`, `efr32bg22_devinfo.h`),
+the factory-programmed calibration page every EFR32 series-2 part has,
+whose fields are genuinely chip-specific and would plausibly look like an
+arbitrary bit pattern rather than a clean mask. If true, this changes what
+"the fix" is: hardcoding `0x08F08A31` into `radio.c` would be exactly the
+kind of magic-number/non-portable-constant this project's own standard
+rules out (worse, it would be *wrong* on a different physical unit, not
+just inelegant) — the correct fix would be reading the same `DEVINFO`
+field(s) stock reads and packing them into `SR3` the same way, which
+requires identifying which fields those are. **Not yet done**: this
+project has not captured this specific chip's own `DEVINFO` page to test
+whether its fields combine to `0x08F08A31`, nor traced the `#0x4c`-offset
+accesses above to confirm a `DEVINFO`-to-`SR3` data path exists at all.
+Recommended next hardware session: dump `0x0FE08000`..`0x0FE083FF` and
+check for sub-fields that combine (directly or via a simple shift/OR) to
+`0x08F08A31`.
+
+### 7.5.2 Fixed: the SEQIF-ack wait didn't retry its own CLR write
 
 Direct instruction-by-instruction comparison of `radio_seq.S`'s bounded
 SEQIF-ack loop (end of §7.2's gate-pulse sequence) against stock's actual
