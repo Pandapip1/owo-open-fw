@@ -1366,21 +1366,29 @@ table-driven initialization loop (helper `0x2a60`, called with indices
 `0..13, 15, 17, 19, 23, -1, 27`) touching more RAC/PROTIMER state than
 anything else decoded in this section.
 
-This was **not** confirmed to execute in this project's scenario. Searching
-every `bl`/conditional-branch instruction in this same captured object for a
-target in the function's own entry region (`0x2900`–`0x2a30`) found none,
-and no stored pointer to it (`0x2a2d` or `0x2aa9`, Thumb-bit set) exists
-anywhere in the 20 KiB capture. So either it is reached only through an
-indirect call via a function-pointer table this pass did not trace back to
-its load site, or it is dead code in this image's build configuration (the
-shipped object plausibly serves multiple RAIL protocols, most of whose paths
-are irrelevant to plain BLE advertising). Given the project's existing
-discipline of not inventing control flow, this is recorded as a strong,
-specific, but **unconfirmed** candidate, not a conclusion: the single
-highest-value next step is a hardware or QEMU breakpoint at local `0xf9c`
-(and separately at `0x2a2c`, the apparent routine entry) during a real
-working-stock TX attempt, to settle reachability directly rather than by
-further static guessing.
+**Correction, superseded below:** this was left unconfirmed in the prior
+pass. A full match-decompilation of `0xf9c` (owo-bg22-proprietary-baselines
+`sequencer-decomp/src/fn_0xf9c.c`, compiled and verified to reproduce the
+original's control flow) now shows the earlier summary above was also
+incomplete in a way that matters: the `TXEN` write is real, but it is one
+of *two* structurally parallel paths through this function, and **both**
+paths -- not just the one already described -- are additionally gated on
+`RAC+0xAC`'s bits `[15:12]` (the same state-like nibble `fn_0x894`/`fn_0xd38`
+read) equalling `2`. Per this project's own established `RAC.STATUS.STATE`
+enum (SS4.2), `2` is `RXSEARCH`; this project's plain `ADV_IND` transmission
+goes through `TXWARM(8)`/`TX(9)`, never `RXSEARCH(2)`. The function also
+reads `FRC.STATUS` bit 4 (the top bit of `SNIFFDCOUNT`) and conditionally
+copies `FRC.RXRAWDATA` into a BUFC-region word -- both read as RX-sniff or
+auto-response plumbing, not a general TX re-arm.
+
+**Conclusion: `0xf9c` is very likely not relevant to this project's TX
+scenario**, reachable or not. The gate at bit 4 of `RAC+0x44` does not
+change this -- the fully-traced disassembly shows it selects between two
+different ways of reaching the *same* `RXSEARCH`-gated behavior, not
+between TX-relevant and TX-irrelevant behavior. This closes the `0xf9c`
+lead for the `ACTIVETXFCD` question; it remains a correct, now-verified
+decompilation of what this function does for a *different* scenario (RX
+search / sniff), and is kept for that reason, not as a TX-path candidate.
 
 ### 7.5 A confirmed, missing SEQRAM-local write: `0xB0003EEC = 0x12`
 
