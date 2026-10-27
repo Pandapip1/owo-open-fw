@@ -1358,6 +1358,28 @@ lead for `ACTIVETXFCD` (§7.4/§7.6) found so far, pending either a fuller
 static resolution of the gating conditions or live hardware tracing of
 when stock actually takes this path.
 
+**Update: tried the conservative, deterministic subset on hardware —
+confirmed inert for this scenario, not just ineffective.** Implemented
+exactly the `distance < 8` branch (the one case where stock's gating
+condition is fully determined by the computation itself, independent of
+the unported `flags` accumulation): read `PROTIMER+0x38`/`FRC+0x1C`,
+compute `distance`, and only if it is below `8`, pulse `RAC+0x40` bit 22
+plus the two accompanying writes — bounded, no loops, same risk class as
+code already proven safe. QEMU 74/17/14 still pass. On real hardware, at
+the same checkpoint used throughout §7.6: `FRC.STATUS` and `RAC.STATUS`
+came back byte-for-byte identical to every attempt before it. Added a
+diagnostic trace word (`EFR32_SEQ_TRACE_DISTANCE`, recording the computed
+value unconditionally regardless of which branch is taken) to check
+*why*, rather than accept a silent no-op: the live computed distance was
+`0x1ffe` (8190) — nowhere near the `< 8` threshold. So this specific,
+safely-portable branch genuinely never fires in this scenario; it isn't
+that the pulse has no effect, it's that stock itself would also be
+taking the *other*, unported branch here. This narrows things further
+without resolving them: the `flags & 0x81` test on the `distance >= 8`
+path — gated on job-dispatch state this project has deliberately not
+reproduced — is now the specific remaining unknown blocking this lead,
+not the pulse itself or the distance computation.
+
 ### 7.4 `FRC.STATUS.ACTIVETXFCD` is unset where it should be set
 
 `FRC.STATUS` (`0xA8004008`, read-only, mask `0x01FFFFFF`) was previously

@@ -68,6 +68,27 @@
 .equ EFR32_RAC_0X44_BASE,              0xa8020044
 .equ EFR32_RAC_0X44_SET,               0xa8021044
 .equ EFR32_RAC_0X44_BIT_FUNCTION_GATE, (1 << 16)
+/*
+ * fn_0xd38's own second, previously-undocumented pulse of the TXWARM
+ * gate's SET alias (docs/radio-tables.md SS7.3.1), reached from
+ * fn_0x894's unconditional tail call for ordinary TXWARM/TX servicing.
+ * Only the branch stock *always* takes this pulse on is reproduced: when
+ * `(1 << (((PROTIMER+0x38 bits[31:29]) + 6))) - (FRC+0x1C & 0x1fff)`,
+ * truncated to 16 bits, is below 8, fn_0xd38 unconditionally clobbers its
+ * own gating flags word to a value that always passes the mask test
+ * guarding this pulse -- so this specific condition's outcome does not
+ * depend on the broader job-dispatch state this project does not
+ * reproduce. The other branch (distance >= 8) depends on that state and
+ * is NOT reproduced; this is a deliberately conservative subset, not the
+ * full original condition.
+ */
+.equ EFR32_SEQ_TRACE_DISTANCE,         0x00004fb8 /* diagnostic only */
+.equ EFR32_PROTIMER_0X38,              0xa801c038
+.equ EFR32_FRC_0X1C,                   0xa800401c
+.equ EFR32_RAC_0X44_SECOND_PULSE_BIT,  (1 << 22)
+.equ EFR32_OBS_BLOCK_A8015020,         0xa8015020
+.equ EFR32_OBS_BLOCK_A8015020_BIT,     (1 << 21)
+.equ EFR32_OBS_BLOCK_A8016100,         0xa8016100
 /* Three observed CLR-alias writes; semantics unestablished. */
 .equ EFR32_RAC_0X44_CLR,              0xa8022044
 .equ EFR32_RAC_0X44_CLR_MASK,         0x03
@@ -184,6 +205,39 @@ efr32_radio_seq_exception:
     ldr r0, =EFR32_RAC_0X44_SET
     ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
     str r1, [r0]
+    /* fn_0xd38's conservative-subset second pulse; see its own comment
+     * above. r3 = (1 << ((PROTIMER+0x38 bits[31:29]) + 6)) - (FRC+0x1C
+     * & 0x1fff), truncated to 16 bits. */
+    ldr r0, =EFR32_PROTIMER_0X38
+    ldr r1, [r0]
+    lsrs r1, r1, #29
+    adds r1, r1, #6
+    movs r2, #1
+    lsls r2, r2, r1
+    ldr r0, =EFR32_FRC_0X1C
+    ldr r1, [r0]
+    ldr r3, =0x1fff
+    ands r1, r3
+    subs r3, r2, r1
+    ldr r2, =0xffff
+    ands r3, r2
+    /* Diagnostic only: record the computed distance regardless of branch
+     * taken, for a later debug-probe read. Not part of the production
+     * trace words. */
+    ldr r0, =EFR32_SEQ_TRACE_DISTANCE
+    str r3, [r0]
+    cmp r3, #8
+    bcs 13f
+    ldr r0, =EFR32_RAC_TXWARM_GATE_SET
+    ldr r1, =EFR32_RAC_0X44_SECOND_PULSE_BIT
+    str r1, [r0]
+    ldr r0, =EFR32_OBS_BLOCK_A8015020
+    ldr r1, =EFR32_OBS_BLOCK_A8015020_BIT
+    str r1, [r0]
+    ldr r0, =EFR32_OBS_BLOCK_A8016100
+    movs r1, #1
+    str r1, [r0]
+13:
     ldr r0, =EFR32_RAC_0X44_CLR
     ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
     str r1, [r0]
