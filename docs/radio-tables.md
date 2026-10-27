@@ -1351,6 +1351,37 @@ transition, gated on some FRC precondition this project has not yet
 identified — plausibly, but not yet shown to be, the `0x894`/gate-pulse
 mechanics in §7.2–7.3.
 
+**A candidate self-re-arm mechanism, reachability unconfirmed.** Continued
+decomp of the same object locates, at local `0xf9c`, a function that: reads
+`RAC+0x44` (`0xA8020044`, via a pointer chain rooted at `RAC.CMD`'s own
+address) and proceeds only if bit 4 is set; computes a PROTIMER-relative
+distance (`0xA801C038`/`0xA801C00C`/`0xA801C11C`) against a stored value;
+and, on an exact match, writes `RAC.SEQIF` bit 21 via its SET alias,
+`RAC+0x08`'s CLR alias byte `0x10`, and — critically — writes `1` directly to
+`RAC.CMD` (`0xA8020010`), i.e. the M0+ itself re-issuing `TXEN`, not just
+acknowledging one the M33 already issued. Its one call site, at local
+`0x2b80`, is gated on a 4-bit field of a different register reading exactly
+`2`, inside a large (~90+ instruction) routine that opens with a 19-entry
+table-driven initialization loop (helper `0x2a60`, called with indices
+`0..13, 15, 17, 19, 23, -1, 27`) touching more RAC/PROTIMER state than
+anything else decoded in this section.
+
+This was **not** confirmed to execute in this project's scenario. Searching
+every `bl`/conditional-branch instruction in this same captured object for a
+target in the function's own entry region (`0x2900`–`0x2a30`) found none,
+and no stored pointer to it (`0x2a2d` or `0x2aa9`, Thumb-bit set) exists
+anywhere in the 20 KiB capture. So either it is reached only through an
+indirect call via a function-pointer table this pass did not trace back to
+its load site, or it is dead code in this image's build configuration (the
+shipped object plausibly serves multiple RAIL protocols, most of whose paths
+are irrelevant to plain BLE advertising). Given the project's existing
+discipline of not inventing control flow, this is recorded as a strong,
+specific, but **unconfirmed** candidate, not a conclusion: the single
+highest-value next step is a hardware or QEMU breakpoint at local `0xf9c`
+(and separately at `0x2a2c`, the apparent routine entry) during a real
+working-stock TX attempt, to settle reachability directly rather than by
+further static guessing.
+
 **Recommended next step:** a single-step poll of `FRC.STATUS` across the
 `RAC.CMD.TXEN` → first-IRQ8 window on the *working* stock controller (same
 technique as `trace_stores.py`, polling a read instead of recording writes)
