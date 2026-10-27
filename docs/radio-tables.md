@@ -1742,6 +1742,46 @@ Recommended next hardware session: dump `0x0FE08000`..`0x0FE083FF` and
 check for sub-fields that combine (directly or via a simple shift/OR) to
 `0x08F08A31`.
 
+**Reframing this whole thread, from the public register model, not more
+disassembly:** fetched Silicon Labs' own `RAC_S_register.py`/
+`RAC_S_field.py` (`build/reference-models/`, the same public generated
+model already cited elsewhere in this file for other registers — not
+previously fetched for `RAC` specifically). It defines `RAC_S.SR3` at
+exactly `0xA8020000+0x04C`, access `read-write`, **documented reset value
+`0x00000000`**, and an entirely **empty description** on both the
+register and its one 32-bit field — Silicon Labs' own model assigns it no
+hardware meaning at all; it is a generic software scratch word (the same
+shape as `SR0`/`SR1`/`SR2`, all four presumably meant for firmware's own
+bookkeeping, not fixed hardware status bits).
+
+This flips the framing that has driven this section since §7.5.1: the
+*official* reset value is `0`, which is exactly what the open stack reads
+— the open stack is not failing to establish some hardware default, it is
+correctly observing it. Stock's `0x08F08A31` is the anomaly, and it is
+Silicon Labs' own software (somewhere this project has not located,
+pre-application per the exhaustive checks above) writing a value into a
+register documented as blank scratch space — most plausibly as an
+undocumented handshake between Silicon Labs' own boot/bootloader stage and
+their own RAIL library, not a hardware requirement for radio operation at
+all.
+
+**More importantly, checked directly rather than re-deriving from old
+notes: does the open stack's own *shipped* code even read `SR3`
+anywhere?** No. `radio_seq.S` has zero references to it. `radio.c` only
+*writes* its CLR alias (bits 14/30, §7.5.1's fix) — a one-way write,
+never a read, never a branch condition. So whatever `SR3` actually holds
+cannot be influencing any decision the open stack's running code makes
+today. The `fn_0x894`/`fn_0xd38` `far_abort` gate this section spent real
+effort establishing (`5c85b73`) is real, but it only matters *if that
+dispatch logic is ported* — and this project's own charter deliberately
+never ports it. **This closes out `SR3` as a live suspect for
+`ACTIVETXFCD` as currently blocked**: it is a genuinely interesting,
+still-unsolved mystery (worth the "Recommended next hardware session"
+above if anyone wants to chase it further), but not something on the
+open stack's actual execution path, and not what is standing between the
+current code and a working stage 3. The real blocker is still open and
+needs a different thread, not more `SR3` archaeology.
+
 ### 7.5.3 Fixed: the SEQIF-ack wait didn't retry its own CLR write
 
 Direct instruction-by-instruction comparison of `radio_seq.S`'s bounded
