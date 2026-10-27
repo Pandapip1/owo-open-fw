@@ -1,10 +1,12 @@
 /*
- * Lower-link-layer execution contexts in one meta-IRQ thread, and the mayfly glue that schedules
- * them. SPDX-License-Identifier: Apache-2.0
+ * Lower-link-layer execution contexts in scheduler-owned meta-IRQ threads, and the mayfly glue
+ * that releases them. SPDX-License-Identifier: Apache-2.0
  *
  * Replaces Zephyr's OpenISA RV32M1 mayfly.c, which ran the LLL and ULL contexts in software
  * interrupts and gated them by enabling/disabling those IRQs. Here the software interrupts only
- * ring a doorbell; the context bodies run in the thread, and gating is a flag the thread honours.
+ * ring a doorbell; each context body runs in its own persistent thread, and gating is a flag the
+ * thread honours. The radio module publishes readiness and deadlines but never chooses between
+ * ready contexts: that policy belongs to the Zephyr scheduler.
  *
  * UNVALIDATED ON HARDWARE.
  */
@@ -19,11 +21,24 @@
 #include "hal/efr32/ll_threads.h"
 #include "hal/efr32/cntr_efr32.h"
 
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+#define EFR32_LL_TRACE_ONCE(format, ...) \
+	do { \
+		static bool efr32_trace_once_; \
+		if (!efr32_trace_once_) { \
+			efr32_trace_once_ = true; \
+			printk("efr32-radio trace: " format "\n", ##__VA_ARGS__); \
+		} \
+	} while (0)
+#else
+#define EFR32_LL_TRACE_ONCE(...) do { } while (0)
+#endif
+
 /*
  * Two contexts, one per software interrupt. ULL high and low share the worker interrupt in this
  * configuration (hal/efr32/swi.h), so they share its context and its gate. All contexts share one
  * priority, which mayfly_prio_is_equal() reports: like the equal-priority interrupts they replace
- * they never preempt each other, so one thread runs them all, LLL first.
+ * they never preempt each other. Separate threads let the kernel order ready work by deadline.
  */
 BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_CTLR_LOW_LAT));
 /* ull_reset() must wait for the LLL reset mayfly; ZLI assumes it ran inline. */
@@ -34,6 +49,8 @@ BUILD_ASSERT(CONFIG_BT_CTLR_LLL_PRIO == CONFIG_BT_CTLR_ULL_HIGH_PRIO &&
 
 struct ll_context {
 	void (*body)(const void *arg);
+	struct k_deadline_event event;
+	const char *name;
 	/* Rung by the doorbell, consumed by the thread. */
 	bool pending;
 	/* Gate set by mayfly_enable(); a run requested while closed waits for it. */
@@ -41,11 +58,14 @@ struct ll_context {
 	bool deferred;
 };
 
-static K_DEADLINE_EVENT_DEFINE(ll_event);
 static struct ll_context lll_ctx = {
+	.event = Z_DEADLINE_EVENT_INITIALIZER,
+	.name = "lll thread",
 	.enabled = true,
 };
 static struct ll_context worker_ctx = {
+	.event = Z_DEADLINE_EVENT_INITIALIZER,
+	.name = "ull worker thread",
 	.enabled = true,
 };
 
@@ -55,7 +75,7 @@ static void ll_context_post(struct ll_context *ctx, int deadline)
 
 	ctx->pending = true;
 	irq_unlock(key);
-	k_deadline_event_post(&ll_event, deadline);
+	k_deadline_event_post(&ctx->event, deadline);
 }
 
 /* Consume one pending run of @p ctx; returns the body to run, if its gate is open. */
@@ -76,37 +96,36 @@ static void (*ll_context_take(struct ll_context *ctx))(const void *arg)
 	return body;
 }
 
-static void ll_thread(void *a, void *b, void *c)
+static void ll_context_thread(void *context, void *b, void *c)
 {
-	ARG_UNUSED(a);
+	struct ll_context *ctx = context;
+
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
 	for (;;) {
 		void (*body)(const void *arg);
 
-		k_deadline_event_wait(&ll_event);
-		/* The ticker deadline bounds the worker work this pass is about to run. */
-		efr32_radio_deadline_check((int)cntr_ticker_deadline(), "ll thread");
+		k_deadline_event_wait(&ctx->event);
+		EFR32_LL_TRACE_ONCE("%s wake", ctx->name);
+		efr32_radio_deadline_check(ctx == &lll_ctx ? (int)cntr_launch_deadline() :
+						      (int)cntr_ticker_deadline(), ctx->name);
 		/*
-		 * Each pass serves both contexts, LLL first. Serving the LLL until it is idle would
-		 * starve the worker, whose ticker job drains the user operations the LLL queues. A
-		 * doorbell rung while a body runs is served before waiting again.
+		 * Coalesce repeated doorbells, but run again when one arrives while the body executes.
+		 * Ordering against the other context and radio jobs is exclusively scheduler policy.
 		 */
 		do {
-			body = ll_context_take(&lll_ctx);
+			body = ll_context_take(ctx);
 			if (body != NULL) {
 				body(NULL);
 			}
-			body = ll_context_take(&worker_ctx);
-			if (body != NULL) {
-				body(NULL);
-			}
-		} while (lll_ctx.pending || worker_ctx.pending);
+		} while (ctx->pending);
 	}
 }
 
-K_THREAD_DEFINE(efr32_ll_thread, CONFIG_EFR32_RADIO_LL_STACK_SIZE, ll_thread, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+K_THREAD_DEFINE(efr32_lll_thread, CONFIG_EFR32_RADIO_LLL_STACK_SIZE, ll_context_thread,
+		&lll_ctx, NULL, NULL, EFR32_LL_THREAD_PRIO, 0, 0);
+K_THREAD_DEFINE(efr32_ull_worker_thread, CONFIG_EFR32_RADIO_ULL_STACK_SIZE, ll_context_thread,
+		&worker_ctx, NULL, NULL, EFR32_LL_THREAD_PRIO, 0, 0);
 
 void efr32_ll_threads_bind(void (*worker)(const void *arg), void (*lll)(const void *arg))
 {
@@ -115,18 +134,21 @@ void efr32_ll_threads_bind(void (*worker)(const void *arg), void (*lll)(const vo
 	worker_ctx.body = worker;
 	lll_ctx.body = lll;
 	irq_unlock(key);
+	EFR32_LL_TRACE_ONCE("ll-bind worker=%p lll=%p", worker, lll);
 }
 
 /* Doorbells: only make the context runnable. */
 void efr32_ll_worker_doorbell_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
+	EFR32_LL_TRACE_ONCE("worker-doorbell");
 	ll_context_post(&worker_ctx, (int)cntr_ticker_deadline());
 }
 
 void efr32_ll_lll_doorbell_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
+	EFR32_LL_TRACE_ONCE("lll-doorbell");
 	ll_context_post(&lll_ctx, (int)cntr_launch_deadline());
 }
 
@@ -179,8 +201,9 @@ uint32_t mayfly_prio_is_equal(uint8_t caller_id, uint8_t callee_id)
 
 void mayfly_pend(uint8_t caller_id, uint8_t callee_id)
 {
-	ARG_UNUSED(caller_id);
+	EFR32_LL_TRACE_ONCE("mayfly-pend caller=%u callee=%u", caller_id, callee_id);
 	if (callee_context(callee_id) == &lll_ctx) {
+		EFR32_LL_TRACE_ONCE("mayfly-pend-lll caller=%u", caller_id);
 		hal_swi_lll_pend();
 	} else {
 		hal_swi_worker_pend();

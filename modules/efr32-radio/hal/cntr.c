@@ -22,6 +22,19 @@
 #include "hal/efr32/cntr_efr32.h"
 #include "hal/debug.h"
 
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+#define EFR32_CNTR_TRACE_ONCE(format, ...) \
+	do { \
+		static bool efr32_trace_once_; \
+		if (!efr32_trace_once_) { \
+			efr32_trace_once_ = true; \
+			printk("efr32-radio trace: " format "\n", ##__VA_ARGS__); \
+		} \
+	} while (0)
+#else
+#define EFR32_CNTR_TRACE_ONCE(...) do { } while (0)
+#endif
+
 #define TICK_HZ          32768U
 #define LOGICAL_PER_TICK (CONFIG_CLOCK_EVENT_SCHED_FREQUENCY / TICK_HZ)
 BUILD_ASSERT(CONFIG_CLOCK_EVENT_SCHED_FREQUENCY % TICK_HZ == 0,
@@ -66,6 +79,7 @@ static bool too_close(struct k_clock_event *event, uint64_t deadline)
 
 static void ticker_fire(void)
 {
+	EFR32_CNTR_TRACE_ONCE("ticker-fire now=%u", (uint32_t)k_clock_event_sched_now());
 	atomic_set(&cmp_fired, 1);
 	hal_swi_worker_pend();
 }
@@ -120,7 +134,12 @@ static void qemu_tifs_expired(struct k_clock_event *event, uint32_t event_genera
 
 bool cntr_cmp_take(void)
 {
-	return atomic_set(&cmp_fired, 0) != 0;
+	bool fired = atomic_set(&cmp_fired, 0) != 0;
+
+	if (fired) {
+		EFR32_CNTR_TRACE_ONCE("ticker-consumed");
+	}
+	return fired;
 }
 
 void cntr_init(void)
@@ -128,10 +147,14 @@ void cntr_init(void)
 	LL_ASSERT(k_clock_event_sched_init(&ticker_event, ticker_expired, NULL) == 0);
 	LL_ASSERT(k_clock_event_sched_init(&radio_launch_event, radio_launch_expired, NULL) == 0);
 	LL_ASSERT(k_clock_event_sched_init(&qemu_tifs_event, qemu_tifs_expired, NULL) == 0);
+	EFR32_CNTR_TRACE_ONCE("counter-init now=%u min=%u",
+			      (uint32_t)k_clock_event_sched_now(),
+			      k_clock_event_min_arm_cycles(&ticker_event));
 }
 
 uint32_t cntr_start(void)
 {
+	EFR32_CNTR_TRACE_ONCE("counter-start refcount=%u", refcount);
 	/* The scheduler clock always runs; only the users are counted. */
 	return refcount++ ? 1U : 0U;
 }
@@ -156,6 +179,9 @@ uint32_t cntr_cnt_get(void)
 void cntr_cmp_set(uint8_t cmp, uint32_t value)
 {
 	uint64_t deadline = tick_to_logical(value);
+	EFR32_CNTR_TRACE_ONCE("counter-compare value=%u deadline=%u now=%u",
+			      value, (uint32_t)deadline,
+			      (uint32_t)k_clock_event_sched_now());
 
 	LL_ASSERT(cmp == 0);
 	atomic_set(&ticker_deadline, (uint32_t)deadline);

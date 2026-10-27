@@ -72,9 +72,11 @@ fi
 
 # The EFR32 model intentionally has no host character device.  Reconstruct
 # printable console bytes only from QEMU's internal native-USART trace, rather
-# than creating a host-I/O shortcut. `xxd` is provided by the Nix shell.
+# than creating a host-I/O shortcut. Python is already in the Nix shell.
 console=$(sed -n 's/.*USART1 TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-    "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')
+    "$RUNTIME_DIR/radio.trace" | \
+    python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("".join(sys.stdin.read().split())))' | \
+    tr -d '\r')
 printf '%s\n' "$console" | grep -E '^(bt_enable|adv_start):' || true
 if ! printf '%s\n' "$console" | grep -q '^bt_enable: 0$'; then
     echo "radio-mmio: bt_enable did not report success through native USART tracing"

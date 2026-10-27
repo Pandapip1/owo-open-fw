@@ -1,8 +1,40 @@
 # Open radio firmware: inventory, plan, status
 
-**Unvalidated on hardware. Nothing in this document or in `crates/ble-ll` has run on a real radio or been seen on air. Any output stage built on it must be bench-tested on a dummy load first.**
+**Stage 3 is under active hardware validation.  Its custom M33 driver reaches
+TXEN, but its expected advertisement has not yet been observed on air.**
 
-Goal (user-confirmed): replace the Silicon Labs radio blobs on the EFR32BG22 with open code: an open BLE link layer, and eventually the radio sequencer firmware. This file records what was found, what is possible without undocumented hardware knowledge, and the order to do it in. Facts are tagged **[F]** (observed in a file or trace, source given), **[I]** (inferred), **[?]** (unknown).
+## Stage-3 dependency rule
+
+The radio coprocessor firmware is part of `modules/efr32-radio` and is built
+from reviewed ARMv6-M source by the open GNU Arm Embedded toolchain.  Stage 3
+must not depend on a RAIL archive, a downloaded sequencer object, or an image
+left in retention RAM.  Proprietary binaries are permitted only as stage-1/2
+reference oracles and differential-test inputs; observations promoted into the
+open implementation require named behavior, provenance, and simulator
+coverage.  A byte-for-byte unexplained reimplementation is not an acceptable
+open driver.
+
+The generated `radio-sequencer.bin` is an intermediate build product, not an
+input blob: the build graph derives it only from `sequencer/radio_seq.S` and
+`sequencer/link.ld`, then converts it to the const array linked into the M33
+image.  A clean stage-3 rebuild on 2026-10-27 produced the 400-byte image with
+SHA-256 `21f65696a8009288554589d157cec10953dd7dec7a1db4d259b4fe533840b102`.
+The final link map contains `radio-sequencer-image.c.obj` and contains no RAIL,
+`liblinklayer`, or vendor sequencer object.  The Silicon Labs HAL archive
+members pulled into that image are source-built clock, GPIO, timer, USART,
+power, system, DMA, and memory-manager objects; none is a radio library or
+coprocessor image.  This map audit is necessary but not sufficient: every
+future radio-side source addition must still have a named contract and the
+hardware/simulator evidence described above.
+
+Goal (user-confirmed): replace every Silicon Labs radio blob on the EFR32BG22
+with open code: the M33 link layer and direct radio driver **and** the private
+radio-coprocessor firmware are one source-reviewed driver deliverable. There
+must be no unexplained binary anywhere in its build or runtime dependency
+chain. This file records what was found, what is possible without undocumented
+hardware knowledge, and the order to do it in. Facts are tagged **[F]**
+(observed in a file or trace, source given), **[I]** (inferred), **[?]**
+(unknown).
 
 ## 1. What runs where
 
@@ -42,6 +74,13 @@ Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, s
 * **[F]** Later SRAM-resident startup code loads `MSC.STATUS` through the `0x4003001c` literal at RAM offset `0x0c50` (the copied code reads it at `0x20000b08`). The public-derived reset table gives that status register `0x08000008`; native QEMU had supplied zero and now restores the reset latch. This does not model MSC erase/program commands or infer a flash transaction.
 * **[F]** Before that radio initialization, the stock image polls the HFXO enabled status. At `flash-stock.bin` file offset `0x1b0b0` it loads `HFXO.STATUS` through `0x4000c010 + 0x48` and loops on the enabled bit; a native-QEMU QMP register sample while the old always-ready model was active stopped at PC `0x0001b0b2`. At file offset `0x1b13c`, it then masks that status with the literal `0x40010003` at `0x1b524`, requiring `FSMLOCK`, `ENS`, and the low ready bits. The model therefore reports HFXO ready only when `HFXO.CTRL.FORCEEN` is asserted or `CMU.SYSCLKCTRL` selects HFXO, and models `CMD.MANUALOVERRIDE` (bit 1) releasing `FSMLOCK`, matching the prior source-backed simulator rule. This is a clock-gating prerequisite only; it does not model RF calibration or radio timing.
 * **[F]** SEQRAM starts with a Cortex-M style vector table: word 0 = 0x00003E90 (initial stack pointer inside SEQRAM), word 1 = 0x0000329D (reset vector, Thumb bit set), words 2–6 and 11–15 share one default handler, and the vectors from index 16 on point to distinct handlers. Reset code begins at 0x329C. So the sequencer is a small 32-bit microcontroller running Thumb code from the same 16 kB RAM it uses for stack and data.
+* **[F]** Open code execution on that core is hardware-confirmed. A replacement
+  vector table (SP `0x3e00`, reset `0x101`) and four ARMv6-M instructions loaded
+  through the M33 debug view wrote the sentinel `0x12345678` to local
+  `SEQ.SPARE0` at `0x4fe0` after `RAC.CTRL.CPUWAITDIS` was set. A fresh OpenOCD
+  attachment read the sentinel back unchanged. This proves the loader, reset
+  vector, local address space, and execution gate without copying vendor code;
+  it does not yet implement a radio event or transmit a frame.
 * **[F]** Instruction mix over 0x100..0x3300: 303 `bl`, `ldr`/`str`/`movs`/`lsls` dominate, `mrs`, `cpsid`, `cpsie`, `wfi` present; zero `cbz`, `it`, `ldrex`, `movw/movt`, `ubfx`, `udiv`. The code assembles and disassembles cleanly with the ARMv6-M instruction set (`arm-none-eabi-objdump -M force-thumb`). **[I]** It is ARMv6-M compatible code (a Cortex-M0+ class core). The core's identity is **[?]**: no public document available offline states it.
 * **[F]** The image in the stock application is not byte-identical to the one in the SDK's `generic_efr32xg22_release_seq.o` (a 32-byte prefix search of all its large data sections finds nothing in the stock firmware). The two are different RAIL versions; the M33↔sequencer contract changes between versions. The open sequencer therefore has to be built against *one* M33-side driver, not against "the" Silabs interface.
 * **[F]** Peripheral blocks referenced by literals in the sequencer image (counting aligned 32-bit constants in 0xA8000000–0xAAFFFFFF): 0xA8020000 (and its alias pages 0xA8021000/0xA8022000) by far the most, then 0xA8004000, 0xA8014000, 0xA801C000, 0xA8016000, 0xA8006000, 0xA8018000, 0xAA000000. The sequencer therefore programs the same radio blocks as the M33 does, and shares them with it. The now-source-backed map names `0xA8004000` as FRC and `0xAA000000` as BUFC; the earlier BUFC-at-FRC-base label here was stale. Other block names still require trace or public-table corroboration. The observed interrupt names are AGC, BUFC, FRC_PRI, FRC, MODEM, PROTIMER, RAC_RSM, RAC_SEQ, RDMAILBOX, RFSENSE, PRORTC, SYNTH (device header IRQ list).
@@ -71,6 +110,20 @@ evidence establishes that HCI-over-that-real-peripheral transport. A generic
 
 BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one connection in the peripheral role, GATT writes in, notifications out, channel selection #1 and #2, supervision timeout, encryption (the suit's firmware enforces MITM pairing: `CONFIG_BT_SMP_ENFORCE_MITM`, so LE encryption is **required** for the real device; it is not in the crate yet). No 2M/coded PHY, no extended advertising, no CTE, one connection.
 
+### Scheduler ownership invariant
+
+The radio peripheral and its private M0+ sequencer may implement bounded
+low-level state-machine actions, but neither owns software scheduling policy.
+All M33 launch, completion, timeout, retry, and link-layer work remains in
+persistent RTOS jobs. Hardware IRQ handlers only acknowledge/mask a source,
+publish state, and signal an existing job's RTOS event; they do not call the
+link layer, dispatch a job, alter its priority, or issue a replacement TX/RX
+schedule. Signalling eligibility does not choose execution order: the RTOS
+scheduler remains the sole authority over when that job runs and what it may
+preempt. The radio M0+ must likewise not select, dispatch, preempt, reprioritize,
+or synthesize M33 jobs. Characterization probes that run on the M0+ establish
+the peripheral hand-off only and are not a production scheduler path.
+
 ## 5. Staged plan
 
 | Stage | Work | Test that can run now / next |
@@ -78,10 +131,17 @@ BLE 1M PHY, legacy connectable advertising on 37/38/39, SCAN_REQ/SCAN_RSP, one c
 | 0 **done** | `crates/ble-ll`: CRC-24, whitening, CSA #1/#2, advertising/connect PDUs, data header, SN/NESN, LL control subset, window widening/transmit window timing, instants, supervision, HCI framing/event builders, `Peripheral<R: Radio>` driver | `cargo test` in the crate: 30 tests (§6) |
 | 1 | `hci_efr32_ll.c` replacing `hci_silabs_efr32.c`; HCI command layer for the commands Zephyr's host sends at init (list below); ACL ↔ `queue_data` flow control | native_sim: Zephyr host + our controller + a software central (the mock radio of `tests/peripheral.rs`, scripted by a second instance of the crate in central role or by pre-recorded PDUs) |
 | 2 | Encryption: LL_ENC_REQ/RSP, START_ENC, AES-CCM per Vol 6 Part B §5.1.3 | sample data from Core Spec Vol 6 Part C (encryption sample data) |
-| 3 | Radio driver v0 *on top of RAIL* (public API) implementing `Radio`; keeps the closed sequencer and RAIL, removes only `liblinklayer.a` | QEMU radio model (sibling task, `docs/radio-block.md`): compare the register traffic of our driver with the stock link layer's for "start advertising" |
-| 4 | Capture ground truth: register dumps/traces from a real EFR32BG22 dev kit over SWD (the user's hardware) for TX/RX/IFS sequences | needs hardware, no substitute |
-| 5 | Radio driver v1 that programs the blocks directly from `sl_rail_ble_config.c` tables, without RAIL | QEMU model + hardware |
-| 6 | Open sequencer firmware (Rust/C, `thumbv6m-none-eabi`) | QEMU would need a second CPU model for it; practically hardware only |
+| 3a **reference only** | Radio driver v0 on top of RAIL, used only to capture and explain behavior while replacing `liblinklayer.a` | Differential QEMU/hardware evidence; this configuration is not the stage-3 deliverable |
+| 3b | Capture ground truth: register dumps/traces from a real EFR32BG22 dev kit over SWD for TX/RX/IFS sequences | Hardware plus matched QEMU snapshots |
+| 3c **active** | One open driver that programs the radio blocks directly and embeds its source-built ARMv6-M coprocessor firmware; no RAIL or proprietary image in the dependency chain | QEMU M33+M0+ model, machine qtests, real-hardware FIFO/state measurements, and on-air BLE validation |
+
+Diagnostic stage **2.5** sits between the proven stock Zephyr baseline and 3c:
+it builds the vendored Zephyr tree with the open controller/M33 driver, but
+explicitly embeds the captured proprietary coprocessor image. Its sole purpose
+is fault isolation. The cache option is named
+`EFR32_RADIO_PROPRIETARY_SEQ_IMAGE`, emits a configure-time warning, and has no
+default; ordinary/stage-3 builds always compile the open ARMv6-M source. A
+successful 2.5 result cannot satisfy the open-driver goal.
 
 HCI commands the host needs at init (from `subsys/bluetooth/host/hci_core.c`): Reset, Read Local Features, Read Local Version Info, Read Supported Commands, Set Event Mask, Read Buffer Size / LE Read Buffer Size, LE Read Local Features, LE Read Supported States, LE Set Event Mask, LE Write LE Host Support, LE Read Max Data Length / Write Default Data Length (if enabled), LE Set Default PHY (if enabled), LE Read Filter Accept List size, LE Rand, LE LTK Request (Neg) Reply, LE Set Advertising Parameters/Data/Scan Response/Enable, Disconnect, Read Remote Version Info, LE Read Remote Features, Host Number Of Completed Packets / Set Controller To Host Flow Control (if enabled). Opcode values for the first group are in `hci.rs` and checked against `hci_types.h` by tests.
 

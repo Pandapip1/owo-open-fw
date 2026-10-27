@@ -83,8 +83,8 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T1 | block enables/reset, which IRQ ends an event | **[F] six core EN latches implemented; stock's raw BUFC/PROTIMER `+0x004 = 1` setup writes are mirrored without assigning bit semantics; RAC has separate RSM and SEQ flag/enable banks; reset and event policy remain unknown. OpenISA-compatible sleep/wake availability accounting is software-only.** | `radio_setup/reset/sleep/wake/is_off`, `LL_RADIO_IRQn` |
 | T2 | RAC command + state/status registers | **[F] core command/state map known; sequencer behavior still abstract** | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded; address-independent BLE base plus 1M/2M/coded S2/S8 deltas imported; PHYINFO remains unresolved** | `radio_phy_set` |
-| T4 | SYNTH channel/frequency registers | **[F] implemented from public BLE channel config and CHCTRL field** | `radio_freq_chan_set` |
-| T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; public BLE 1M FRC baseline and descriptor fields decoded, but sequencer handoff/buffer behavior remains incomplete** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
+| T4 | SYNTH channel/frequency registers | **[F] advertising frequencies implemented; a complete working `RAIL_StartTx` trace proves the physical 2 MHz index is written to `FRC.WCNTCMP2` and `SYNTH.CHSP` while `SYNTH.CHCTRL` remains zero; the HAL and QEMU medium now use that contract** | `radio_freq_chan_set` |
+| T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; `radio_pkt_configure()` clears the named FCD0..3 `SKIPWHITE` field and hardware readback matches stock for that field; remaining length/header and sequencer handoff behavior is incomplete** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; a dormant normalized-PDU RX copy helper enforces controller bounds, but FRC/BUFC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
 | T7 | PA power registers | **[F] RAIL routes raw and dBm requests through configuration-dependent helpers; a board-safe PA setting remains unresolved** | `radio_tx_power_*` |
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
@@ -266,7 +266,7 @@ The RAIL archive narrows the `CMD=4` sequence without naming that bit. In `libra
 
 The same public header defines identical global `IF` and `IEN` masks, `0x8F0F0F0F` (`efr32bg21_bufc.h:247-338`): four sparse four-bit buffer groups at bit positions `0..3`, `8..11`, `16..19`, and `24..27`, plus bus error at bit 31. Within each group, bit 0 is overflow, bit 1 underflow, bit 2 threshold, and bit 3 corrupt (`efr32bg21_bufc.h:250-329`). Its threshold flag/enable bits are therefore at `2`, `10`, `18`, and `26`, rather than a compact four-bit bitmap. This is corroborated by the stock write `BUFC.IEN = 0x00050000` at `radio-trace.log:52-53`, which enables buffer-2 overflow and threshold positions. QEMU masks both latches to that source-backed value, uses the public threshold positions, and latches the channel-overflow bit when pointer-derived occupancy exceeds its configured capacity; its regression covers a 64-byte buffer's 65th port write. Underflow, corruption, and any RAIL packet/error recovery policy remain unmodelled.
 
-The downloaded stock sequencer-RAM capture adds a distinct programmed-I/O fact. The untracked container `scratch-radio.tgz` has SHA-256 `5054d2b46b9315238f5864c5f0f931fb0759bb374d7d41257038842da827cd86`; its sole `radioram.dump` member begins at tar offset `0x200` and has SHA-256 `acd72f8ebb4008e918af059b1ba2383dc64b33c66690871f4343a5bfed100847`. Thumb code at RAM offset `0x0ce4` (`0xA0000CE4`) loads the literal at member offset `0x0e30`, `0xA8004090` (`FRC.RXRAWDATA`), then loads the `0xAA000064` literal at member offset `0x0e34` (secure buffer 1 `WRITEDATA`). The instruction range `0x0d50..0x0d6c` makes four 32-bit stores to that port: `0x0d5a` writes `RXRAWDATA[15:0]` after `UXTH`, and `0x0d60`, `0x0d66`, and `0x0d6a` write separately extracted bits `15:8`, `23:16`, and `31:24`. These are word-wide bus transactions, but compatible public BUFC fields `READDATA`, `WRITEDATA`, and `XWRITE` are all low-octet `0x000000ff` values (`efr32bg21_bufc.h:170-192`); each store therefore contributes one low-octet FIFO lane, yielding raw bytes 0 through 3 in order. The public revB2 model identifies the source as read-only `FRC_S.RXRAWDATA` (`FRC_S_register.py:871-885`); the trace-established xG22 layout identifies the destination as `0xAA000000 + 0x04c + 0x018`. This proves that the captured sequencer feeds that port with programmed I/O from FRC raw RX data; it does not establish packet framing, FIFO ownership, byte count, or DMA behavior. QEMU aliases secure and non-secure BUFC windows to the same data-port state, consumes the low octet once per port write, and mirrors it into the configured guest-RAM backing address: the public RAIL contract defines that address as a circular FIFO buffer receiving incoming packet data (`rail.h:1817-1821`). Its data-port regression verifies a high-bit 32-bit write, the secure-buffer-1/non-secure-alias read, and the resulting guest-RAM byte. It also makes the source register read-only to guest writes, matching the public model; a future internal receive producer may supply it.
+The downloaded stock sequencer-RAM capture adds a distinct programmed-I/O fact. The untracked container `scratch-radio.tgz` has SHA-256 `5054d2b46b9315238f5864c5f0f931fb0759bb374d7d41257038842da827cd86`; its sole `radioram.dump` member begins at tar offset `0x200` and has SHA-256 `acd72f8ebb4008e918af059b1ba2383dc64b33c66690871f4343a5bfed100847`. Thumb code at RAM offset `0x0ce4` (`0xA0000CE4`) loads the literal at member offset `0x0e30`, `0xA8004090` (`FRC.RXRAWDATA`), then loads the `0xAA000064` literal at member offset `0x0e34` (secure buffer 1 `WRITEDATA`). The instruction range `0x0d50..0x0d6c` makes four 32-bit stores to that port: `0x0d5a` writes `RXRAWDATA[15:0]` after `UXTH`, and `0x0d60`, `0x0d66`, and `0x0d6a` write separately extracted bits `15:8`, `23:16`, and `31:24`. These are word-wide bus transactions, but compatible public BUFC fields `READDATA`, `WRITEDATA`, and `XWRITE` are all low-octet `0x000000ff` values (`efr32bg21_bufc.h:170-192`); each store therefore contributes one low-octet FIFO lane, yielding raw bytes 0 through 3 in order. The public revB2 model identifies the source as read-only `FRC_S.RXRAWDATA` (`FRC_S_register.py:871-885`); the trace-established xG22 layout identifies the destination as `0xAA000000 + 0x04c + 0x018`. This proves that the captured sequencer feeds that port with programmed I/O from FRC raw RX data; it does not establish packet framing, FIFO ownership, byte count, or DMA behavior. Hardware additionally proves that these aliases are initiator-dependent: the private M0+ can use A/AA and HardFaults on its first B-window RAC store, while Zephyr's M33 uses B/BA after assigning `AHBRADIO` non-secure. Both views nevertheless reach shared radio/FIFO state. QEMU currently aliases secure and non-secure BUFC windows unconditionally; that is a known fidelity gap rather than evidence that either hardware core may use both. Its data-port regression verifies a high-bit 32-bit write, the secure-buffer-1/non-secure-alias read, and the resulting guest-RAM byte. It also makes the source register read-only to guest writes, matching the public model; a future internal receive producer may supply it.
 
 The capture's SHA-256 is `acd72f8e…ed100847`, and the same FRC literal occurs
 in the shipped sequencer image: `generic_efr32xg22_release_seq.o`, member
@@ -590,18 +590,68 @@ public rev-B2 field model identifies as `CTRL.FORCEDISABLE`; it then reads
 `STATUS` at `0x00000b16` (line 60).  The following write to `SEQIF` and the
 later `CTRL` values `0x04000000` and zero (offsets `0x00000ae6`,
 `0x00000b75`, and `0x00000ba5`) belong to an uncharacterized sequencer
-hand-off, so the open HAL deliberately does not reproduce them.  It retains
-the proven scratch clear and force-disable-to-OFF prefix, then clears the
-force-disable latch.  QEMU gives `CTRL.FORCEDISABLE` this narrow cancellation
-effect, including cancellation of its synthetic TX timer; it does not infer
-the omitted sequencer behavior.
+hand-off. Hardware bring-up without the proprietary sequencer firmware showed
+that writing `FORCEDISABLE` while RAC was already OFF instead entered
+`STATUS.STATE=SHUTDOWN` (13) indefinitely. The open HAL therefore skips that
+vendor reset prefix when RAC is already OFF. QEMU now exposes SHUTDOWN for an
+asserted `FORCEDISABLE`, while still cancelling its synthetic TX timer, rather
+than inventing the omitted sequencer transition back to OFF.
 
 ## 4.2 SYNTH, FRC, and AGC fields [F]
-The same public revB2 model identifies the remaining core data-path fields. SYNTH has 28-bit `FREQ` at `+0x034`, 21-bit `IFFREQ` at `+0x038`, `DIVCTRL` at `+0x03C`, 6-bit `CHCTRL.CHNO` at `+0x040`, and 18-bit `CHSP` at `+0x044`. The public BLE 1M channel config specifies base 2402 MHz, 2 MHz spacing, physical channels 0..39. Zephyr passes MHz relative to 2400 (`2`, `26`, `80` for advertising), so `radio_freq_chan_set` now validates that input and writes `CHNO = (chan - 2) / 2`. QEMU preserves these fields with their public masks. The PHY table remains responsible for `FREQ` and `CHSP`.
+The same public revB2 model identifies the remaining core data-path fields. SYNTH has 28-bit `FREQ` at `+0x034`, 21-bit `IFFREQ` at `+0x038`, `DIVCTRL` at `+0x03C`, 6-bit `CHCTRL.CHNO` at `+0x040`, and 18-bit `CHSP` at `+0x044`. The public BLE 1M channel config specifies base 2402 MHz, 2 MHz spacing, physical channels 0..39. Zephyr passes MHz relative to 2400 (`2`, `26`, `80` for advertising). Hardware watchpoints now establish the corresponding working `FREQ` words as `0x01f46aab`, `0x01f96aab`, and `0x0204aaab`; the HAL writes the named advertising-channel word and `CHNO = (chan - 2) / 2`. General data-channel frequency encoding remains deliberately rejected until it has a source-backed derivation. QEMU preserves these fields with their public masks but does not infer RF tuning from `CHNO` alone.
+
+A hardware-breakpoint trace of the working stage-2 M33's channel-37 TX
+preparation path writes `SYNTH.FREQ=0x01f46aab`, followed by `CHCTRL=0` and
+`CHSP=0`.  It also updates `MODEM.SRCCHF`, `MODEM.DIGMIXCTRL`,
+`RAC.DIGCLKRETIMECTRL`, and `RAC.XORETIMECTRL`.  Injecting the observed
+frequency alone, and then the frequency plus the stock mixer and retiming
+values, did not make stage 3 observable in separate 20-second LE scans.  This
+proves that QEMU's present CHNO-only tuning abstraction is incomplete, but it
+does not justify copying those channel-37 calibration words into the HAL.
+Their named derivation and the still-stalled FRC/BUFC launch contract remain
+open.
+
+After the FIFO-consumption boundary was recovered, repeating the frequency
+test plus a snapshot-scoped match of the differing named FRC, MODEM, RAC,
+PROTIMER, mixer, and retiming registers still produced no advertisement at
+the exact staged AdvA.  Those raw values remain characterization evidence and
+were not promoted into the HAL.  The negative result moves the remaining gate
+past channel selection and the tested static register snapshot.
+
+Matched hardware snapshots at the initial RAC-enable boundary establish an
+ordering constraint that endpoint-only QEMU previously omitted. Stock enables
+BUFC and PROTIMER before RAC, while the original open HAL enabled both after
+RAC. On silicon the latter path remains in SHUTDOWN, and enabling the two
+dependencies later does not repair the state. The HAL now retains the complete
+observed block order; QEMU's focused enable-order regression preserves the
+failure boundary without pretending to implement the still-unknown successful
+sequencer hand-off.
+
+The final immediate-TX primitive adds one short sequencer handshake before
+`RAC.CMD.TXEN`: helper `0xe35c` sets `RAC.SR0` bit 7, clears `SR0` bit 3, and
+clears bit 5 at shared sequencer word `0xb0003ec4`.  Replaying that exact state
+under the otherwise augmented stage-3 run did not produce an advertisement or
+advance the BUFC read offset; that establishes only that it is insufficient.
+Because static control flow proves it is part of every working launch, the HAL
+retains it behind phase/provenance names.  The M0+ helper at image offset
+`0x9c8` pulses its SR0 gate, tests shared bit 5, and writes the public
+`RAC.RXENSRCEN.SWRXEN` command only when the bit is clear; this identifies the
+shared bit as an RX-after-TX inhibit.  Recovering the consumers of M33's SR0
+bits 7 and 3 remains required before those two names can claim field meaning.
 
 The in-process QEMU RF mailbox now snapshots that `CHCTRL.CHNO` value at its synthetic `RAC.CMD.TXEN` boundary and delivers only to an `RXSEARCH` peer with the same currently latched value. This is the minimal channel-selection behavior supported by the public field and the HAL's channel programming: its focused qtest rejects a mismatched peer, then accepts the identical still-active snapshot after that peer retunes and re-enters `RXSEARCH`. It is not a PHY, propagation, whitening, access-address, advertising-filter, or connection-channel-map model; those semantics remain unmodelled.
 
 FRC exposes dynamic-frame-length configuration at `DFLCTRL +0x00C`, `MAXLENGTH +0x010`, frame/length/address word-count comparators at `+0x020..+0x028`, whitening control/polynomial/init at `+0x030/+0x034/+0x038`, RX control at `RXCTRL +0x04C`, and four frame configuration descriptors `FCD0..3` later in the block. `MAXLENGTH` is specifically a 12-bit `MAXLENGTH` field in bits 0..11 plus a four-bit `INILENGTH` field in bits 12..15 (`FRC_S_register.py:118-133`, `FRC_S_field.py:277-294`); the BLE tables' `0x4101` is therefore not a one-field byte maximum. The public model also gives eight-bit `DATABUFFER +0x018` and four-bit `BUFFERMODE +0x078` (`FRC_NS_register.py:161-170,779-793`, `FRC_NS_field.py:340-344,1820-1844`), plus `PKTBUFCTRL` at `+0x0CC` (mask `0x0103FFFF`) and read-only `PKTBUFSTATUS` at `+0x0D0` (six-bit count). The current public xG22 rev-B1 model identifies `SNIFFCTRL +0x084` as a read/write register with mask `0x0003FFFF` (`host_py_rm_studio_internal/full/efr32xg22/revB1/FRC_S_register.py:798-804`); stock writes it through the standard CLR then SET windows at `flash-stock.bin` offsets `0x2a6cc` and `0x2a6d0`, so QEMU preserves that exact masked latch without assigning sniff behavior. The same model identifies `RAWCTRL +0x08C` with mask `0x000021BF` (`FRC_S_register.py:848-867`); the historical stock trace writes this register at `radio-trace.log:91`, so QEMU likewise constrains the latch but does not infer raw-data behavior. `RXCTRL` has mask `0x000007FF`; it names RX packet/error-policy fields but does not itself establish packet-buffer behavior. The same public `FRC_NS_register.py:610-699,998-1087` defines `IF/IEN` at `+0x068/+0x06C` and `SEQIF/SEQIEN` at `+0x0B4/+0x0B8`, each with writable mask `0x7F7FFFFF`; QEMU retains those latches and verifies the masks. The current public rev-B1 model additionally identifies historical configuration offsets `MODEM.IF/IEN +0x208/+0x20C` (mask `0x0007FFFF`) and `MODEM.IRCAL +0x228` (mask `0x0000FFBF`) (`MODEM_S_register.py:1641-1707,1841-1854`); QEMU constrains those latches, but does not synthesize modem IRQs or calibration. That preserves software-visible pending/enable bits without assigning completion or IRQ policy. The generated `FRC_S` and `FRC_NS` models give the same offsets/masks at secure `0xA8004000` and non-secure `0xB8004000`; Zephyr's xG22 devicetree exposes `radio@b0000000` (`efr32xg22.dtsi:11-24`), so the open HAL uses the latter. RFCRC similarly has secure/non-secure bases `0xA8010000`/`0xB8010000`.
+
+The same public SVD defines write-only `FRC.CMD +0x02C`; bit 0 is
+`RXABORT` and bit 9 is `CONVINIT`.  Static disassembly of the working stage-2
+ELF finds directly addressed command stores at `0xe294`, `0xef14`, and
+`0x10f7c`, all writing `0x201` (`RXABORT | CONVINIT`).  It finds no direct M33
+store to `FRC.DATABUFFER`.  The duplicated first two stores come from the same
+named RAIL helper in `generic_phy.c` and `generic_phy_shared.c`; the third is
+in a larger RAIL state-transition helper.  These sites establish that stock
+initializes the convolution path while aborting RX, but do not yet establish
+whether the command is sufficient to connect BUFC channel 0 to FRC for TX.
 
 The public xG22 BLE 1M base table records `DFLCTRL = 0x00018101`, `WCNTCMP0/1 = 0/1`, whitening control/poly/init all zero, `CONVRAMADDR = 0x4000`, and `FCD1/2/3 = 0x4CFF/0x4DFF/0x4DFF` ([F] source locator: `ble_efr32xg22_configurator_out.c:225-242`). Its per-PHY table adds `MAXLENGTH = 0x4101`, `FECCTRL = 0`, `CTRL = 0x407A0`, and `FCD0 = 0x4CFF` (`...:474-481`); it also writes `SEQ.PHYINFO`, whose effect is not inferred here. QEMU retains the public masks for the decoded `MAXLENGTH`, `CTRL`, and `FCD0..3` registers and the base-table `WCNTCMP`, RAM-address, FEC, trailing-data, convolution, puncture, clock-gate, and supplemental-length latches using the generated public masks (`FRC_S_register.py:190-229,332-401,474-577,966-979,1146-1229`). It assigns none of them packet-pipeline effects. The generated field definitions (`FRC_S_field.py:197-274`, `:3357-3434`) decode `DFLCTRL` as `DFLMODE=1`, `DFLOFFSET=1`, `DFLBITS=8`, `MINLENGTH=1` (the other named fields zero). They decode each `0x4CFF` descriptor as `WORDS=255`, `BUFFER=0`, `INCLUDECRC=1`, `CALCCRC=1`, `SKIPWHITE=1`, with the remaining named fields zero; `0x4DFF` differs only by `BUFFER=1`. This establishes public configuration values, not their packet-pipeline or buffer semantics.
 
@@ -611,7 +661,44 @@ The RAIL frame-type callback does not close that gap. `RAILCb_ConfigFrameTypeLen
 
 The xG22 RAIL archive gives a narrower, directly located length observation. `RAIL_SetFixedLength` is a four-byte wrapper in `rail_rf.o` around `sli_rail_308157e3c5d7e1d3aaf039be96b40226` in `rail_rf_hal.o`; the latter section begins at archive file offset `0x1123c` (member starts at `0x10dd4`, section-relative offset `0x468`). Its nonzero, non-`0xffff` path clamps the API argument at `0x1000`, then writes `argument - 1` to non-secure `FRC.WCNTCMP0` at `0xB8004020`; its zero and sentinel paths also update `FRC.DFLCTRL` at `0xB800400c`. The generated `FRC_NS` model identifies those offsets. This proves that RAIL's *fixed-length* API uses the non-secure FRC window and a word-count comparator, not that OpenISA's dynamic BLE `radio_pkt_configure(8, max_len, flags)` should use that policy.
 
+The private-core working image supplies the separate dynamic-mode bootstrap
+case. Its routine at `0x1632` writes a configuration-record capacity minus one
+to `FRC.WCNTCMP0`; the matched BLE launch has `WCNTCMP0=0xff`, equal to the
+public FCD0..3 `WORDS=255` sentinel. Leaving the public base-table value at
+zero exposed the zero comparator before the length byte could establish a
+boundary. `radio_pkt_configure()` now seeds a named
+`DYNAMIC_LENGTH_PENDING_WORD_COUNT=255`. After an attempted 11-byte hardware
+advertisement FRC had replaced it with 10, demonstrating header parsing and a
+total-frame-count-minus-one boundary. The same attempt still latched
+`SEQIF.TXABORTED` before IRQ8 and consumed only two bytes, so this initialization
+is retained as correct but does not claim to solve the separate abort cause.
+
+Working-image `0x2c1e..0x2c24` provides a similarly bounded reason for the
+pre-launch `FECCTRL` difference: under its frame-mode branch it writes `7` to
+the CLR alias and `1` to the SET alias. The public generated model identifies
+bits 0..2 as `FECCTRL.BLOCKWHITEMODE`, and the live working BLE capture reads
+mode 1. The open BLE path consequently selects named block-whitening mode 1
+while preserving all other FEC fields; this complements its cleared
+`FCD.SKIPWHITE` and channel whitening seed. A one-variable hardware test
+confirmed the field latched but left `SEQIF.TXABORTED` and BUFC read offset two
+unchanged. The vendor sets it because the active BLE frame uses block
+whitening; it is retained for that purpose, not because it fixes this abort.
+
 The vendor TX-FIFO setup provides separate BUFC evidence. `RAIL_SetTxFifo` reaches `sli_rail_86983bfebc3fcf81f3ab3444e4625a88` in `rfhal_bufc.o`, whose 60-byte section begins at archive file offset `0x33414` (member starts at `0x332f4`, section-relative offset `0x120`). Its caller validates a four-byte-aligned FIFO address, reduces the requested allocation to the largest supported power of two in the 64–4096-byte range, and limits the initial count to that result. The called BUFC routine first writes command `1` at `0xBA000034`, then writes the derived configuration, FIFO address, and initial count to `0xBA00000C`, `+0x004`, and `+0x008`; it follows with command `2` when the initial count is nonzero. The transform is directly recoverable from the caller: for a selected allocation `2^n`, the first word is `n - 6` (so 512 bytes encodes as `3`), not a raw byte capacity. QEMU retains these channel-0 setup latches and derives FIFO occupancy (including threshold status) from `WRITEOFFSET - READOFFSET`, so that initial byte count is visible before any port access. It applies the same 64–4096-byte encoded capacity to backing-RAM port accesses, wrapping them at the configured circular-buffer boundary; its regression writes across a 512-byte boundary. It also reads a configured BUFC data port from that guest-RAM backing address, matching RAIL's documented zero-copy `RAIL_SetTxFifo()` use (`rail.h:1425-1429`); its regression preloads RAM and verifies the port returns that byte. These exact writes establish a FIFO setup contract, but not whether FRC descriptors consume the configured buffer or how a RAC transition launches it.
+
+A live DWT watchpoint adds the separate per-packet producer contract that the
+SetTxFifo helper alone could not establish. Stock writes each packet octet as
+a 32-bit value to channel-0 `WRITEDATA` (`base + 0x018`); the observed loop at
+`0x11c60..0x11c76` performs four byte-valued stores per iteration. After the
+first store, both `WRITEOFFSET` and `READOFFSET` were one, showing FRC was
+already consuming concurrently. The open HAL now retains an owned PDU copy
+during preparation and publishes it through the data port at its
+scheduler-owned launch boundary. It no longer assigns WRITEOFFSET and issues
+PREFETCH as though SetTxFifo's initial-count path were RAIL_WriteTxFifo.
+QEMU's data-port regression covers byte insertion and pointer advancement;
+the controller smoke test exercises the resulting HAL path. Silicon still
+leaves the open path at write 11/read zero, so this corrects the producer
+contract without claiming the missing FRC consumer contract.
 
 `radio_pkt_tx_set` now applies exactly that limited contract. It copies the OpenISA PDU's two-byte header plus its length-byte-selected payload into an aligned 512-byte staging FIFO, then writes `CMD=1`, configuration `3`, its address, the copied byte count, and `CMD=2` in the vendor order. QEMU's deliberately synthetic TXEN snapshot now reads that configured circular guest-RAM range (`ADDR`, `READOFFSET`, `WRITEOFFSET`) when present, while retaining the direct data-port staging path for register-level tests; its focused regression uses the same clear/configure/address/count/prefetch shape as the HAL. This makes the simulator observe the HAL's real staging representation, not an otherwise-empty internal port-write buffer. It remains a simulator snapshot boundary only: neither this change nor the QEMU latch model claims that FRC consumes channel 0, that RAC starts a packet, or that any bytes reach the air.
 

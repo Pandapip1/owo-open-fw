@@ -1,5 +1,6 @@
 # Out-of-tree lower link layer ("vendor") for Zephyr's split BLE controller on the EFR32BG22.
-# UNVALIDATED ON HARDWARE; the radio hooks are stubs (docs/radio-tables.md).
+# Hardware bring-up is in progress; TX reaches the radio state machine but the
+# stage-3 advertisement is not yet on air (docs/hardware-bringup.md).
 # SPDX-License-Identifier: Apache-2.0
 #
 # Zephyr only knows the Nordic and OpenISA lower link layers (subsys/bluetooth/controller/
@@ -10,6 +11,54 @@
 if(CONFIG_BT_LLL_VENDOR_EFR32)
   set(OI ${ZEPHYR_BASE}/subsys/bluetooth/controller/ll_sw/openisa)
   set(GEN ${CMAKE_CURRENT_BINARY_DIR}/derived)
+
+  set(EFR32_RADIO_PROPRIETARY_SEQ_IMAGE "" CACHE FILEPATH
+      "Diagnostic-only stage-2.5 radio-coprocessor image; never use for stage 3")
+
+  # Build the private radio Cortex-M0+ firmware from reviewed source and embed
+  # that exact binary in the M33 application.  SEQRAM is retention RAM, so a
+  # separately flashed or previously booted image is never a valid dependency.
+  set(SEQ_SRC ${CMAKE_CURRENT_LIST_DIR}/sequencer/radio_seq.S)
+  set(SEQ_LD ${CMAKE_CURRENT_LIST_DIR}/sequencer/link.ld)
+  set(SEQ_ELF ${GEN}/sequencer/radio-sequencer.elf)
+  set(SEQ_BIN ${GEN}/sequencer/radio-sequencer.bin)
+  set(SEQ_C ${GEN}/sequencer/radio-sequencer-image.c)
+  if(EFR32_RADIO_PROPRIETARY_SEQ_IMAGE)
+    if(NOT IS_ABSOLUTE "${EFR32_RADIO_PROPRIETARY_SEQ_IMAGE}" OR
+       NOT EXISTS "${EFR32_RADIO_PROPRIETARY_SEQ_IMAGE}")
+      message(FATAL_ERROR
+        "EFR32_RADIO_PROPRIETARY_SEQ_IMAGE must name an existing absolute path")
+    endif()
+    message(WARNING
+      "Stage 2.5 diagnostic build: embedding proprietary radio-coprocessor image")
+    add_custom_command(
+      OUTPUT ${SEQ_C}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}/sequencer
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
+              ${EFR32_RADIO_PROPRIETARY_SEQ_IMAGE} ${SEQ_C} proprietary
+      DEPENDS ${EFR32_RADIO_PROPRIETARY_SEQ_IMAGE}
+              ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
+      VERBATIM
+      COMMENT "Embedding diagnostic proprietary EFR32 radio-coprocessor image"
+    )
+  else()
+    add_custom_command(
+      OUTPUT ${SEQ_C}
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}/sequencer
+      COMMAND ${CMAKE_C_COMPILER} -mcpu=cortex-m0plus -mthumb -nostdlib
+              -Wl,--build-id=none -Wl,-T,${SEQ_LD}
+              ${SEQ_SRC} -o ${SEQ_ELF}
+      COMMAND ${CMAKE_OBJCOPY} -O binary ${SEQ_ELF} ${SEQ_BIN}
+      COMMAND ${PYTHON_EXECUTABLE}
+              ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
+              ${SEQ_BIN} ${SEQ_C} open
+      DEPENDS ${SEQ_SRC} ${SEQ_LD}
+              ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
+      VERBATIM
+      COMMENT "Building and embedding open EFR32 radio-sequencer firmware"
+    )
+  endif()
 
   function(efr32_radio_derive src dst)
     file(READ ${src} _c)
@@ -111,6 +160,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   zephyr_library_sources_ifdef(CONFIG_BT_CTLR_DTM ${GEN}/lll/lll_test.c)
 
   zephyr_library_sources(
+    ${SEQ_C}
     hal/ll_threads.c
     ${GEN}/hal/efr32/ticker.c
     hal/cntr.c

@@ -66,6 +66,19 @@
 			      "radio register map unknown"); \
 	} while (0)
 
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+#define EFR32_RADIO_TRACE_ONCE(format, ...) \
+	do { \
+		static bool efr32_trace_once_; \
+		if (!efr32_trace_once_) { \
+			efr32_trace_once_ = true; \
+			printk("efr32-radio trace: " format "\n", ##__VA_ARGS__); \
+		} \
+	} while (0)
+#else
+#define EFR32_RADIO_TRACE_ONCE(...) do { } while (0)
+#endif
+
 /*
  * OpenISA's abort paths install a cleanup callback and then call
  * radio_disable().  The RV32M1 HAL completes that sequence with a timer IRQ;
@@ -524,7 +537,20 @@ static void efr32_packet_stage_reset(void)
 
 #define EFR32_SYNTH_BASE 0xB8018000UL
 #define EFR32_SYNTH_CHCTRL_OFFSET 0x040U
-#define EFR32_SYNTH_CHCTRL_CHNO_MASK 0x3FU
+#define EFR32_SYNTH_CHSP_OFFSET 0x044U
+#define EFR32_SYNTH_CHSP_CHSP_MASK 0x3FU
+#define EFR32_SYNTH_FREQ_OFFSET 0x034U
+
+/*
+ * Hardware-watchpoint captures at the working stage-2 channel-preparation
+ * boundary.  Keep these named by their Bluetooth physical use instead of
+ * scattering captured words through the launch path.  The general xG22
+ * frequency-word encoding still needs a source-backed derivation before data
+ * channels are enabled by this open port.
+ */
+#define EFR32_SYNTH_BLE_ADV37_FREQ 0x01F46AABU /* 2402 MHz */
+#define EFR32_SYNTH_BLE_ADV38_FREQ 0x01F96AABU /* 2426 MHz */
+#define EFR32_SYNTH_BLE_ADV39_FREQ 0x0204AAABU /* 2480 MHz */
 
 #define EFR32_RFCRC_BASE 0xB8010000UL
 #define EFR32_RFCRC_EN_OFFSET 0x004U
@@ -538,9 +564,22 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_FRC_WHITEPOLY_OFFSET 0x034U
 #define EFR32_FRC_WHITEINIT_OFFSET 0x038U
 #define EFR32_FRC_RXCTRL_OFFSET 0x04CU
+#define EFR32_FRC_CMD_OFFSET 0x02CU
+#define EFR32_FRC_CMD_RXABORT BIT(0)
+#define EFR32_FRC_CMD_CONVINIT BIT(9)
+#define EFR32_FRC_FECCTRL_OFFSET 0x03CU
+#define EFR32_FRC_FECCTRL_BLOCKWHITEMODE_MASK 0x7U
+#define EFR32_FRC_BLE_BLOCKWHITEMODE 0x1U
 #define EFR32_FRC_TRAILRXDATA_OFFSET 0x054U
+#define EFR32_FRC_WCNTCMP0_OFFSET 0x020U
+#define EFR32_FRC_WCNTCMP2_OFFSET 0x028U
 #define EFR32_FRC_IF_OFFSET 0x068U
 #define EFR32_FRC_IEN_OFFSET 0x06CU
+#define EFR32_FRC_FCD0_OFFSET 0x104U
+#define EFR32_FRC_FCD_STRIDE 0x004U
+#define EFR32_FRC_FCD_COUNT 4U
+#define EFR32_FRC_FCD_SKIPWHITE BIT(14)
+#define EFR32_FRC_DYNAMIC_LENGTH_PENDING_WORD_COUNT 0x00FFU
 #define EFR32_FRC_BLE_WHITEPOLY 0x0044U
 #define EFR32_FRC_BLE_WHITEINIT_MSB 0x0040U
 #define EFR32_FRC_IF_TXDONE (1U << 0)
@@ -568,20 +607,68 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_RAC_SR1_OFFSET 0x044U
 #define EFR32_RAC_SR2_OFFSET 0x048U
 #define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
+#define EFR32_RAC_SR0_TX_PREPARE_SET BIT(7)
+#define EFR32_RAC_SR0_TX_PREPARE_CLEAR BIT(3)
 #define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U
 #define EFR32_RAC_CTRL_OFFSET 0x014U
+#define EFR32_RAC_SEQIF_OFFSET 0x028U
+#define EFR32_RAC_SEQCTRL_OFFSET 0x038U
+#define EFR32_RAC_PAENCTRL_OFFSET 0x0B4U
+#define EFR32_RAC_PATRIM1_OFFSET 0x114U
+#define EFR32_RAC_PATRIM3_OFFSET 0x11CU
+#define EFR32_RAC_PACTRL_OFFSET 0x120U
 #define EFR32_REGISTER_SET_OFFSET 0x1000U
 #define EFR32_REGISTER_CLEAR_OFFSET 0x2000U
 #define EFR32_RAC_STATUS_STATE_SHIFT 24U
 #define EFR32_RAC_STATUS_STATE_MASK 0xFU
 #define EFR32_RAC_STATE_OFF 0U
+#define EFR32_RAC_STATE_SHUTDOWN 13U
 #define EFR32_RAC_CMD_TXEN (1U << 0)
 #define EFR32_RAC_CMD_TXDIS (1U << 5)
 #define EFR32_RAC_CMD_RXDIS (1U << 8)
 #define EFR32_RAC_RXENSRCEN_SWRXEN (1U << 1)
 #define EFR32_RAC_CTRL_FORCEDISABLE (1U << 0)
+#define EFR32_RAC_CTRL_SEQRESET BIT(24)
+#define EFR32_RAC_CTRL_ACTIVE_HIGH BIT(7)
+#define EFR32_RAC_CTRL_PA_ENABLE_HIGH BIT(8)
+#define EFR32_RAC_CTRL_LNA_ENABLE_HIGH BIT(9)
+#define EFR32_RAC_CTRL_CPUWAITDIS BIT(26)
+#define EFR32_RAC_SEQIF_STIMCMPEVSEQ BIT(1)
+/* Observed initial sequencer-control mode; its two set fields remain RE debt. */
+#define EFR32_RAC_SEQCTRL_STAGE2_STARTUP 0x00000011U
+
+#define EFR32_SEQ_RAM_BASE 0xB0000000UL
+#define EFR32_SEQ_RAM_SIZE 0x00008000U
+#define EFR32_SEQ_STACK_TOP 0x00003E00U
+#define EFR32_SEQ_IDENTITY_ADDRESS 0xB0004FE0UL
+#define EFR32_SEQ_IDENTITY_OPEN_V1 0x4F535131U
+
+extern const uint8_t efr32_radio_seq_image[];
+extern const size_t efr32_radio_seq_image_size;
+extern const bool efr32_radio_seq_image_is_open;
+
+/*
+ * The final proprietary TX primitive clears this sequencer flag immediately
+ * before RAC.CMD.TXEN.  The public register model does not name the shared-RAM
+ * word, so keep the address and bit isolated behind a provenance-based name
+ * until the open sequencer ABI gives it a semantic field name.
+ */
+#define EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS 0xB0003EC4UL
+#define EFR32_SEQ_RX_AFTER_TX_INHIBIT BIT(5)
+
+/*
+ * Temporary board-specific PA characterization from the working stage-2
+ * controller at the IRQ8/TX preparation boundary.  These names deliberately
+ * describe provenance, not a guessed dBm mapping.  Replace this fixed preset
+ * with DEVINFO/board calibration and public PA field definitions before the
+ * driver supports selectable transmit power.
+ */
+#define EFR32_RAC_STAGE2_PAENCTRL 0x10000000U
+#define EFR32_RAC_STAGE2_PATRIM1 0x00038997U
+#define EFR32_RAC_STAGE2_PATRIM3 0x00322D2AU
+#define EFR32_RAC_STAGE2_PACTRL 0x00000010U
 
 #define EFR32_BUFC_BASE 0xBA000000UL
 #define EFR32_BUFC_TX_BASE_OFFSET 0x00CU
@@ -608,6 +695,73 @@ static void efr32_packet_stage_reset(void)
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
 	return (volatile uint32_t *)address;
+}
+
+static void efr32_radio_sequencer_install(void)
+{
+	volatile uint8_t *destination = (volatile uint8_t *)EFR32_SEQ_RAM_BASE;
+	uint32_t initial_sp;
+	uint32_t reset_vector;
+
+	LL_ASSERT(efr32_radio_seq_image_size >= (2U * sizeof(uint32_t)));
+	LL_ASSERT(efr32_radio_seq_image_size <= EFR32_SEQ_RAM_SIZE);
+	memcpy(&initial_sp, &efr32_radio_seq_image[0], sizeof(initial_sp));
+	memcpy(&reset_vector, &efr32_radio_seq_image[4], sizeof(reset_vector));
+	if (efr32_radio_seq_image_is_open) {
+		LL_ASSERT(initial_sp == EFR32_SEQ_STACK_TOP);
+	} else {
+		/* Stage 2.5 accepts the captured vendor image's own aligned stack
+		 * placement, but still rejects a malformed vector table. */
+		LL_ASSERT(initial_sp != 0U && initial_sp <= 0x4000U &&
+			  (initial_sp & 3U) == 0U);
+	}
+	LL_ASSERT((reset_vector & 1U) != 0U);
+	LL_ASSERT((reset_vector & ~1U) < efr32_radio_seq_image_size);
+
+	/* SEQRAM retains across an M33 reset.  Hold the private core in reset for
+	 * the entire copy so an old image can never execute concurrently.  The
+	 * base-register SEQRESET strobe is the sequence proven by the standalone
+	 * silicon launcher; unlike ordinary CTRL fields, aliasing this strobe has
+	 * not been established on hardware. */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH | EFR32_RAC_CTRL_SEQRESET;
+	__DSB();
+	for (size_t index = 0U; index < efr32_radio_seq_image_size; index++) {
+		destination[index] = efr32_radio_seq_image[index];
+	}
+	__DSB();
+	for (size_t index = 0U; index < efr32_radio_seq_image_size; index++) {
+		LL_ASSERT(destination[index] == efr32_radio_seq_image[index]);
+	}
+	/* A retained marker cannot satisfy the open image's post-release startup
+	 * handshake. The diagnostic vendor image owns this shared word and does
+	 * not implement our OSQ1 ABI. */
+	if (efr32_radio_seq_image_is_open) {
+		*radio_reg32(EFR32_SEQ_IDENTITY_ADDRESS) = 0U;
+	}
+	__DSB();
+}
+
+static void efr32_radio_sequencer_wait_ready(void)
+{
+	if (!efr32_radio_seq_image_is_open) {
+		/* Stage 2.5 observes the vendor image through the normal radio state
+		 * boundaries; it cannot claim the open firmware's private ABI. */
+		return;
+	}
+
+	/* The open reset handler publishes identity before enabling interrupts.
+	 * This is a bounded core-start handshake, not radio-job scheduling. */
+	for (uint32_t elapsed_us = 0U; elapsed_us < 10000U; elapsed_us++) {
+		if (*radio_reg32(EFR32_SEQ_IDENTITY_ADDRESS) ==
+		    EFR32_SEQ_IDENTITY_OPEN_V1) {
+			return;
+		}
+		k_busy_wait(1U);
+	}
+
+	LL_ASSERT_MSG(false, "open radio sequencer did not publish identity");
 }
 
 /*
@@ -646,6 +800,20 @@ static void efr32_packet_stage_arm(enum efr32_radio_packet_direction direction)
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	efr32_rx_delivery_invalid = false;
 	efr32_packet_lifecycle_arm(&efr32_packet_stage.lifecycle, direction);
+}
+
+static void efr32_tx_fifo_publish(void)
+{
+	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
+
+	LL_ASSERT(efr32_packet_stage.tx_fifo_configured);
+	LL_ASSERT(efr32_packet_stage.tx_bytes <= sizeof(efr32_tx_fifo));
+	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_tx_fifo;
+	for (uint32_t index = 0U; index < efr32_packet_stage.tx_bytes; index++) {
+		*radio_reg32(base + EFR32_BUFC_WRITEDATA_OFFSET) = efr32_tx_fifo[index];
+	}
 }
 
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
@@ -692,6 +860,7 @@ static bool efr32_qemu_tifs_tx_staged(void)
 
 static void efr32_qemu_tifs_start_staged_tx(void)
 {
+	efr32_tx_fifo_publish();
 	efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
@@ -758,6 +927,67 @@ static void efr32_qemu_tifs_arm_staged_rx_to_tx(void)
 #define EFR32_RADIO_TABLE_OP_WRITE 0U
 #define EFR32_RADIO_TABLE_OP_AND 1U
 #define EFR32_RADIO_TABLE_OP_OR 3U
+
+#define EFR32_SEQ_PHYINFO_ADDRESS 0xB0004FFCUL
+
+/*
+ * The generated xG22 BLE configuration does not merely write MODEM/FRC
+ * registers: it publishes this relocatable PHY description to the radio
+ * sequencer.  The old importer dropped the record because the generated
+ * pointer belonged to a different ELF.  Keep the pointed-to objects in this
+ * image and relocate their pointers normally instead.
+ *
+ * The member meanings beyond the three named configuration pointers are not
+ * public, so retain the generator's word-oriented representation and names
+ * instead of inventing field semantics.  This is the exact Zlib-licensed
+ * `phyInfo_0` data for xG22 BLE 1M; a live stage-2 capture at TXEN matched all
+ * non-pointer words and its three pointed-to objects.
+ */
+static const uint8_t MALIGN(4) efr32_ble_ir_cal_config[] = {
+	25, 63, 1, 6, 4, 16, 1, 0, 0, 1, 1, 6, 0, 16, 39, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+static const int32_t efr32_ble_1m_timing_config[] = {
+	50000, 8700, 435, 435,
+};
+
+static const uint8_t MALIGN(4) efr32_ble_hfxo_retiming_config[] = {
+	2, 0, 0, 0, 0x00, 0xf0, 0x49, 0x02, 6, 20, 0, 0,
+	0x00, 0xe0, 0x93, 0x04, 5, 56, 0, 0, 0xa0, 0x08, 0, 0,
+	0, 0, 0x58, 0x09, 1, 4, 7, 6, 0x10, 0x0a, 1, 4,
+	7, 7, 0xc8, 0x0a, 0, 4, 8, 7, 0x80, 0x0b, 0, 4,
+	8, 8, 0x38, 0x0c, 0, 4, 9, 8, 0x61, 0x08, 0, 0,
+	0, 0, 0x68, 0x08, 0, 0, 0, 0, 0, 0xc7, 0x09, 1, 4,
+	4, 3, 0x2c, 0x0b, 1, 4, 4, 4, 0x92, 0x0c, 1, 4,
+	5, 4,
+};
+
+static const uintptr_t efr32_ble_1m_phy_info[] = {
+	20U,
+	0x00800000U,
+	0U,
+	(uintptr_t)efr32_ble_ir_cal_config,
+	(uintptr_t)efr32_ble_1m_timing_config,
+	0x00000000U,
+	4396932U,
+	16000000U,
+	1000000U,
+	0x00F50101U,
+	0x03502555U,
+	0U,
+	(uintptr_t)efr32_ble_hfxo_retiming_config,
+	0U, 0U, 0U,
+	999992U,
+	0U, 0U, 0U, 0U,
+};
+
+BUILD_ASSERT(sizeof(uintptr_t) == sizeof(uint32_t));
+BUILD_ASSERT(ARRAY_SIZE(efr32_ble_1m_phy_info) == 21U);
+
+static void efr32_ble_phy_info_publish(const uintptr_t *phy_info)
+{
+	*radio_reg32(EFR32_SEQ_PHYINFO_ADDRESS) = (uint32_t)(uintptr_t)phy_info;
+}
 
 /*
  * Public xG22 BLE viterbi 1M configuration, copied as table operations rather
@@ -1248,9 +1478,14 @@ static void efr32_radio_completion_quiesce(void)
 	irq_unlock(key);
 }
 
-/* [regs-public] Enable the six blocks whose public xG22 models expose EN.EN. */
+/* [regs-public] Enable the eight radio blocks in the observed stock order. */
 void radio_setup(void)
 {
+	const uint32_t radio_bus_clocks =
+		CMU_CLKEN1_AGC | CMU_CLKEN1_MODEM | CMU_CLKEN1_RFCRC |
+		CMU_CLKEN1_FRC | CMU_CLKEN1_PROTIMER | CMU_CLKEN1_RAC |
+		CMU_CLKEN1_SYNTH | CMU_CLKEN1_BUFC;
+
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
@@ -1259,28 +1494,44 @@ void radio_setup(void)
 	efr32_qemu_tifs_transition_requested = false;
 	efr32_qemu_tifs_rx_to_tx_staging = false;
 #endif
-	efr32_radio_completion_quiesce();
+	/*
+	 * The vendor RAIL path enables both the HCLKRADIO branch and each radio
+	 * block's bus clock before accessing the block.  The custom LLL bypasses
+	 * RAIL, so it owns that prerequisite.  QEMU used to expose every register
+	 * even with these reset-disabled, masking the omission on real silicon.
+	 */
+	CMU->RADIOCLKCTRL_SET = CMU_RADIOCLKCTRL_EN;
+	CMU->CLKEN1_SET = radio_bus_clocks;
+	__DSB();
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
-	 * the sole writable field EN.EN at bit zero. This deliberately does not
-	 * claim an ordering, reset protocol, BUFC enable, or IRQ event policy.
+	 * the sole writable field EN.EN at bit zero.  Preserve the order captured
+	 * from working stage-2 hardware: in particular, BUFC and PROTIMER are live
+	 * before RAC is enabled.  The old RAC-before-dependencies order was
+	 * accepted by QEMU but left silicon in SHUTDOWN.
 	 */
-	*radio_reg32(EFR32_FRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_AGC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
-	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
-	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_PROTIMER_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
 
 	/*
-	 * The stock setup helper also writes one at +0x004 in the BUFC and
-	 * PROTIMER windows (flash-stock.bin offsets 0x26de4 and 0x26dfc).
-	 * Mirror those exact non-secure-alias writes because this HAL uses both
-	 * blocks below. Their field semantics and ordering remain uncharacterized.
+	 * RAIL selects active-high polarity for the RAC activity indication and
+	 * the external PA/LNA enables.  These are electrical-interface choices,
+	 * not an unexplained sequencer preset. radio_reset() performs the ordered
+	 * private-M0+ handoff after installing the source-built image.
 	 */
-	*radio_reg32(EFR32_BUFC_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
-	*radio_reg32(EFR32_PROTIMER_BASE + EFR32_RADIO_EN_OFFSET) = 1U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH;
+
+	/* The completion registers are accessible only after FRC.EN takes effect. */
+	efr32_radio_completion_quiesce();
 
 	/*
 	 * [RAIL init] The xG22 RF initializer writes RXCTRL=0x60, then clears
@@ -1288,6 +1539,8 @@ void radio_setup(void)
 	 * are exact initialization writes; they do not assert a packet policy.
 	 */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_RXCTRL_OFFSET) = 0x60U;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_CMD_OFFSET) =
+		EFR32_FRC_CMD_RXABORT | EFR32_FRC_CMD_CONVINIT;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_RAC_SR0_OFFSET) = EFR32_RAC_SR0_INIT_CLEAR;
 
@@ -1317,6 +1570,9 @@ void radio_setup(void)
 /* [regs-vendor] Retain the source-backed reset prefix; see radio-tables.md §4.1. */
 void radio_reset(void)
 {
+	uint32_t status;
+
+	EFR32_RADIO_TRACE_ONCE("radio-reset");
 	efr32_radio_launch_disarm();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
@@ -1334,25 +1590,56 @@ void radio_reset(void)
 	efr32_radio_completion_quiesce();
 
 	/*
-	 * Stock RAIL clears the three RAC scratch registers and asserts
-	 * CTRL.FORCEDISABLE before it observes STATUS.  Its following sequencer
-	 * hand-off is still unknown, so preserve only this independently useful
-	 * prefix and release the force-disable latch once RAC reports OFF.
+	 * Stock RAIL clears the three RAC scratch registers, forces the radio
+	 * quiescent, seeds the sequencer-timer-compare event and installs its
+	 * initial sequencer-control mode, then releases CPU wait before removing
+	 * force-disable.  The open M0+ image is copied and verified below; retained
+	 * SEQRAM is explicitly never trusted.
+	 * This is the exact 0x12d58 initializer order, not a snapshot transplant.
 	 */
+	efr32_radio_sequencer_install();
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR0_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR1_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR2_OFFSET) = 0U;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_SEQIF_OFFSET) = EFR32_RAC_SEQIF_STIMCMPEVSEQ;
+	do {
+		status = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET);
+		uint32_t state = (status >> EFR32_RAC_STATUS_STATE_SHIFT) &
+				 EFR32_RAC_STATUS_STATE_MASK;
+
+		if (state == EFR32_RAC_STATE_OFF ||
+		    state == EFR32_RAC_STATE_SHUTDOWN) {
+			break;
+		}
+	} while (true);
+	EFR32_RADIO_TRACE_ONCE("radio-reset quiescent-status=0x%08x", status);
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SEQCTRL_OFFSET) =
+		EFR32_RAC_SEQCTRL_STAGE2_STARTUP;
+	/* We explicitly asserted SEQRESET before copying, unlike RAIL's warm
+	 * helper.  Release with a base-register replacement, as the successful
+	 * silicon launcher does, so the reset request cannot remain selected while
+	 * CPUWAITDIS is added through an alias. */
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
-		EFR32_RAC_CTRL_FORCEDISABLE;
-	while (!radio_is_idle()) {
-	}
-	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) = 0U;
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH | EFR32_RAC_CTRL_FORCEDISABLE |
+		EFR32_RAC_CTRL_CPUWAITDIS;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+	__DSB();
+	efr32_radio_sequencer_wait_ready();
+	EFR32_RADIO_TRACE_ONCE("sequencer identity=0x%08x",
+			       *radio_reg32(EFR32_SEQ_IDENTITY_ADDRESS));
+	EFR32_RADIO_TRACE_ONCE("radio-reset idle");
 
 }
 
-/* [regs-public] Address-independent BLE 1M table; PHYINFO remains intentionally excluded (T3). */
+/* [regs-public] Public BLE tables plus a relocated, image-local PHYINFO object. */
 void radio_phy_set(uint8_t phy, uint8_t flags)
 {
+	EFR32_RADIO_TRACE_ONCE("phy phy=%u flags=%u", phy, flags);
 	ARG_UNUSED(flags);
 
 	switch (phy) {
@@ -1360,6 +1647,7 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 	case PHY_1M:
 		efr32_radio_table_apply(efr32_ble_1m_base_table);
 		efr32_radio_table_apply(efr32_ble_1m_delta_table);
+		efr32_ble_phy_info_publish(efr32_ble_1m_phy_info);
 		break;
 	case PHY_2M:
 		efr32_radio_table_apply(efr32_ble_1m_base_table);
@@ -1380,29 +1668,61 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 	}
 }
 
-/* [regs] PA registers (rfhal_pa): unknown (T7) */
+/* [hardware] Fixed working-board PA characterization; dBm mapping remains T7. */
 void radio_tx_power_set(uint32_t power)
 {
 	ARG_UNUSED(power);
-	EFR32_RADIO_TODO("PA registers (rfhal_pa)");
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PAENCTRL_OFFSET) =
+		EFR32_RAC_STAGE2_PAENCTRL;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PATRIM1_OFFSET) =
+		EFR32_RAC_STAGE2_PATRIM1;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PATRIM3_OFFSET) =
+		EFR32_RAC_STAGE2_PATRIM3;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PACTRL_OFFSET) =
+		EFR32_RAC_STAGE2_PACTRL;
 }
 
-/* [regs] PA registers (rfhal_pa): unknown (T7) */
+/* [hardware] The only characterized preset is also the temporary maximum. */
 void radio_tx_power_max_set(void)
 {
-	EFR32_RADIO_TODO("PA registers (rfhal_pa)");
+	radio_tx_power_set(0U);
 }
 
-/* [regs-public] BLE base=2402 MHz, spacing=2 MHz; CHCTRL.CHNO is bits 0..5 (T4). */
+/* [hardware] Tune the three evidenced BLE advertising frequencies (T4). */
 void radio_freq_chan_set(uint32_t chan)
 {
 	uint32_t channel_number;
+	uint32_t frequency_word;
 
 	/* Zephyr passes MHz relative to 2400: 2..80, always even. */
 	LL_ASSERT((chan >= 2U) && (chan <= 80U) && ((chan & 1U) == 0U));
 	channel_number = (chan - 2U) / 2U;
-	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHCTRL_OFFSET) =
-		channel_number & EFR32_SYNTH_CHCTRL_CHNO_MASK;
+	switch (chan) {
+	case 2U:
+		frequency_word = EFR32_SYNTH_BLE_ADV37_FREQ;
+		break;
+	case 26U:
+		frequency_word = EFR32_SYNTH_BLE_ADV38_FREQ;
+		break;
+	case 80U:
+		frequency_word = EFR32_SYNTH_BLE_ADV39_FREQ;
+		break;
+	default:
+		EFR32_RADIO_AIR_TODO("source-backed SYNTH frequency encoding for data channels");
+		return;
+	}
+	/*
+	 * A hardware trace of the working RAIL_StartTx path establishes the
+	 * complete channel handoff: WCNTCMP2 and CHSP carry the zero-based 2 MHz
+	 * physical-channel index while CHCTRL remains zero.  The former open HAL
+	 * put the index in CHCTRL instead; QEMU accepted that invented contract and
+	 * therefore hid the silicon divergence for every channel except index 0.
+	 */
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_FREQ_OFFSET) = frequency_word;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WCNTCMP2_OFFSET) = channel_number;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHCTRL_OFFSET) = 0U;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHSP_OFFSET) =
+		channel_number & EFR32_SYNTH_CHSP_CHSP_MASK;
 }
 
 /* [regs-public] RAIL's BLE helper writes FRC.WHITEPOLY=0x44 and WHITEINIT=iv|0x40 (T5). */
@@ -1438,6 +1758,10 @@ void radio_aa_set(const uint8_t *aa)
  */
 void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 {
+	uint32_t descriptor;
+
+	EFR32_RADIO_TRACE_ONCE("packet bits=%u max=%u flags=%u",
+			       bits_len, max_len, flags);
 	/*
 	 * A new framing contract invalidates both direction-specific FIFO setups.
 	 * In particular, do not let a later TXEN reuse bytes staged for an older
@@ -1455,7 +1779,52 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 	efr32_packet_stage.max_len = max_len;
 	efr32_packet_stage.flags = flags;
 	efr32_packet_stage.packet_configured = true;
-	EFR32_RADIO_TODO("FRC/CRC/whitening/sync-word registers");
+
+	/*
+	 * DFLCTRL reads the eight-bit BLE payload length from header byte one.
+	 * Before that byte has been consumed, WCNTCMP0 must not terminate the
+	 * frame at its public-table reset value of zero.  Static analysis of the
+	 * working coprocessor shows that it writes configured frame capacity minus
+	 * one here; the working BLE capture and FCD0..3.WORDS both use the 255-word
+	 * sentinel.  The dynamic-length engine subsequently replaces the effective
+	 * packet boundary from the header.  This is framing bootstrap state, not an
+	 * invented maximum payload and not a scheduler decision.
+	 */
+	LL_ASSERT(bits_len == 8U);
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WCNTCMP0_OFFSET) =
+		EFR32_FRC_DYNAMIC_LENGTH_PENDING_WORD_COUNT;
+
+	/*
+	 * The working coprocessor clears the public three-bit
+	 * FECCTRL.BLOCKWHITEMODE field and selects mode 1 for this BLE framing
+	 * path.  That is the active-frame complement to FCD.SKIPWHITE=0 and the
+	 * per-channel BLE whitening seed; retain unrelated FEC fields through the
+	 * standard CLR/SET aliases.
+	 */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_FRC_FECCTRL_OFFSET) =
+		EFR32_FRC_FECCTRL_BLOCKWHITEMODE_MASK;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_FRC_FECCTRL_OFFSET) =
+		EFR32_FRC_BLE_BLOCKWHITEMODE;
+
+	/*
+	 * The public BLE PHY table is deliberately protocol-neutral at this
+	 * boundary and leaves FCD0..3.SKIPWHITE asserted.  Bluetooth LLL callers
+	 * subsequently provide the physical-channel whitening seed through
+	 * radio_whiten_iv_set(), so each frame descriptor must feed bytes through
+	 * the whitener.  A breakpoint-aligned stock BLE capture confirms all four
+	 * descriptors with SKIPWHITE clear (0x0cff/0x0dff rather than the public
+	 * baseline's 0x4cff/0x4dff).  Use the generated register-model field name
+	 * here instead of importing those complete captured descriptor values.
+	 */
+	for (descriptor = 0U; descriptor < EFR32_FRC_FCD_COUNT; descriptor++) {
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_FRC_FCD0_OFFSET +
+			     descriptor * EFR32_FRC_FCD_STRIDE) =
+			EFR32_FRC_FCD_SKIPWHITE;
+	}
+	EFR32_RADIO_TODO("remaining FRC length/header fields");
 }
 
 /*
@@ -1763,7 +2132,6 @@ void radio_pkt_tx_set(void *tx_packet)
 {
 	const uint8_t *pdu = tx_packet;
 	uint32_t bytes;
-	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
 
 	LL_ASSERT(efr32_packet_stage.packet_configured);
 	/* All current OpenISA TX callers use the octet-sized LL length field. */
@@ -1776,21 +2144,14 @@ void radio_pkt_tx_set(void *tx_packet)
 	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(pdu != NULL);
 	bytes = (uint32_t)pdu[1] + 2U;
+	EFR32_RADIO_TRACE_ONCE("tx-fifo bytes=%u pdu0=0x%02x len=%u",
+			       bytes, pdu[0], pdu[1]);
 	/* OpenISA PDUs are header byte, payload-length byte, then payload. */
 	LL_ASSERT(pdu[1] <= efr32_packet_stage.max_len);
 	LL_ASSERT(bytes <= sizeof(efr32_tx_fifo));
 	LL_ASSERT(((uintptr_t)efr32_tx_fifo & 3U) == 0U);
+	/* Own the PDU until the scheduled TX job reaches the hardware boundary. */
 	memcpy(efr32_tx_fifo, pdu, bytes);
-
-	/*
-	 * Exact RAIL SetTxFifo order for a 512-byte FIFO: CLEAR, configuration
-	 * value log2(512)-6, address, initial byte count, then PREFETCH.
-	 */
-	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
-	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
-	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_tx_fifo;
-	*radio_reg32(base + EFR32_BUFC_WRITEOFFSET) = bytes;
-	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_PREFETCH;
 
 	/* Keep source and length for a future FRC/BUFC completion diagnostic. */
 	efr32_packet_stage.tx_source = tx_packet;
@@ -1857,13 +2218,42 @@ void radio_rx_enable(void)
  */
 void radio_tx_enable(void)
 {
+	uint32_t status_before;
+	uint32_t sequencer_flags;
+
 	/* Match the OpenISA radio contract: do not start a new TX while active. */
 	while (!radio_is_idle()) {
 	}
+	status_before = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET);
 
+	/*
+	 * A watchpoint on the working controller shows per-packet WRITEDATA stores
+	 * at the scheduled launch boundary, immediately before TXEN.  Keep this in
+	 * the scheduler-owned job, not the timer ISR.
+	 */
+	efr32_tx_fifo_publish();
 	/* Validate and label a completion before arming the hardware source. */
 	efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
+	/*
+	 * Reproduce the complete immediate pre-TX handshake recovered from the
+	 * proprietary primitive at 0xe35c: set SR0 bit 7, clear SR0 bit 3, then
+	 * clear the sequencer's RX-after-TX inhibit before issuing TXEN.  The M0+
+	 * consumer at image offset 0x9c8 tests this bit and, when clear, writes
+	 * SWRXEN after its bounded SR0 gate pulse.  An isolated replay did not make
+	 * RF output observable, but that says only that this sequence is not
+	 * sufficient; static control flow proves it is part of every launch.
+	 */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_SR0_OFFSET) = EFR32_RAC_SR0_TX_PREPARE_SET;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_SR0_OFFSET) = EFR32_RAC_SR0_TX_PREPARE_CLEAR;
+	sequencer_flags = *radio_reg32(EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS);
+	sequencer_flags &= ~EFR32_SEQ_RX_AFTER_TX_INHIBIT;
+	*radio_reg32(EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS) = sequencer_flags;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
+	EFR32_RADIO_TRACE_ONCE("txen status-before=0x%08x status-after=0x%08x",
+			       status_before,
+			       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET));
 }
 
 /* [regs-public] RAC.CMD TXDIS/RXDIS are write-only command bits (T2). */
@@ -1961,12 +2351,13 @@ uint32_t radio_has_disabled(void)
 	return 0;
 }
 
-/* [regs-public] RAC.STATUS.STATE is read-only and OFF is state 0 (T2). */
+/* [hardware] OFF and retained SHUTDOWN are both quiescent launch states. */
 uint32_t radio_is_idle(void)
 {
-	return ((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
-		 EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
-		EFR32_RAC_STATE_OFF;
+	uint32_t state = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+			  EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+
+	return state == EFR32_RAC_STATE_OFF || state == EFR32_RAC_STATE_SHUTDOWN;
 }
 
 /* [regs-public] RFCRC values match BLE's 24-bit CRC after bit reversal (T5). */
@@ -2181,6 +2572,7 @@ uint32_t radio_bc_has_match(void)
 static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t remainder)
 {
 	uint32_t generation;
+	uint32_t supplied_remainder = remainder;
 
 	if (!(remainder / 1000000UL) || (remainder & BIT(31))) {
 		tick--;
@@ -2194,6 +2586,8 @@ static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t
 	} while (!generation);
 	atomic_set(&efr32_radio_launch_active, generation);
 	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
+	EFR32_RADIO_TRACE_ONCE("schedule trx=%u tick=%u remainder=%u generation=%u",
+			       trx, tick, supplied_remainder, generation);
 	cntr_radio_cmp_set(trx, tick, generation);
 	return remainder;
 }

@@ -6,7 +6,7 @@
 config BT_LLL_VENDOR_EFR32
 	bool "Open EFR32BG22 lower link layer for Zephyr's split controller"
 	depends on BT_LL_SW_SPLIT
-	depends on SOC_SERIES_EFR32BG22
+	depends on SOC_SERIES_EFR32BG22 || SOC_SERIES_BGM22
 	default y
 	# Same feature selection as Zephyr's OpenISA LLL (subsys/bluetooth/controller/
 	# Kconfig.ll_sw_split, BT_LLL_VENDOR_OPENISA): legacy advertising/scanning, one-PHY connections,
@@ -42,17 +42,27 @@ config EFR32_RADIO_STUB_REGISTERS
 	  The radio register map is not public (docs/radio-tables.md). While set, the radio HAL only
 	  keeps software state and asserts when the controller tries to put a packet on the air.
 
-config EFR32_RADIO_LL_STACK_SIZE
-	int "Lower link layer thread stack size"
+config EFR32_RADIO_ULL_STACK_SIZE
+	int "Upper link layer worker thread stack size"
 	default 800
 	help
-	  Stack of the thread that runs the LLL and ULL contexts: the ticker and
-	  the mayflies (hal/ll_threads.c), work Zephyr's split controller otherwise
-	  runs in software interrupts. The contexts run one at a time; in the QEMU
-	  active-scan workload the ULL context peaked at 632 bytes and the LLL
-	  context at 136 bytes (thread analyzer), so 800 leaves 32 bytes of
-	  headroom over that measured peak. It shares one meta-IRQ priority
-	  with the radio's persistent jobs (EFR32_LL_THREAD_PRIO).
+	  Stack of the persistent thread that runs the ticker and ULL mayflies
+	  (hal/ll_threads.c), work Zephyr's split controller otherwise runs in a
+	  software interrupt. In the QEMU active-scan workload this context peaked
+	  at 632 bytes (thread analyzer), so 800 leaves 32 bytes after reserving up
+	  to 136 bytes for exception context. It shares one meta-IRQ priority with
+	  the LLL and radio's other persistent jobs (EFR32_LL_THREAD_PRIO).
+
+config EFR32_RADIO_LLL_STACK_SIZE
+	int "Lower link layer thread stack size"
+	default 288
+	help
+	  Stack of the separate persistent LLL mayfly thread. Keeping it separate
+	  lets Zephyr's scheduler order ready LLL and ULL work instead of imposing
+	  an order in radio glue. The QEMU active-scan workload peaked at 136 bytes;
+	  288 leaves 48 bytes after reserving up to 104 bytes of FP exception
+	  context. Revisit both measured budgets when hardware thread analysis is
+	  available; they are resource bounds, not radio timing policy.
 
 config EFR32_RADIO_LAUNCH_STACK_SIZE
 	int "Persistent radio TX/RX launch job stack size"
@@ -68,12 +78,22 @@ config EFR32_RADIO_LAUNCH_STACK_SIZE
 
 config EFR32_RADIO_COMPLETION_STACK_SIZE
 	int "Persistent radio completion job stack size"
-	default 512
+	default 768
 	help
 	  FRC completion work invokes the controller callback after leaving the
 	  interrupt context, so it retains a larger, independent stack budget.
-	  The dry ram-probe image ran the same completion path on a 512-byte
-	  stack.
+	  Real EFR32 hardware also enters the Silicon Labs counter driver's
+	  absolute-deadline arm path while this job waits; 512 bytes overflowed
+	  there, while QEMU's simpler clock path did not expose the requirement.
+
+config EFR32_RADIO_BRINGUP_TRACE
+	bool "Print one-shot radio bring-up checkpoints"
+	default n
+	help
+	  Print the first observed PHY, packet framing, TX FIFO, scheduler launch,
+	  and TXEN checkpoints. This is intended for initial silicon bring-up only:
+	  printk timing is not part of the controller contract and production and
+	  simulator regression images should leave it disabled.
 
 config EFR32_RADIO_QEMU_RX_DESCRIPTOR
 	bool "Enable the QEMU-only synthetic RX descriptor consumer"

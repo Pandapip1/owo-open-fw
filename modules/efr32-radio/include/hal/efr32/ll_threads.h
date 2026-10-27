@@ -2,11 +2,13 @@
  * Execution contexts of the lower link layer. SPDX-License-Identifier: Apache-2.0
  *
  * Zephyr's split controller expects three software-interrupt contexts: LLL, and the ULL worker
- * and job (ticker and upper-layer mayflies). Here one persistent Zephyr thread runs them all at
- * a meta-IRQ priority shared with the radio's persistent jobs: like the original equal-priority
- * IRQs they never preempt each other, and like interrupts they preempt every other thread,
- * cooperative ones included. Their software interrupts remain only as doorbells that make the
- * thread runnable, so a pend issued with interrupts locked still takes effect at irq_unlock().
+ * and job (ticker and upper-layer mayflies). Here separate persistent Zephyr threads run the LLL
+ * and ULL worker contexts at a meta-IRQ priority shared with the radio's persistent jobs. The
+ * kernel scheduler therefore owns the ordering of ready radio work; the radio glue does not
+ * impose an LLL-first policy. Like the original equal-priority IRQs, the contexts never preempt
+ * each other, and like interrupts they preempt every other thread, cooperative ones included.
+ * Their software interrupts remain only as doorbells that make a thread runnable, so a pend
+ * issued with interrupts locked still takes effect at irq_unlock().
  */
 #ifndef EFR32_RADIO_LL_THREADS_H_
 #define EFR32_RADIO_LL_THREADS_H_
