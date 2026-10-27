@@ -1692,6 +1692,73 @@ startup, or corrupting SEQRAM content some other part of the system reads
 as persistent/retained state — are unchanged from the discussion above),
 but the lifts themselves no longer carry any of the blame.
 
+**Further isolation: any single-byte content change breaks it, even with
+the length unchanged.** Two more variants, both built and tested on real
+hardware: (a) the exact same `0x2f6c`→`0x320c` length extension with *one
+byte* flipped at a minimal copy increment (`0x2f6c`→`0x2f70`, 4 bytes) —
+hangs identically; (b) the length left **completely untouched** at
+`0x2f6c` (same as stock, object occupies the identical flash address
+range), with a single unrelated byte flipped at offset `0x2000` (far from
+every function this project has touched or verified) — **also hangs
+identically**, confirmed by direct register halt at the same PC, not just
+UART silence. This rules out the copy-length field itself as the
+mechanism; the system is sensitive to *any* modification of this blob's
+bytes, regardless of location, size, or whether the length field changes
+at all.
+
+**Lockstepped the exact divergence point with `bg22_reset_to_breakpoint`
+and single-stepping (hardware only; QEMU has no model of this proprietary
+blob to compare against).** Breakpointing forward from reset through
+`RAIL_VerifyTxPowerCurves` (`0x18a8c`, returns `0` — not an obvious
+failure signal) and into the M33-side PA/TX-power calibration helper at
+`0x13040` shows stock and the single-byte-modified build agree on every
+register at every checkpoint up through the *first* of two back-to-back
+internal busy-waits in that helper (both pass it near-instantly). Single-
+stepping 45 instructions from there, diffed line-for-line between stock
+and the modified build, finds the **exact** first divergent instruction:
+at `pc=0x13058` (`lsls r1, r1, #31`, testing bit 0 of a value just read
+from `0xB802C040`), stock's `r1` is `0` (bit clear — wait exits) and the
+modified build's `r1` is `1` (bit set — the following `bmi` branches back
+to `0x13056` forever). Both builds reach this exact instruction with every
+other register identical; only this one status bit differs, every single
+time.
+
+**This status bit is not new or unnamed — it's already documented in §1.1
+as part of the "RF mailbox" producer/consumer protocol**: `0xB802C000` is
+one of two non-secure mailbox endpoint windows this project already
+identified (flags/status at `+0x040`, enable at `+0x044`), used for M33⟷M0+
+cross-core doorbell signaling, serviced on the M0+ side by
+`RDMAILBOX_IRQHandler`. The M33 is not waiting on an isolated calibration
+register; it is waiting for the M0+ sequencer to **service and acknowledge
+a mailbox message**. Modifying any byte of the sequencer object — content
+unrelated to the actual message-handling code, by position — prevents
+that acknowledgment from ever arriving. The leading explanation is some
+form of integrity gate (most likely on the M0+ side, possibly checked
+before `RDMAILBOX_IRQHandler` is allowed to run or before the M0+ is
+considered "ready" to service mailbox traffic at all) that fails on any
+modification and is not yet located in either object's disassembly.
+
+**Ruled out: stale state from this session's many `SYSRESETREQ`-only
+reboots.** Before accepting the above, checked whether the stuck bit was
+an artifact of this session having reset the board via software dozens of
+times without ever a true power cycle (plausible for a PLL/calibration
+engine with its own independent, rarely-power-on-reset state). A genuine
+physical unplug/replug was performed and the single-byte-modified build
+was reflashed and retested: it hangs identically, confirmed via
+`bg22_reset_to_breakpoint` timing out waiting for `0xfc34` (the return
+point past the entire calibration helper) exactly as before. This is a
+real, content-dependent effect, not accumulated soft-reset corruption.
+
+**Net effect on the project's open questions:** the splice-into-stock
+hardware test cannot currently validate *any* modification to this
+sequencer object, including ones (like this project's own verified C
+lifts) that are logically correct — the test vehicle itself is blocked by
+whatever gate this is, upstream of anything the lifted functions do. This
+also reopens relevance for `ACTIVETXFCD` (§7.4): if the open stack's own
+firmware ever needs to pass through an equivalent mailbox-service gate
+and does not, the same failure mode is a plausible unifying explanation,
+though this has not been checked against the open stack directly.
+
 A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
 (§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
 produced an on-air advertisement yet** — the hang after `RAC.CMD.TXEN` is
