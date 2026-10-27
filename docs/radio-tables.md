@@ -1618,6 +1618,20 @@ dump this chip's own `DEVINFO` page (`0x0FE08000`..`0x0FE083FF`) and check
 whether any documented field there, or the register's own behavior across
 a real power-on reset (not just `SYSRESETREQ`), explains `0x08F08A31`.
 
+**Done, and also negative: `DEVINFO` has no exact 32-bit match for
+`0x08F08A31` anywhere in its 1 KiB (checked directly on this hardware).
+The separate `USERDATA` page (`0x0FE00000`..`0x0FE003FF`, a common
+Silicon Labs location for factory manufacturing/calibration tokens,
+distinct from `DEVINFO`) was also checked — it is completely erased
+(`0xFFFFFFFF` throughout), ruling it out entirely rather than just not
+matching. Neither of the two plausible factory-calibration pages this
+project knows about explains the value. The "real power-on reset, not
+just `SYSRESETREQ`" half of this recommendation has also not been
+attempted — this project has not power-cycled the board specifically to
+test whether `SR3`'s value changes, only to rule out stale soft-reset
+state as the explanation for a *different* finding (§7.5.4's splice-hang
+investigation), which is not the same test.
+
 **Searched and not found as a literal:** `0x08f08a31` does not appear
 anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
 `objdump` has real section/symbol metadata and reliably distinguishes
