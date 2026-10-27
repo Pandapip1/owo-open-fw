@@ -614,10 +614,19 @@ static void efr32_packet_stage_reset(void)
  * of it via its CLR window (test_rac_sr3_clear_alias). Static decomp of
  * the open sequencer object (docs/radio-tables.md SS7) independently finds
  * both fn_0x894 and fn_0xf9c read this exact register to gate their own
- * behavior. Three independent sources agreeing this register matters, and
- * zero lines in this driver that ever touch it before this change.
+ * behavior. Three independent sources agreeing this register matters.
+ *
+ * Only bits 14 and 30 are ever cleared by stock, and only at TX-start, via
+ * SR3's CLR alias -- NOT a full-register write, and NOT at sequencer
+ * install (see radio_reset()'s SR0..SR2 clear and its own comment for why
+ * SR3 is excluded there). hardware-lockstep RAC captures confirm SR3 holds
+ * a fixed, nonzero value on stock across every checkpoint including the
+ * very first one, with bits 14/30 already clear by the time of capture --
+ * consistent with being cleared once, early, and never again, not
+ * zeroed wholesale. The clear itself lives in radio_tx_enable().
  */
 #define EFR32_RAC_SR3_OFFSET 0x04CU
+#define EFR32_RAC_SR3_TX_START_CLEAR_MASK (BIT(14) | BIT(30))
 #define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
 #define EFR32_RAC_SR0_TX_PREPARE_SET BIT(7)
 #define EFR32_RAC_SR0_TX_PREPARE_CLEAR BIT(3)
@@ -1651,14 +1660,21 @@ void radio_reset(void)
 	 * force-disable.  The open M0+ image is copied and verified below; retained
 	 * SEQRAM is explicitly never trusted.
 	 * This is the exact 0x12d58 initializer order, not a snapshot transplant.
-	 * SR3 added separately (EFR32_RAC_SR3_OFFSET's own comment): this
-	 * driver never previously wrote it at all, unlike SR0..SR2.
+	 * SR3 (RAC+0x4C) is deliberately NOT cleared here, unlike SR0..SR2: the
+	 * verified 0x12d58 disassembly only clears SR0/SR1/SR2 (three `str`s to
+	 * +0x40/+0x44/+0x48, no fourth to +0x4C). An earlier pass here added a
+	 * full SR3 = 0 by incorrect analogy with SR0..SR2; that was wrong and is
+	 * reverted. SR3 holds a fixed, nonzero, non-firmware-literal value on
+	 * stock across every hardware-lockstep capture including the very first
+	 * one (docs/radio-tables.md SS7.5.1) -- a full clear here would destroy
+	 * it. The two specific bits stock *does* clear (14 and 30, via SR3's CLR
+	 * alias, as the first store of its TX-start sequence) are handled in
+	 * radio_tx_enable() instead, at the matching point in time.
 	 */
 	efr32_radio_sequencer_install();
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR0_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR1_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR2_OFFSET) = 0U;
-	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_SR3_OFFSET) = 0U;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
@@ -2282,6 +2298,15 @@ void radio_tx_enable(void)
 	/* Match the OpenISA radio contract: do not start a new TX while active. */
 	while (!radio_is_idle()) {
 	}
+	/*
+	 * The very first store of stock's own TX-start sequence (see
+	 * EFR32_RAC_SR3_OFFSET's comment): clear SR3 bits 14/30 via its CLR
+	 * alias, before anything else below.  NOT a full-register write --
+	 * SR3's other bits hold a fixed, nonzero value this driver has not
+	 * identified the origin of and must not disturb.
+	 */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_SR3_OFFSET) = EFR32_RAC_SR3_TX_START_CLEAR_MASK;
 	status_before = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET);
 	efr32_radio_trace_previous_seq_launch();
 

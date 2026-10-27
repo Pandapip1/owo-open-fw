@@ -1436,7 +1436,7 @@ it should not be read as "the fix." The address itself, independently
 corroborated by the static M0+ decomp in §7.3, remains worth having
 correctly initialized — just not necessarily to this one captured value.
 
-### 7.5.1 `RAC.SR3` holds a fixed nonzero value on stock that open never writes
+### 7.5.1 Fixed: `radio.c` was zeroing all of `RAC.SR3`, not just the two bits stock clears
 
 `tests/hardware-lockstep/*-rac.bin` (eight capture pairs, spanning
 pre-`TXEN`, the very first capture of the session, both channel-37 and
@@ -1444,18 +1444,54 @@ channel-38 runs, and both the IRQ8 and IRQ9 checkpoints) all agree:
 `RAC.SR3` (`0xA802004C`, offset `+0x4C` in the dump) reads **exactly
 `0x08F08A31` on stock, every single time, including the capture taken
 before any `TXEN` or IRQ activity at all** — and reads `0x00000000` on
-open at every equivalent checkpoint. This is independent of (and in
-addition to) the `RAC.SR0..SR3`-cleared-at-install fix already in
-`radio.c` (that fix only establishes `SR3 = 0` at sequencer install;
-stock's value is examined well after that point and is nonzero).
+open at every equivalent checkpoint.
 
-Being constant across every capture — including the very first one, before
-`TXEN` — rules out this being a per-cycle status snapshot; it is a value
-established once, early, and never changed afterward. That makes
-`radio_tx_enable()` (which already clears `SR0`/`SR3` at install, not at
-every TX) the wrong place to look for *where* it should be set; it belongs
-somewhere earlier in channel/PHY configuration, closer to `sl_rail_util_pa_init()`-equivalent
-setup.
+**This was a real bug in this project's own earlier work, not a stock
+mystery.** The `EFR32_RAC_SR3_OFFSET` comment already in `radio.c` cited
+three sources — a live trace showing stock clears *bit 14* of `SR3` as the
+first store of its TX-start sequence, this project's own
+`test_rac_sr3_clear_alias` QEMU test documenting stock clearing *bit 30*
+via the CLR alias, and static decomp showing `fn_0x894`/`fn_0xf9c` reading
+this register — but the code that landed from that evidence clears the
+*entire 32-bit register* (`*radio_reg32(...) = 0U`) at *sequencer install*
+(`radio_reset()`), not two specific bits at *TX-start*. Checking
+`0x08F08A31` in binary confirms bits 14 and 30 are both already `0` in
+every capture, consistent with stock clearing exactly those two bits once,
+early, and never touching the rest of the register — not with a wholesale
+zero. Directly confirmed against the verified stock initializer
+(`stage2-m33.dis:30187` onward, the same `0x12d58` sequence this project's
+own comment already cites): it clears exactly three registers via three
+`str`s to `+0x40`/`+0x44`/`+0x48` (`SR0`/`SR1`/`SR2`) and **no fourth store
+to `+0x4C`** — stock's install path never touches `SR3` at all.
+
+**Fixed:** removed the full `SR3 = 0` write from `radio_reset()`, and added
+a targeted `SR3_CLR = BIT(14) | BIT(30)` write (via the CLR alias) as the
+first store of `radio_tx_enable()`, matching both the bits and the timing
+the cited evidence actually describes. QEMU 74/17/14 still pass (the CLR-
+alias test is generic register-mechanism coverage, independent of this
+driver-level fix). **Not yet validated on hardware.** This does not by
+itself explain `0x08F08A31`'s *other* bits or where they come from — see
+§7.5.2 — but it stops this driver from actively destroying a value it
+doesn't understand, which the prior code did on every reset.
+
+### 7.5.2 `RAC.SR3`'s remaining bits: read-only in the sequencer, origin still unknown
+
+Two of five literal-pool references to `RAC.SR3`'s base address in the
+stock sequencer object were traced by hand (raw byte offsets `0xa44` and
+`0x564`/`0x66c`, found via a direct byte scan of the binary rather than
+`objdump -D` — see the methodology note below): both are single-bit *reads*
+(`lsls`+`bmi` idioms testing bit 1 and bit 31 respectively) used as
+conditions, not writes. The remaining three reference sites (file offsets
+`0x1448`, `0x2d04`, `0x3dfc`) have not been traced. Combined with §7.5.1's
+M33-side result (stock's own, verified install sequence never touches
+`SR3`), the open question has narrowed from "who writes `SR3`" to "is it
+ever written by software at all, or does it carry a nonzero hardware reset
+value" — plausible for a chip-specific trim/calibration word, implausible
+for QEMU's current all-zero-on-reset model of it. Recommended next
+hardware step unchanged from the prior pass: dump this chip's own
+`DEVINFO` page (`0x0FE08000`..`0x0FE083FF`) and check whether any
+documented field there, or the register's own behavior across a real
+power-on reset (not just `SYSRESETREQ`), explains `0x08F08A31`.
 
 **Searched and not found as a literal:** `0x08f08a31` does not appear
 anywhere in `stage2-m33.dis` (the full stock M33 ELF disassembly, where
@@ -1500,7 +1536,7 @@ Recommended next hardware session: dump `0x0FE08000`..`0x0FE083FF` and
 check for sub-fields that combine (directly or via a simple shift/OR) to
 `0x08F08A31`.
 
-### 7.5.2 Fixed: the SEQIF-ack wait didn't retry its own CLR write
+### 7.5.3 Fixed: the SEQIF-ack wait didn't retry its own CLR write
 
 Direct instruction-by-instruction comparison of `radio_seq.S`'s bounded
 SEQIF-ack loop (end of §7.2's gate-pulse sequence) against stock's actual
