@@ -1357,3 +1357,34 @@ technique as `trace_stores.py`, polling a read instead of recording writes)
 to find the exact instruction after which `ACTIVETXFCD` flips, then check
 whether the open path ever reaches an equivalent point. This was not
 attempted in this pass.
+
+**Ruled out: software TIFS.** `radio_tmr_tifs_set()`, `radio_tmr_hcto_configure()`,
+and the rest of the `radio_tmr_*` family are pure software bookkeeping on
+real hardware — every hardware-facing line in them is guarded by
+`CONFIG_EFR32_RADIO_QEMU_TIFS`, a simulator-only path. None of them write a
+PROTIMER compare, a RAC HCTO, or any other register on real silicon;
+`radio_switch_complete_and_rx()`/`_tx()`/`_disable()` are likewise
+unconditional `EFR32_RADIO_TODO()` no-ops outside that same guard. The
+official Silicon Labs EFR32BG22 errata (Rev 0.6, July 2021,
+`silabs.com/documents/public/errata/efr32bg22-errata.pdf`) also lists no
+TIFS/RAC/FRC/sequencer item; its only two radio errata (`RADIO_E302`
+data-whitening selectivity, `RADIO_E303` RAIL packet filters with header
+enabled) are unrelated. TIFS governs RX-after-TX turnaround in any case,
+which this project never reaches: the *first* TX itself already fails to
+complete. This does not rule out a TIFS-*adjacent* hardware precondition
+(PROTIMER/RAC state some other code path should establish but doesn't),
+only the TIFS implementation as currently (not) written.
+
+**Confirmed: `radio_tx_enable()`'s actual BUFC/RAC write order is correct.**
+Re-reading the current source (not the possibly-stale prose a few sections
+above) line by line: `radio_pkt_tx_set()` itself only `memcpy`s into a
+software staging buffer and sets flags — it performs no hardware access at
+all. The real write sequence runs inside `radio_tx_enable()`, in order:
+`efr32_tx_fifo_publish()` (`BUFC.CMD=CLEAR`, `BUFC.CFG=512`-byte config,
+`BUFC.ADDR`=staging pointer, then each byte individually through
+`BUFC.WRITEDATA` — matching the already-documented live DWT-watchpoint
+observation of stock silicon's own per-byte `WRITEDATA` pattern, not a
+prefetch-by-count scheme); then `efr32_packet_stage_arm()`; then the SR0
+TX-prepare set/clear and `SEQ_RX_AFTER_TX_INHIBIT` clear already discussed
+above; then, last, `RAC.CMD = TXEN`. So FIFO data is fully staged before
+TXEN in the compiled instruction stream, not merely in trace-log order.
