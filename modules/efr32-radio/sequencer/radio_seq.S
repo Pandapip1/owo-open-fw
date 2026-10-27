@@ -19,6 +19,13 @@
 .equ EFR32_SEQ_IDENTITY_OPEN_V1,      0x4f535131 /* "OSQ1" */
 .equ EFR32_SEQ_TRACE_TXWARM,          0x00004fc0
 .equ EFR32_SEQ_TRACE_TX,              0x00004fd0
+/* Diagnostic only (not part of the bounded production trace words above):
+ * FRC.STATUS before this handler acts, and again just before it returns, so
+ * a later debug-probe attach can see whether this image's own mechanics
+ * changed it (docs/radio-tables.md SS7.4). */
+.equ EFR32_SEQ_TRACE_STATUS_BEFORE,   0x00004fb0
+.equ EFR32_SEQ_TRACE_STATUS_AFTER,    0x00004fb4
+.equ EFR32_FRC_STATUS,                0xa8004008
 .equ EFR32_RAC_SEQIF,                 0xa8020028
 .equ EFR32_RAC_SEQIF_CLEAR,           0xa8022028
 .equ EFR32_RAC_SEQIEN_SET,            0xa802102c
@@ -137,6 +144,11 @@ efr32_radio_seq_exception:
     ldr r1, [r0]
     str r1, [r3, #12]
 
+    ldr r0, =EFR32_FRC_STATUS
+    ldr r1, [r0]
+    ldr r0, =EFR32_SEQ_TRACE_STATUS_BEFORE
+    str r1, [r0]
+
     mrs r3, ipsr
     cmp r3, #EFR32_EXCEPTION_TXWARM
     bne 2f
@@ -179,6 +191,11 @@ efr32_radio_seq_exception:
     subs r3, #1
     bne 11b
 2:
+    ldr r0, =EFR32_FRC_STATUS
+    ldr r1, [r0]
+    ldr r0, =EFR32_SEQ_TRACE_STATUS_AFTER
+    str r1, [r0]
+
     ldr r0, =EFR32_RAC_SEQIF
     ldr r1, [r0]
     ldr r2, =EFR32_RAC_SEQIF_STATE_EVENTS
