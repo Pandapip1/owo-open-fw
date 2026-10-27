@@ -1436,6 +1436,46 @@ it should not be read as "the fix." The address itself, independently
 corroborated by the static M0+ decomp in §7.3, remains worth having
 correctly initialized — just not necessarily to this one captured value.
 
+### 7.5.1 Fixed: the SEQIF-ack wait didn't retry its own CLR write
+
+Direct instruction-by-instruction comparison of `radio_seq.S`'s bounded
+SEQIF-ack loop (end of §7.2's gate-pulse sequence) against stock's actual
+`0x7c8` disassembly found a real divergence, independent of and in addition
+to §7.4/§7.5: stock's `0x7c8(mask)` re-issues `str mask, [RAC.SEQIF_CLEAR]`
+on *every* loop iteration, immediately before re-reading `RAC.SEQIF` and
+re-testing the mask —
+
+```
+7ca: ldr r1, [pc, #...]   @ RAC.SEQIF_CLEAR
+7cc: str r0, [r1, #0]     @ re-issue the clear, every iteration
+7ce: ldr r1, [pc, #...]   @ RAC.SEQIF
+7d0: ldr r1, [r1, #0]
+7d2: ands r1, r0
+7d4: bne.n 0x7ca          @ loop back to the re-clear, not just the re-read
+```
+
+`radio_seq.S`'s prior version wrote the CLR value once, then only polled
+`RAC.SEQIF` without ever re-asserting the clear:
+
+```
+ldr r0, =EFR32_RAC_SEQIF_CLEAR
+ldr r1, =EFR32_RAC_SEQIF_TXWARM_ACK_MASK
+str r1, [r0]              @ single write, outside the loop
+11: ldr r0, =EFR32_RAC_SEQIF
+    ...                    @ loop only re-reads, never re-writes
+```
+
+If the single write doesn't fully take effect on real silicon (a plausible
+race this project cannot rule out without the hardware tooling blocked in
+§7.6), stock's loop self-corrects by re-asserting the clear every spin;
+the prior `radio_seq.S` version would instead spin uselessly to its
+`EFR32_RAC_TXWARM_WAIT_BOUND` timeout. Fixed by moving the CLR write inside
+the loop body, matching `0x7c8` exactly. QEMU 74/17/14 all still pass;
+**not yet validated on hardware** (same blocker as §7.6) — this is a
+plausible contributor to the `ACTIVETXFCD` divergence, not a confirmed
+fix for it, since it affects a SEQIF handshake bit, not `FRC.STATUS`
+directly.
+
 ### 7.6 Hardware status: untested, pending reliable M33 breakpoint tooling
 
 A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write

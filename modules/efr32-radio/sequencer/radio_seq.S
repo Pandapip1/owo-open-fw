@@ -179,11 +179,18 @@ efr32_radio_seq_exception:
     ldr r0, =EFR32_RAC_0X08_CLR
     movs r1, #EFR32_RAC_0X08_CLR_MASK
     str r1, [r0]
-    ldr r0, =EFR32_RAC_SEQIF_CLEAR
+    /* Matches stock's fn_0x7c8(mask) exactly (docs/radio-tables.md SS7.2):
+     * the CLR write is re-issued on *every* iteration, not just once
+     * before the loop -- confirmed from stock's disassembly at 0x7c8,
+     * which re-executes `str r0, [CLR]` each time around before
+     * re-reading SEQIF. A single write that doesn't fully stick (a
+     * plausible race on real silicon) would otherwise leave this bounded
+     * loop spinning uselessly to its timeout instead of self-correcting. */
+    ldr r3, =EFR32_RAC_TXWARM_WAIT_BOUND
+11: ldr r0, =EFR32_RAC_SEQIF_CLEAR
     ldr r1, =EFR32_RAC_SEQIF_TXWARM_ACK_MASK
     str r1, [r0]
-    ldr r3, =EFR32_RAC_TXWARM_WAIT_BOUND
-11: ldr r0, =EFR32_RAC_SEQIF
+    ldr r0, =EFR32_RAC_SEQIF
     ldr r1, [r0]
     ldr r2, =EFR32_RAC_SEQIF_TXWARM_ACK_MASK
     ands r1, r2
