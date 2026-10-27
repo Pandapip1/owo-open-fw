@@ -660,6 +660,21 @@ extern const bool efr32_radio_seq_image_is_open;
 #define EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS 0xB0003EC4UL
 #define EFR32_SEQ_RX_AFTER_TX_INHIBIT BIT(5)
 
+/*
+ * A live single-step trace of the working stock M33's own RAC_SEQ IRQ
+ * handler (tests/hardware-lockstep/stage2-rail-starttx.json, step 1081)
+ * writes this exact value to this exact shared-RAM word before RAC.CMD.TXEN.
+ * Static decomp of the open sequencer object independently identified this
+ * same address as one the shared RAC-service dispatcher (docs/radio-tables.md
+ * SS7.3) dereferences but this image never initializes -- two analyses from
+ * opposite directions landing on the same word is why this is named and
+ * written here rather than left alone, but its field meaning is NOT
+ * established and this write is UNTESTED on hardware (SS7.5-7.6): remove it
+ * if testing shows no effect, do not treat its presence as a confirmed fix.
+ */
+#define EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS 0xB0003EECUL
+#define EFR32_SEQ_UNNAMED_FLAG_3EEC_OBSERVED_VALUE 0x00000012UL
+
 static inline volatile uint32_t *radio_reg32(uintptr_t address);
 
 #if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
@@ -2279,6 +2294,9 @@ void radio_tx_enable(void)
 	sequencer_flags = *radio_reg32(EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS);
 	sequencer_flags &= ~EFR32_SEQ_RX_AFTER_TX_INHIBIT;
 	*radio_reg32(EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS) = sequencer_flags;
+	/* See EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS: untested hardware hypothesis. */
+	*radio_reg32(EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS) =
+		EFR32_SEQ_UNNAMED_FLAG_3EEC_OBSERVED_VALUE;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 	EFR32_RADIO_TRACE_ONCE("txen status-before=0x%08x status-after=0x%08x",
 			       status_before,
