@@ -1590,7 +1590,63 @@ plausible contributor to the `ACTIVETXFCD` divergence, not a confirmed
 fix for it, since it affects a SEQIF handshake bit, not `FRC.STATUS`
 directly.
 
-### 7.6 Hardware status: untested, pending reliable M33 breakpoint tooling
+### 7.5.4 The splice-into-stock hardware test: a real, reproducible hang before `main()`
+
+The validation the user asked for — patch the five verified C lifts
+(`fn_0x7ac`/`_0x7be`/`_0x7c8`/`_0x894`/`_0x1bda`, relocated to free SEQRAM
+space at local `0x3000`, redirecting only the five real call sites inside
+IRQ8/IRQ9's bodies; `sequencer-decomp/build_patched_stage.sh` automates
+the whole pipeline) into a byte-faithful copy of the real stock SEQRAM
+image, bake that into the real proprietary RAIL blob, and see if the
+beacon still transmits — was run to completion on real hardware. Result:
+**it does not transmit; it hangs before `main()` ever runs.**
+
+This is a real, deterministic, content-specific hang, not a tooling
+artifact — checked carefully given this session's earlier false alarms
+with flaky UART capture:
+
+* Reproduced identically on back-to-back reflashes of the *same* patched
+  image with no other firmware interleaved (rules out a one-off flash
+  write glitch).
+* Unmodified stock, reflashed immediately *after* a patched-image hang,
+  boots and advertises perfectly on the first try every time (rules out
+  retained-SEQRAM-state corruption from a prior run, which this project's
+  own `radio.c` comments already note SEQRAM is subject to — "SEQRAM
+  retains across an M33 reset" — since stock recovers from it instantly
+  while the patched image does not).
+* A real halt (`DHCSR` confirms genuine `S_HALT`, not a stale cached
+  state) catches the M33 every time at the exact same address,
+  `0x00013056`, inside `sli_rail_cd65c06e3b1af867d6257be45870f13b` — an
+  **unbounded** busy-wait (`ldr`/`lsls`/`bmi` spinning on bit 0 of a word
+  at the SEQRAM non-secure alias `0xB0004080`) that runs before Zephyr's
+  own unconditional `*** Booting Zephyr ***` banner, which is why nothing
+  at all appears over UART.
+
+**Not yet root-caused.** `0xB0004080` (local `0x4040+0x40`) is well above
+both the original object's end (`0x2f6c`) and this patch's appended block
+(`0x3000`..`0x320c`) — this patch's SEQRAM copy does not directly write
+that address. The sequencer's own reset handler (local `0x2ade`, the
+already-documented 19-entry calibration-table init loop) was checked and
+does not call any of the five relocated functions directly, so the M0+'s
+*own* boot path isn't obviously implicated by a direct read — but it may
+still be the M0+ never reaching whatever step sets this flag, for a
+reason not yet traced (a callee of a callee, or a side effect of this
+patch's copy-length change exposing or disturbing memory some other part
+of the system assumed was free). This needs either single-stepping the
+M0+ directly (AP3, blocked earlier in this project by the same Secure-
+debug-lock reset unreliability as the M33) or tracing every caller of the
+five relocated functions' *callees* for a path back to one of them, which
+has not been done.
+
+**What this does and does not say about the C lifts themselves:** each
+lift still independently compiles and, by itself, reproduces the original
+disassembly's control flow and touched addresses (the match-decompilation
+methodology this whole section follows). This splice test is strictly
+stronger than that — exercising the lifts inside the real running system,
+across every code path that reaches them, not just the one this project
+verified by hand — and it is *this* test that fails. That is exactly why
+the user asked for it rather than trusting the per-function compile-time
+check alone.
 
 A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
 (§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
