@@ -572,8 +572,26 @@ at SDK instruction `0x12da0`, immediately before its write of the named
 `stage2-pre-release-frcram.bin` has SHA-256
 `404a691ea8c104ab81ad8e7350bd0707fb56179d7f839a78e241628ddc2715f3`.
 Its first 12,140 bytes are byte-for-byte identical to the archive-derived code
-section, including SP `0x3e30` and reset vector `0x2a2d`; the remainder is the
-SDK-initialized shared ABI before the private core can mutate it.
+section, including SP `0x3e30` and reset vector `0x2a2d`. A subsequent
+sentinel experiment corrected the provenance of the remainder: filling only
+FRCRAM with `0xa5` before the stock reset shows that the SDK deterministically
+overwrites `0x3844..0x385f`, `0x3e3c..0x3e74`, `0x3e78..0x4017`, and
+`0x4fe0..0x4fff` in addition to the code region before releasing the private
+core. Gaps in the original 20 KiB capture are retained or uninitialized RAM,
+not SDK configuration, and must not be promoted into the open implementation.
+The sentinel capture is retained as
+`stage2-pre-release-frcram-sentinel.bin`; a second ordinary capture begins to
+differ from the first at `0x3d7c`, independently confirming that a monolithic
+FRCRAM dump is not a deterministic firmware artifact.
+
+Several fields in the deterministic shared range are populated again between
+private-core release and the working stock transmit. They include M33 code
+pointers into RAIL support routines and runtime timing/calibration values.
+This explains why the archive's immutable M0+ code section alone cannot run,
+and why reproducing only the pre-release bytes does not establish the complete
+per-launch ABI. These values are reverse-engineering evidence, not candidate
+magic constants: each field must be classified by its writer and consumer
+before either a compatibility shim or an open semantic replacement is added.
 
 The valid image builds with vendored Zephyr at 177,800 flash bytes and 32,664
 RAM bytes, and passed OpenOCD preflight, erase, write, and verification. A
