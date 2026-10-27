@@ -1405,14 +1405,28 @@ that's exactly `EFR32_RAC_SR0_TX_PREPARE_SET`/`_CLEAR` (`BIT(7)`/`BIT(3)`),
 already in `radio_tx_enable()`. Not every match in this trace is a gap;
 `0x3EEC` is the one that is.
 
-**Non-claim:** the value `0x12`'s field meaning is not established (no
-source locates a name for it), and this project's own architecture is
-event-driven throughout a single IRQ handler where OpenISA's is a sequence
-of discrete HAL calls, so stock's exact instruction-order placement doesn't
-map 1:1 onto this port's call sequence — only that it is written
-*sometime* before `TXEN`. §7.6 adds it as a named, provenance-tracked write
-in `radio_tx_enable()`, to be removed if hardware testing shows no effect,
-not asserted as solved until tested.
+**Correction, found by tracing further:** the step-1081 instruction is not
+actually the field's meaningful write. Its own disassembly context
+(`stage2-m33.dis:10616-10644`) shows the surrounding code *reads* `0x3EEC`
+into `r9` *before* two further calls, then writes the *same* `r9` back
+unchanged afterward — a save/restore around those calls, not a fresh value
+being established. Searching every `str` to this address in the whole
+stock M33 image (five sites total) shows the register is a general,
+accumulated multi-purpose flags word, not a single "TX armed" trigger:
+one site (`stage2-m33.dis:10206-10210`) does a generic caller-parameterized
+`bic r3,r3,r7; orr r3,r3,r6` (bits supplied by the caller, reusable
+helper); another (`:10fc2-10fd0`) conditionally sets or clears only bit 27
+based on an unrelated flag; two more (`:e50c-e512`, `:f5f6-f5fe`) are plain
+AND-mask bit clears. So the observed `0x12` is whatever bits had
+accumulated from earlier, unrelated initialization paths by the time this
+project's capture happened to run — not a portable constant. The
+`EFR32_SEQ_UNNAMED_FLAG_3EEC_OBSERVED_VALUE` write added below is
+accordingly a **weak, likely-incomplete guess**, kept only because it is
+cheap, inert if wrong, and better than leaving the word at whatever
+garbage this project's own, much shorter boot path happens to leave there;
+it should not be read as "the fix." The address itself, independently
+corroborated by the static M0+ decomp in §7.3, remains worth having
+correctly initialized — just not necessarily to this one captured value.
 
 ### 7.6 Hardware status: untested, pending reliable M33 breakpoint tooling
 
