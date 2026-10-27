@@ -1382,6 +1382,50 @@ highest-value next step is a hardware or QEMU breakpoint at local `0xf9c`
 working-stock TX attempt, to settle reachability directly rather than by
 further static guessing.
 
+### 7.5 A confirmed, missing SEQRAM-local write: `0xB0003EEC = 0x12`
+
+`tests/hardware-lockstep/stage2-rail-starttx.json` is a real, dynamic
+single-step store trace of the working stock M33's own `RAC_SEQ_IRQn`
+(exception 54) handler immediately before it writes `RAC.CMD.TXEN`
+(captured earlier, analyzed here for the first time). At step 1081 it
+writes `0x00000012` to `0xB0003EEC` — the M33 non-secure SEQRAM alias of
+local `0x3EEC`. This is the exact flag word §7.3 already identified, from
+the *opposite* direction (static M0+ decomp), as something `0x894`
+dereferences but never initializes itself. Two independent analyses — one
+reading the M0+ object, one reading a live M33 trace — landed on the same
+address. `rg` over this project's own `radio.c` and `radio_seq.S` confirms
+neither writes `0x3EEC` anywhere; the open M33 driver never establishes this
+state at all.
+
+The same trace also has two more SEQRAM-local writes (`0x3ECC=0` at step
+1082, `0x3EC4=0` at step 1149) and what first looked like a second,
+unexplained gate pulse on `RAC+0x40` (bit 7 via the SET alias at step 1140,
+bit 3 via CLR at step 1145) — checked and already correctly implemented:
+that's exactly `EFR32_RAC_SR0_TX_PREPARE_SET`/`_CLEAR` (`BIT(7)`/`BIT(3)`),
+already in `radio_tx_enable()`. Not every match in this trace is a gap;
+`0x3EEC` is the one that is.
+
+**Non-claim:** the value `0x12`'s field meaning is not established (no
+source locates a name for it), and this project's own architecture is
+event-driven throughout a single IRQ handler where OpenISA's is a sequence
+of discrete HAL calls, so stock's exact instruction-order placement doesn't
+map 1:1 onto this port's call sequence — only that it is written
+*sometime* before `TXEN`. §7.6 adds it as a named, provenance-tracked write
+in `radio_tx_enable()`, to be removed if hardware testing shows no effect,
+not asserted as solved until tested.
+
+### 7.6 Hardware status: untested, pending reliable M33 breakpoint tooling
+
+A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
+(§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
+produced an on-air advertisement yet** — the hang after `RAC.CMD.TXEN` is
+unchanged in the one hardware boot observed with the §7.2 mechanics alone,
+and §7.5 has not yet been flashed to hardware at all. A reliable way to
+halt the M33 at an arbitrary instruction before resetting it (to catch
+`RAC.STATUS`/`FRC.STATUS` deterministically rather than racing a live
+single-step window) was still in progress, separately from this firmware
+work, when this section was last updated.
+
 **Recommended next step:** a single-step poll of `FRC.STATUS` across the
 `RAC.CMD.TXEN` → first-IRQ8 window on the *working* stock controller (same
 technique as `trace_stores.py`, polling a read instead of recording writes)
