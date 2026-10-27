@@ -1270,7 +1270,30 @@ This matters for *how*, not just *whether*, this project replicates stock
 behavior: `radio_seq.S`'s own header already commits to "bounded peripheral
 mechanics only... [not choosing] jobs, priorities, channels, deadlines."
 `0x894`/`0xd38` is exactly the kind of job/channel-dependent policy that
-commitment excludes. It is also the concrete, hardware-proven reason a
+commitment excludes.
+
+`0xd38` resolves further than first read suggested, with one correction:
+a register tracked through many reassignments (GNU `objdump`'s literal-pool
+annotations only show *where* a loaded constant lives, not its value, so
+each one must be resolved and each register's *last* assignment before use
+re-checked — an earlier pass here mistakenly treated a stale value as current
+and guessed a `BUFC.BUF.WRITEDATA`-style byte-pump; re-tracing every
+assignment shows that is wrong) turns out, at its last assignment before use,
+to hold `0xAA000054` = `BUFC.BUF[1].XWRITE` (struct layout from the public
+`efr32bg21_bufc.h`, `BUFC_BUF_TypeDef`/`BUFC_TypeDef`, already the project's
+own header for this block). Three further, mutually exclusive branches from
+that base write: `BUF[1].FIFOASYNC` (`+0x10`) twice, high/low halves of one
+value, gated on bit 24 of a SEQRAM-local word; `BUF[2].READOFFSET` (`+0x20`),
+value `8`, on an early-exit path; and `BUF[3].CMD` (`+0x6C`) twice with two
+different values — the same "two sequential CMD writes" shape this project
+already established for channel 0/1 FIFO setup — gated on comparing
+`FRC.WCNT` (`+0x01C`, the live running word counter, not a `WCNTCMP*`
+threshold) against a table-derived value. None of this has been confirmed to
+execute for this project's single-descriptor BLE advertising case rather
+than some other `generic_phy` scenario (RX, calibration, a different
+protocol); that requires either exhausting the remaining static branches or
+a temporary, non-production diagnostic probe exercising this exact call with
+this project's real runtime state, neither of which has been done yet. It is also the concrete, hardware-proven reason a
 blind register-store replay cannot work: `tests/sequencer-probe/README.md`
 already records that replaying the *complete* captured IRQ8/IRQ9 MMIO
 store sequence "still emitted no observable advertisement," and
