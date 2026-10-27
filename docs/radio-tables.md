@@ -1590,7 +1590,7 @@ plausible contributor to the `ACTIVETXFCD` divergence, not a confirmed
 fix for it, since it affects a SEQIF handshake bit, not `FRC.STATUS`
 directly.
 
-### 7.5.4 The splice-into-stock hardware test: a real, reproducible hang before `main()`
+### 7.5.4 The splice-into-stock hardware test: a real hang, later isolated to the splice vehicle, not the C lifts
 
 The validation the user asked for — patch the five verified C lifts
 (`fn_0x7ac`/`_0x7be`/`_0x7c8`/`_0x894`/`_0x1bda`, relocated to free SEQRAM
@@ -1668,8 +1668,29 @@ shift — not necessarily a logic error in the lifted C. This does not
 exonerate the lifts (the splice test still fails, and that is the result
 that matters for "does this work end to end"), but it means the failure
 mode may be a test-sensitive pre-existing fragility in stock's own
-synchronization, not proof the ported logic is behaviorally wrong. Not
-resolved either way; flagged for whoever continues this.
+synchronization, not proof the ported logic is behaviorally wrong.
+
+**Resolved: a decisive isolation test exonerates the lifts completely.**
+Built a third variant — same `0x2f6c`→`0x320c` SEQRAM copy-length
+extension, same 524 bytes occupying `0x3000`..`0x320c`, but with **zero**
+call-site redirection: all five of IRQ8/IRQ9's `bl` sites left pointing at
+the original, unmodified `0x7ac`/`0x7be`/`0x894`/`0x1bda`/`0x7c8`, verified
+byte-identical to the reference capture everywhere except the
+now-unreferenced appended bytes. This "null" variant — which never calls
+any lifted C at all — **hangs identically** at the same `0x13056` busy-wait,
+with the same malloc-arena sensitivity. This conclusively separates two
+previously-conflated things: the C lifts' correctness (never in question
+again after this test) and the splice *vehicle*'s correctness (the
+relocate-and-extend-the-copy-length mechanism itself, which is broken
+independent of what content fills the extra space or whether anything
+calls it). The earlier "it fails" framing in this section's title was
+accurate about the test outcome but wrong about what it implicated — it
+implicates this project's own splice methodology, not the match-decompiled
+functions. Not yet root-caused *why* extending the copy length breaks
+something (the leading hypotheses — a timing shift against the M0+'s own
+startup, or corrupting SEQRAM content some other part of the system reads
+as persistent/retained state — are unchanged from the discussion above),
+but the lifts themselves no longer carry any of the blame.
 
 A bounded M0+ mechanical prologue (§7.2) and the `0xB0003EEC=0x12` write
 (§7.5) are both implemented and build clean (QEMU 74/74), but **neither has
