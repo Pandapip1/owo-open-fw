@@ -2066,35 +2066,84 @@ clears a SEQRAM-local byte at `0x3E72`. Its own incoming argument is
 confirmed dead (clobbered by `fn_0x7d8`'s return before it's ever read).
 
 `fn_0x19d0` has five call sites (`0x237e`, `0x2658`, `0x28bc`, `0x2900`,
-`0x2998`), none yet proven reachable from this project's own
-ADV_IND/TXWARM/TX scenario. The first, at `0x237e`, sits inside another
-previously-unexamined function at `0x2362` which itself opens with a
-direct `bl 0x894` — calling the shared dispatcher outright, not through
-IRQ8/IRQ9's own entry points (`0x2578`, already fully resolved in
-§7.2) — then tests `RAC.STATUS` bit 19 and branches between
-`fn_0x19d0`/`fn_0x1a18`/`fn_0xc02`/`fn_0x13b0`/`fn_0xd34` or, on the other
-side, acknowledges `RAC.SEQIF` bit 29 via the shared `fn_0x7c8` helper
-(§7.2) — a *different* bit than IRQ8's own bit 24. Two more structurally
-similar, adjacent functions follow at `0x2390` (calls `fn_0x894`, then
-acks bit 16) and `0x23a0`, which opens with the exact same
-`bl 0x7ac; movs r0,#5; str; bl 0x7be` gate-pulse sequence already
-documented for IRQ8 in §7.2 — at a *different* address than IRQ8's own
-`0x2578` entry point, meaning this is either a second, distinct IRQ
-vector's handler or an internal helper the IRQ8 path itself calls into
-(not yet determined which). `0x23a0`'s body is only partially traced
-(through roughly `0x2410`, with unresolved literal-pool references at
-`0x25b8`/`0x25bc`/`0x25c0`/`0x25c4`/`0x263c`/`0x2640` and an unexamined
-call to `fn_0xa76`) and is not yet lifted to a `.c` file.
+`0x2998`). The first, at `0x237e`, sits inside a function at `0x2362`
+which opens with a direct `bl 0x894` — calling the shared dispatcher
+outright, not through IRQ8/IRQ9's own entry points (`0x2578`, already
+fully resolved in §7.2). **Correction, found by reading this object's own
+vector table directly (raw byte scan of its first `0x60` bytes, same
+technique already used for every literal pool in this object — word 0 =
+`0x3e30`, the already-established stack top; words 24/25 =
+`0x2579`/`0x25c9` independently confirm the already-known IRQ8/IRQ9
+entries): `0x2362` is not an orphan helper, it is IRQ13's own entry
+point (word 29 = `0x2363`).** `fn_0x2390` (word 16 = `0x2391`) is IRQ0's
+entry point, and `fn_0x23a0` (word 17 = `0x23a1`) is IRQ1's. A fourth new
+vector, word 26 = `0x2645`, is IRQ10's entry at local `0x2644`, not yet
+examined. All four are genuine interrupt vectors sharing this object's
+dispatcher conventions, not internal helpers reached from IRQ8/IRQ9 —
+and the open stack's own `radio_seq.S` deliberately enables *only*
+IRQ8/IRQ9 in `NVIC.ISER0` ("Enable only those bounded peripheral
+events"), so IRQ0/IRQ1/IRQ10/IRQ13 never fire at all on the open build.
+That is this project's own existing, deliberate scope boundary, not an
+oversight — but it leaves one real open question: whether *stock's* own
+NVIC/SEQIEN enables any of these during the real hardware TX scenario
+this project is chasing. No stock NVIC.ISER0 capture is in hand yet, so
+this is unconfirmed either way.
 
-**Status: `fn_0x19d0` is the only one of this new batch fully lifted and
-verified so far.** `0x2362`/`0x2390`/`0x23a0` and their as-yet-unexamined
-callees (`fn_0x1a18`, `fn_0xc02`, `fn_0x13b0`, `fn_0xa76`) remain to be
-traced and lifted. None of this changes the `ACTIVETXFCD` picture yet —
-no direct evidence ties `0x2362`'s `RAC.STATUS` bit 19 branch, or any of
-`fn_0x19d0`'s five call sites, to the real TXWARM/TX path this project's
-own hardware traces exercise; `fn_0x894`'s own
-`SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots (§7.3) remain the
-only structurally plausible link, and this object only *reads* those
-slots, never writes them, so their live value (and therefore whether
-`0x2362` is really one of their targets) isn't something static analysis
-of this object alone can settle.
+`fn_0x2362` tests `RAC.STATUS` bit 19 and branches between a five-call
+chain (`fn_0xd34`/`fn_0x1a18`/`fn_0xc02`/`fn_0x19d0(1)`/`fn_0x13b0`) or
+skipping straight to its ack, either way acknowledging `RAC.SEQIF` bit 29
+via the shared `fn_0x7c8` helper (§7.2) — a *different* bit than IRQ8's
+own bit 24. `fn_0x2390` is simpler: calls `fn_0x894`, then unconditionally
+acks bit 16. Both are now fully lifted and verified in
+`sequencer-decomp/src/fn_0x2362_0x2390.c`.
+
+`fn_0x23a0` (IRQ1) is longer and now also fully lifted and verified, in
+`sequencer-decomp/src/fn_0x23a0.c`. It opens with the *exact* same
+`bl 0x7ac; movs r0,#5; str [0xA802113C]=5; bl 0x7be` gate-pulse prologue
+IRQ8 uses (`0xA802113C` is a RAC register this project hadn't named
+before — `RAC+0x13C`'s own SET alias) — a real shared convention across
+at least two vectors, not a coincidence — then diverges completely: reads
+`RAC+0x40`'s raw (un-aliased) register for the first time this project
+has done so (previously only pulsed via its SET/CLR aliases), testing
+bits 0 and 9 (meanings not otherwise established); conditionally calls
+`fn_0xa76`; calls `fn_0x894`; copies a SEQRAM-local word pair
+(`0x3FB8`/`0x3FBC` → `0x3E48`); and, gated on that same bit 0, runs a
+busy-wait loop computing `now - target` from `PROTIMER+0x20` against a
+SEQRAM-local word at `0x3ED0`, with a wraparound correction that adds
+**`PROTIMER+0x38`** — the *exact same register* §7.3.1 already
+established feeds `fn_0xd38`'s own "distance" computation — until the
+result crosses a bare `0xFF01` threshold (unit not established; not a
+register address, so not treated as a provenance-commented peripheral
+constant the way addresses are elsewhere in this project). The two
+functions are not shown to be the same mechanism, but sharing this one
+specific register across both is a concrete new lead on what
+`PROTIMER+0x38` actually is. Finishes by conditionally calling
+`fn_0x388`, then `fn_0xace`/`fn_0xb74`, clears `RAC+0x40` CLR-alias bit
+0, and acks `RAC.SEQIF` bit 17.
+
+This lift's first draft had a real bug, caught only by diffing the
+compiled output against the original instruction-by-instruction (the
+standing verify-by-compiling rule, again): the wraparound correction's
+guard compiled from `target > now` where the original's `bcc` only skips
+the correction when `target < now` *strictly* — meaning the original
+applies the correction on equality too, which `>` silently excluded.
+Fixed to `target >= now`; recompiling then showed gcc had independently
+turned the `0xFF01` loop threshold into an equivalent `<= 0xFF00`
+comparison (one `movs`+`lsls` instead of a 32-bit literal load) — a
+cheaper, bit-identical encoding of the same comparison, confirmed
+equivalent, not a second bug.
+
+**Status: `fn_0x19d0`, `fn_0x2362`, `fn_0x2390`, and `fn_0x23a0` are now
+fully lifted and verified.** `fn_0x2644` (IRQ10) and the as-yet-unexamined
+callees this batch pulled in (`fn_0x1a18`, `fn_0xc02`, `fn_0x13b0`,
+`fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
+lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
+these vectors is outside the open stack's own enabled-IRQ set by design,
+and no direct evidence ties any of them to the real TXWARM/TX path this
+project's own hardware traces exercise. `fn_0x894`'s own
+`SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots (§7.3) remain a
+structurally plausible link for *some* dispatch path, but this object
+only *reads* those slots, never writes them, so their live value isn't
+something static analysis of this object alone can settle. The
+`PROTIMER+0x38` connection to `fn_0xd38` is the one new thread worth
+pulling on next.
