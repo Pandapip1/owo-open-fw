@@ -523,6 +523,27 @@ The resulting build must be labelled stage 2.5 in paths and reports and can
 only distinguish M33-side configuration from coprocessor behavior. It cannot
 be promoted, shipped, or counted as stage 3.
 
+The first reproducible stage-2.5 run used the exact 20,480-byte capture
+`stage2-seq-frcram-2a2c.bin` (SHA-256
+`096de38f7f0262c4af9e2caeeaf78cf71f20c2f2c88c9cad34c8dc89e3e52c2f`),
+whose vector table has SP `0x3e30` and Thumb reset vector `0x2a2d`. The build
+completed from the vendored Zephyr tree and open M33 module at 177,800 flash
+bytes and 32,664 RAM bytes. The generated image declares
+`efr32_radio_seq_image_is_open = false`, and configure emits the expected
+stage-2.5 warning. OpenOCD's SRAM preflight and fast erase/write/verify all
+passed before starting the board.
+
+A 25-second independent BlueZ LE scan did not observe the staged AdvA
+`E9:CE:28:2D:07:20`. This repeats the earlier debugger-injection result in a
+reproducible firmware build: the matching proprietary coprocessor state is not
+sufficient with the current open M33 register/packet contract. It does not
+show that the proprietary behavior is unnecessary. The identical stage-2.5
+flash image under QEMU reports `bt_enable: 0`, `adv_start: 0`, and reaches
+`RAC.CMD.TXEN`; hardware also reaches that broad state boundary in stage 3,
+so this is not an on-air success. QEMU's existing eager TX snapshot still
+omits the silicon FRC continuation/abort behavior and remains the simulator
+divergence to fix once that contract is decoded.
+
 The private radio Cortex-M0+ firmware is part of the open driver, not a
 precondition supplied by RAIL, a debugger, or retained SEQRAM. Its reviewed
 source and linker script live in `modules/efr32-radio/sequencer/`. CMake links
