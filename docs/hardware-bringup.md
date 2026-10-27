@@ -547,7 +547,7 @@ so this is not an on-air success. QEMU's existing eager TX snapshot still
 omits the silicon FRC continuation/abort behavior and remains the simulator
 divergence to fix once that contract is decoded.
 
-The corrected isolation build extracts the immutable sequencer section
+The next attempted isolation build extracted the immutable sequencer section
 `.rodata.sli_rail_6c7715fcf8a536bb641f7a33742a842f` directly from the vendored
 SDK's `generic_efr32xg22_release_seq.o`. The 12,140-byte image has SHA-256
 `b775ea32a025dd829f4c86503d3d812f149ca9441884082ee533354b242d08d4`, SP
@@ -557,11 +557,35 @@ It remains outside the repository under
 `Projects/owo-bg22-proprietary-baselines/stage2.5-sdk-sequencer/`. The corrected
 Zephyr image uses 169,460 flash bytes and 32,664 RAM bytes. OpenOCD again
 passed SRAM preflight, erase, write, and verification. A 30-second BlueZ LE
-scan did not observe `E9:CE:28:2D:07:20`. The identical corrected image in
-QEMU reports `bt_enable: 0`, `adv_start: 0`, and `RAC TXEN observed`. Thus the
-clean stage-2.5 result is negative on silicon while QEMU still declares the
-launch successful too early; the remaining on-air blocker is not explained
-solely by substituting the proprietary coprocessor code.
+scan did not observe `E9:CE:28:2D:07:20`. A reset-aligned AP3 breakpoint then
+proved this was still not a valid isolation image: execution reached its
+`0x2a2c` reset entry but faulted because the code references the SDK-populated
+shared FRCRAM ABI beyond the end of that section. `readelf` confirms that the
+object contains no relocations; the missing dependency is initialized shared
+state, not a relocated or omitted code section. This result is retained as a
+second invalid negative attempt rather than being presented as stage-2.5.
+
+The valid stage-2.5 image was captured from the proven stock stage-2 firmware
+at SDK instruction `0x12da0`, immediately before its write of the named
+`RAC.CTRL.CPUWAITDIS` field through the SET alias. At that boundary base
+`RAC.CTRL` is `0x381`. The resulting 20,480-byte
+`stage2-pre-release-frcram.bin` has SHA-256
+`404a691ea8c104ab81ad8e7350bd0707fb56179d7f839a78e241628ddc2715f3`.
+Its first 12,140 bytes are byte-for-byte identical to the archive-derived code
+section, including SP `0x3e30` and reset vector `0x2a2d`; the remainder is the
+SDK-initialized shared ABI before the private core can mutate it.
+
+The valid image builds with vendored Zephyr at 177,800 flash bytes and 32,664
+RAM bytes, and passed OpenOCD preflight, erase, write, and verification. A
+30-second scan still did not observe `E9:CE:28:2D:07:20`. At the second launch,
+the completed first launch left BUFC channel 0 at write offset 11/read offset
+0, `FRC.IF=0`, and RAC base status `7`: the proprietary private core did not
+consume the open driver's packet under the current M33 launch/shared-memory
+contract. The identical image in QEMU reports `bt_enable: 0`, `adv_start: 0`,
+and `RAC TXEN observed`. Therefore stage 2.5 narrows the hardware blocker to
+the open M33-to-coprocessor ABI or launch contract; it does not show that the
+proprietary private-core behavior is unnecessary. QEMU still advances at
+`TXEN` without modeling that contract and is observably too permissive.
 
 The private radio Cortex-M0+ firmware is part of the open driver, not a
 precondition supplied by RAIL, a debugger, or retained SEQRAM. Its reviewed
