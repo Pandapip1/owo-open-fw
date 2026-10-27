@@ -644,6 +644,8 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_SEQ_STACK_TOP 0x00003E00U
 #define EFR32_SEQ_IDENTITY_ADDRESS 0xB0004FE0UL
 #define EFR32_SEQ_IDENTITY_OPEN_V1 0x4F535131U
+#define EFR32_SEQ_TRACE_TXWARM_ADDRESS 0xB0004FC0UL
+#define EFR32_SEQ_TRACE_TX_ADDRESS 0xB0004FD0UL
 
 extern const uint8_t efr32_radio_seq_image[];
 extern const size_t efr32_radio_seq_image_size;
@@ -657,6 +659,32 @@ extern const bool efr32_radio_seq_image_is_open;
  */
 #define EFR32_SEQ_TX_PREPARE_FLAGS_ADDRESS 0xB0003EC4UL
 #define EFR32_SEQ_RX_AFTER_TX_INHIBIT BIT(5)
+
+static inline volatile uint32_t *radio_reg32(uintptr_t address);
+
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+static void efr32_radio_trace_previous_seq_launch(void)
+{
+	static bool reported;
+	volatile uint32_t *txwarm = radio_reg32(EFR32_SEQ_TRACE_TXWARM_ADDRESS);
+	volatile uint32_t *tx = radio_reg32(EFR32_SEQ_TRACE_TX_ADDRESS);
+
+	/* These words are written before the M0+ acknowledges each state event.
+	 * The first M33 launch sees the reset zeros; the next scheduled launch is
+	 * the first safe point at which to report the completed prior handoff.
+	 */
+	if (!reported && (txwarm[0] || txwarm[1] || txwarm[2] || txwarm[3] ||
+			 tx[0] || tx[1] || tx[2] || tx[3])) {
+		reported = true;
+		printk("efr32-radio trace: seq-prev txwarm=%08x/%08x/%u/%u "
+		       "tx=%08x/%08x/%u/%u\n",
+		       txwarm[0], txwarm[1], txwarm[2], txwarm[3],
+		       tx[0], tx[1], tx[2], tx[3]);
+	}
+}
+#else
+static inline void efr32_radio_trace_previous_seq_launch(void) { }
+#endif
 
 /*
  * Temporary board-specific PA characterization from the working stage-2
@@ -2225,6 +2253,7 @@ void radio_tx_enable(void)
 	while (!radio_is_idle()) {
 	}
 	status_before = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET);
+	efr32_radio_trace_previous_seq_launch();
 
 	/*
 	 * A watchpoint on the working controller shows per-packet WRITEDATA stores
