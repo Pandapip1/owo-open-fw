@@ -1272,6 +1272,24 @@ mechanics only... [not choosing] jobs, priorities, channels, deadlines."
 `0x894`/`0xd38` is exactly the kind of job/channel-dependent policy that
 commitment excludes.
 
+**Checked, not just assumed: nothing writes the `0x3850`/`0x3854` function-
+pointer slots, in any image this project has access to.** A raw byte scan
+of the *entire* sequencer object (not just `fn_0x894`'s own body) for every
+literal reference to these two addresses finds exactly one hit each, both
+already inside `fn_0x894` itself — so no other sequencer function reads or
+writes them either. Checking further, whether stock's own M33-side RAIL
+library pokes these in during setup (the natural place for an M33→M0+
+callback handoff, the same shape as the mailbox doorbell in §7.5.4): a raw
+byte scan of `build-stage2/zephyr/zephyr.bin` (this project's known-working
+stock M33 image) for the non-secure/secure SEQRAM-alias forms of both
+addresses (`0xB0003850`/`0xB0003854`/`0xA0003850`/`0xA0003854`) finds
+**zero** hits. This de-prioritizes, rather than strengthens, the earlier
+hypothesis that this callback mechanism is the missing link to
+`ACTIVETXFCD`: if no image this project can inspect ever initializes these
+slots, the branch that reads them in `fn_0x894` is most likely dead on
+stock too for this scenario, not a live path the open stack is failing to
+service.
+
 `0xd38` resolves further than first read suggested, with one correction:
 a register tracked through many reassignments (GNU `objdump`'s literal-pool
 annotations only show *where* a loaded constant lives, not its value, so
