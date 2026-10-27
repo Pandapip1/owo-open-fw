@@ -1304,6 +1304,60 @@ The gate-pulse/SEQIF-ack mechanics in §7.2 are safe to add to `radio_seq.S`
 as named, bounded operations; `0x894`/`0xd38`'s dispatch logic should not be
 ported wholesale.
 
+### 7.3.1 `fn_0xd38` re-verified more rigorously: two real transcription bugs, and a second, unported gate pulse
+
+Going back over `sequencer-decomp/src/fn_0xd38.c`'s previously
+lower-confidence second half with the same rigor as `fn_0x894`'s already-
+verified first half (re-resolving every literal-pool reference against
+the raw capture rather than trusting the first pass) found two confirmed
+errors and one genuinely new, significant lead:
+
+* **Two swapped/misattributed register targets, confirmed wrong.** The
+  `distance < 8` branch's two writes had their targets swapped
+  (`RAC_0X18 = 6` and `OBS_BLOCK_AA001114 = BIT(16)`, not the reverse as
+  first written); `RAC_0X18` is consequently a write target on this path,
+  not read-only as its own comment originally claimed. Separately, the
+  unconditional block just after the `0x81`-mask test had both of its
+  addresses wrong too: resolving `0x10d4` and `0x10c0` directly against
+  the capture gives `0xA8021040` (the TXWARM gate's own SET alias,
+  `RAC_GATE_BASE_VAL_SRC+0x1000`) and `0xA8015020`, not
+  `PROTIMER_0X0C+0x2000`/`MODEM_0X44-0x1c4` as first written. Both caught
+  by re-deriving each literal from the raw bytes, not by compiling — the
+  code compiled cleanly both times; wrong addresses don't trigger a
+  compiler error.
+* **A clobbered `flags` value on the `distance < 8` path.** `movs
+  r5,#128` on that path unconditionally overwrites the same register the
+  function's first half accumulates `flags` into, discarding whatever it
+  held before. The `0x81`-mask test immediately after therefore always
+  evaluates against a literal `0x80` on that path, not the accumulated
+  value — reproduced by assigning `flags = 0x80U` in that branch rather
+  than leaving it as an unrelated local.
+* **The significant lead:** corrected, the unconditional block (reached
+  whenever the `0x81`-mask test does not take the `far_skip_table` exit)
+  pulses `0xA8021040` — **the exact same gate register `radio_seq.S`
+  already pulses bit 18 of for the main TXWARM sequence** — with a
+  *different* bit, `BIT(22)`, immediately followed by `OBS_BLOCK_A8015020
+  = BIT(21)` and `OBS_BLOCK_A8016100 = 1`. This is a previously
+  undocumented, second pulse of hardware this project already knows is
+  central to TX completion, reached from `fn_0x894`'s unconditional tail
+  call into `fn_0xd38` for ordinary TXWARM/TX servicing (`state_nibble`
+  values matching `TXWARM`/`TX`, not an edge case), not from some
+  RX-only or calibration-only branch.
+
+**Deliberately not ported yet.** This bit-22 pulse is real and its
+target register is exactly the one this whole investigation keeps
+returning to, which makes it tempting to add immediately — but its
+surrounding gate (the `distance` computation from live `PROTIMER`/`FRC`
+timing registers, and the `flags & 0x81` test, both still only partially
+verified) is not understood well enough to know whether it is safe to
+fire unconditionally, or must be timed/conditioned the same way stock
+conditions it. Pulsing an undertested bit on the project's most
+safety-sensitive register under the wrong conditions could plausibly make
+things worse, not better. Recorded here as the most promising concrete
+lead for `ACTIVETXFCD` (§7.4/§7.6) found so far, pending either a fuller
+static resolution of the gating conditions or live hardware tracing of
+when stock actually takes this path.
+
 ### 7.4 `FRC.STATUS.ACTIVETXFCD` is unset where it should be set
 
 `FRC.STATUS` (`0xA8004008`, read-only, mask `0x01FFFFFF`) was previously
