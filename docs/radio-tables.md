@@ -17,6 +17,7 @@ model; **[I]** = inference, not confirmed. No blob bytes or disassembly are repr
 | RAC | 0xA8020000 [S] / 0xB8020000 [NS] | [F] public table plus stock disassembly literals; generated `RAC_S.py` / `RAC_NS.py` |
 | RF mailbox | 0xA8028000/0xA802C000 [S], 0xB8028000/0xB802C000 [NS] | [F] xG22 RAIL archive and stock IRQ access; see §1.1 |
 | BUFC | 0xAA000000 | [F] layout matches the xG21 public header; matched by stock init trace |
+| (unclaimed) 0xA8005000 | 0xA8005000 | [I] directly disassembled stock sequencer code touches `0xA8005064`/`+0x1000` SET alias `0xA8006064`; no public register model located yet; see §7.2 |
 
 The public rev-B2 models establish a narrower, usable fact: FRC, AGC, RFCRC, MODEM, SYNTH, and RAC each have writable one-bit `EN.EN` at `+0x004` (their respective `*_S_register.py:24-37` and `*_S_field.py:17-24` files). `radio_setup()` enables exactly those six blocks, and QEMU masks the matching latches to bit zero with a native regression. Separately, the stock helper writes `1` at secure BUFC and PROTIMER `+0x004` at `flash-stock.bin` offsets `0x26de4` and `0x26dfc` (target literals `0xAA000004` and `0xA801C004` at `0x2723c` and `0x2724c`); the HAL mirrors those direct writes through the established non-secure aliases because it uses both blocks. This is not a claim that either bit is named `EN`, nor does it establish ordering, reset sequencing, or interrupt policy. No conclusion is drawn for PRORTC. IRQ lines (AGC 31 ... SYNTH 42) are [F] from the device header
 (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h`).
@@ -84,7 +85,7 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T2 | RAC command + state/status registers | **[F] core command/state map known; sequencer behavior still abstract** | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_is_*`, `radio_status_reset`, TIFS switch |
 | T3 | PHY table apply (MODEM/FRC/AGC/SYNTH data) | **[F] format decoded; address-independent BLE base plus 1M/2M/coded S2/S8 deltas imported; PHYINFO remains unresolved** | `radio_phy_set` |
 | T4 | SYNTH channel/frequency registers | **[F] advertising frequencies implemented; a complete working `RAIL_StartTx` trace proves the physical 2 MHz index is written to `FRC.WCNTCMP2` and `SYNTH.CHSP` while `SYNTH.CHCTRL` remains zero; the HAL and QEMU medium now use that contract** | `radio_freq_chan_set` |
-| T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; `radio_pkt_configure()` clears the named FCD0..3 `SKIPWHITE` field and hardware readback matches stock for that field; remaining length/header and sequencer handoff behavior is incomplete** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
+| T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; `radio_pkt_configure()` clears the named FCD0..3 `SKIPWHITE` field and hardware readback matches stock for that field; remaining length/header and sequencer handoff behavior is incomplete. §7 adds a static decomp of the stock IRQ8/IRQ9 handlers and a hardware-observed `FRC.STATUS.ACTIVETXFCD` divergence that sharpens, but does not yet close, the open fault-boundary question from `docs/hardware-bringup.md`.** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; a dormant normalized-PDU RX copy helper enforces controller bounds, but FRC/BUFC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
 | T7 | PA power registers | **[F] RAIL routes raw and dBm requests through configuration-dependent helpers; a board-safe PA setting remains unresolved** | `radio_tx_power_*` |
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
@@ -1194,3 +1195,142 @@ whether a RAIL-facing wake API is needed.
 4. Then RX window for SCAN_REQ/CONNECT_IND (T9, T5), then software TIFS (T8).
 
 Hardware validation is a separate, later step and must start with a sniffer and a dummy load, never the suit's output stage.
+
+## 7. Stock sequencer static decomp and the `ACTIVETXFCD` divergence (2026-10-27) [F]
+
+### 7.1 Provenance
+
+`stage2.5-sdk-sequencer/generic_efr32xg22_release_seq.o` (SHA-256
+`b57b5fa7...`) is a Cortex-M0+ object extracted in an earlier session; its
+origin was not re-verified in this pass, but `sl_rail_util_sequencer.c`
+(Zlib-licensed, same tree already cited elsewhere in this file) shows the
+shipped RAIL library selects a sequencer image via
+`sl_rail_load_sequencer_image_0/1()`, consistent with a loader-supplied
+microcode blob rather than source compiled by the application. Decisive
+independent corroboration: `cmp` against `tests/hardware-lockstep/`'s
+live AP3 capture of the actually-running SEQRAM
+(`stage2-seq-frcram-2a2c.bin`, SHA-256 `096de38f...`, 20480 bytes) shows the
+two are byte-identical except for one byte within the reset-vector word
+(object `0x2a2c`, live `0x2ade`; both odd/Thumb). Every address and
+instruction cited below is read directly from these two files; no literal
+disassembly text is reproduced, per the house rule at the top of this file.
+
+### 7.2 The gate-pulse and SEQIF-ack helpers (fully resolved)
+
+The vector table (word 0 = `0x3e30`/`0x3e3e`-ish stack top, matching this
+project's own `EFR32_SEQ_STACK_TOP`) places `IRQ8` at `0x2578` and `IRQ9` at
+`0x25c8`, matching the independently live-observed `0x2578` already recorded
+in `tests/sequencer-probe/README.md`.
+
+Two small subroutines, each reached by `bl` from IRQ8, resolve completely:
+
+* **`0x7ac`** writes bit 18 (`0x00040000`) to `0xA8021040` (the SET alias of
+  a base register at `0xA8020040`), then busy-waits for bit 2 of
+  `0xA8020040` itself to clear. This is exactly the gate pulse
+  `tests/sequencer-probe/probe.S` already names `OBS_IRQ8_GATE_SET` /
+  `OBS_IRQ8_GATE_BASE` / `OBS_IRQ8_GATE_BIT`, now with its wait condition
+  resolved: it is a busy-wait on bit 2 of the *base* (non-aliased) register,
+  not a fixed delay.
+* **`0x7be`** writes the same bit 18 through the CLR alias `0xA8022040`
+  (`OBS_IRQ8_GATE_CLR`) and returns immediately — no wait.
+* **`0x7c8`** is a general-purpose helper, called with a mask in `r0`: it
+  clears that mask in `RAC.SEQIF` via the CLR alias `0xA8022028` (this
+  project's `EFR32_RAC_SEQIF_CLEAR`), then busy-waits until `RAC.SEQIF`
+  (`0xA8020028`, `EFR32_RAC_SEQIF`) reads clear on that same mask. IRQ8 calls
+  it with `r0 = bit 24 (0x01000000)` as its last action before returning.
+* **`0x1bda`** performs exactly three unconditional CLR-alias writes,
+  already named by `probe.S` as `OBS_IRQ8_CLR_2044`/`_2040`/`_2008`: clear
+  bits `{0,1}` of `0xA8020044`, bits `{3,5,7}` of `0xA8020040` (the *same*
+  base register as the gate, different bits), and bit 4 of `0xA8020008`, all
+  via their CLR aliases at base `0xA8022008`.
+
+IRQ8's top-level body is: `bl 0x7ac` (gate+wait) → write `5` to the SET alias
+of a fifth, still-unnamed RAC register at `0xA8020000+0x3C` (`0xA802113C`) →
+`bl 0x7be` (gate clear) → `bl 0x894` (§7.3) → `bl 0x1bda` (three clears) →
+clear-and-wait `RAC.SEQIF` bit 24 via `0x7c8`. IRQ9's body opens with the
+*same* `bl 0x894` call, so `0x894` is a shared "RAC service" routine, not
+IRQ8-specific.
+
+### 7.3 `0x894`/`0xd38`: a stateful dispatcher, not a store sequence (partially resolved)
+
+`0x894` reads ARM core `SCB->ICSR` (`0xE000ED04`, bits `[31:23]`) and
+`NVIC->ISPR[1]` (`0xE000E200`, bit 15 → external IRQ 47's pending bit), and
+dereferences **four SEQRAM-local addresses never written by this object
+itself**: a function pointer at local `0x3854`, a flag word at `0x3eec`, a
+pointer at `0x3fcc` (passed into a further callee), and a byte/word flag
+pair at `0x3eb8`/`0x3f68`. It also performs a SET/CLR-aliased read-modify
+sequence on a previously undocumented register pair at `0xA8005064` /
+`0xA8006064` (§1 block map). Its unconditional tail calls `0xd38`, which is
+itself a substantial (continues past 100+ instructions already read)
+bit-flag combination routine over more local state plus `0xA8004000`-range
+(FRC) register reads — not yet fully decoded. `0xd34`, reached from one
+branch, is a bare `bx lr` (no-op) in this image.
+
+This matters for *how*, not just *whether*, this project replicates stock
+behavior: `radio_seq.S`'s own header already commits to "bounded peripheral
+mechanics only... [not choosing] jobs, priorities, channels, deadlines."
+`0x894`/`0xd38` is exactly the kind of job/channel-dependent policy that
+commitment excludes. It is also the concrete, hardware-proven reason a
+blind register-store replay cannot work: `tests/sequencer-probe/README.md`
+already records that replaying the *complete* captured IRQ8/IRQ9 MMIO
+store sequence "still emitted no observable advertisement," and
+`trace_stores.py --mmio-min 0xA0000000` structurally cannot record the four
+SEQRAM-local reads above — a replay that only reproduces addresses
+`>= 0xA0000000` cannot reproduce decisions keyed on addresses `< 0x5000`.
+The gate-pulse/SEQIF-ack mechanics in §7.2 are safe to add to `radio_seq.S`
+as named, bounded operations; `0x894`/`0xd38`'s dispatch logic should not be
+ported wholesale.
+
+### 7.4 `FRC.STATUS.ACTIVETXFCD` is unset where it should be set
+
+`FRC.STATUS` (`0xA8004008`, read-only, mask `0x01FFFFFF`) was previously
+unmapped in QEMU and undiscussed here. Its fields, by bit
+(`host_py_rm_studio_internal/full/efr32xg22/revB2/FRC_S_field.py`,
+`FRC_S_register.py`, same GitHub tree already cited throughout this file,
+ref `sisdk-2025.6`): `SNIFFDCOUNT[4:0]`, `ACTIVETXFCD[5]`,
+`ACTIVERXFCD[6]`, `SNIFFDFRAME[7]`, `RXRAWBLOCKED[8]`, `FRAMEOK[9]`,
+`RXABORTINPROGRESS[10]`, `TXWORD[11]`, `RXWORD[12]`, `CONVPAUSED[13]`,
+`TXSUBFRAMEPAUSED[14]`, `INTERLEAVEREADPAUSED[15]`,
+`INTERLEAVEWRITEPAUSED[16]`, `FRAMEDETPAUSED[17]`, `FRAMELENGTHERROR[18]`,
+`DEMODERROR[19]`, `FSMSTATE[24:20]`.
+
+`tests/hardware-lockstep/stage2-working-irq8-frc.bin` (captured from the
+confirmed-working stock controller at the AP3 IRQ8 breakpoint) reads
+`STATUS = 0x00000060`: `ACTIVETXFCD=1, ACTIVERXFCD=1`, everything else
+(including `FSMSTATE`) zero. `tests/hardware-lockstep/stage3-open-first-irq-frc.bin`
+(captured at the open stack's own, equivalent first IRQ8) reads
+`STATUS = 0x00001000`: `ACTIVETXFCD=0`, `RXWORD=1` instead, everything else
+zero. The same two captures' `FRC.IF`/`FRC.SEQIF` already differ far more
+starkly — stock reads `0x601a0e51` (bit 0 `TXDONE` set) where open reads
+`0x40020c04` (bit 2 `TXABORTED` set, no `TXDONE`/`RXDONE`) — which is the
+value `docs/hardware-bringup.md` already decodes and already concludes
+aborts "before either open M0+ state handler can influence the
+transaction."
+
+**Caveat, stated plainly:** the `stage2-working-irq8-*` captures were taken
+from a free-running stock controller already mid-advertising, so they may
+represent a later repeat cycle rather than the controller's first-ever IRQ8
+(several other registers in the same snapshot — e.g. `RAC`'s `0xA802003C`
+region reads a large nonzero value on stock and exactly `0` on open — look
+like accumulated steady-state activity, not reset state). `ACTIVETXFCD`
+matching `stage2`'s confirmed-working `IRQ9` capture too (same `0x60`) makes
+this less likely to be a cycle-count artifact for that specific bit, but it
+is not yet a first-cycle-to-first-cycle comparison. `tests/hardware-lockstep/stage2-first-frc.bin`
+/`stage3-first-frc.bin` (a true, pre-TXEN baseline pair) agree at `STATUS=0`
+on both sides, which is at least consistent with `ACTIVETXFCD` being a
+TXEN-driven transition on both systems, not a static config difference.
+
+**Non-claim:** this does not identify *what* sets `ACTIVETXFCD`, only that
+it is set on the working path at IRQ8 and not on the open path. `FRC_S_CMD`
+has no TX-start command field (only `RXABORT` and resume/init bits), so the
+trigger is most likely internal hardware wiring from `RAC`'s TX-state
+transition, gated on some FRC precondition this project has not yet
+identified — plausibly, but not yet shown to be, the `0x894`/gate-pulse
+mechanics in §7.2–7.3.
+
+**Recommended next step:** a single-step poll of `FRC.STATUS` across the
+`RAC.CMD.TXEN` → first-IRQ8 window on the *working* stock controller (same
+technique as `trace_stores.py`, polling a read instead of recording writes)
+to find the exact instruction after which `ACTIVETXFCD` flips, then check
+whether the open path ever reaches an equivalent point. This was not
+attempted in this pass.
