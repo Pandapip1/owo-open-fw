@@ -585,13 +585,25 @@ differ from the first at `0x3d7c`, independently confirming that a monolithic
 FRCRAM dump is not a deterministic firmware artifact.
 
 Several fields in the deterministic shared range are populated again between
-private-core release and the working stock transmit. They include M33 code
-pointers into RAIL support routines and runtime timing/calibration values.
-This explains why the archive's immutable M0+ code section alone cannot run,
-and why reproducing only the pre-release bytes does not establish the complete
-per-launch ABI. These values are reverse-engineering evidence, not candidate
-magic constants: each field must be classified by its writer and consumer
-before either a compatibility shim or an open semantic replacement is added.
+private-core release and the working stock transmit. Initial symbol lookup
+made some of those small integer values appear to be M33 code pointers, but
+static M0+ xrefs disprove that classification. The six actual indirect-call
+hook slots are local FRCRAM words `0x3844..0x3858`; call sites at M0+ PCs
+`0x090e`, `0x09a2`, `0x235e`, `0x24d8`, and `0x2c88` load from that table.
+All six contain Thumb address `0x2a9b` both before release and at the working
+TX boundary, so they select the private image's own handler rather than an M33
+RAIL callback. For example, M0+ code uses local words `0x3fc4` and `0x3fcc`
+as data operands selected by radio-state branches, not as indirect branch
+targets; their accidental resolution to M33 symbols has no ABI meaning.
+
+The later-populated words are therefore runtime state and timing/calibration
+parameters until a specific writer and consumer proves a narrower meaning.
+This still explains why the archive's immutable M0+ code section alone cannot
+run, and why reproducing only the pre-release bytes does not establish the
+complete per-launch ABI. These values are reverse-engineering evidence, not
+candidate magic constants: each field must be classified by its writer and
+consumer before either a compatibility shim or an open semantic replacement
+is added.
 
 The valid image builds with vendored Zephyr at 177,800 flash bytes and 32,664
 RAM bytes, and passed OpenOCD preflight, erase, write, and verification. A
