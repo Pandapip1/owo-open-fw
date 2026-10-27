@@ -3,6 +3,9 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # nixpkgs unstable dropped Intel Darwin in 26.11. Keep that host usable
+    # from the same flake while it remains supported by the 26.05 branch.
+    nixpkgs-darwin-x86.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-parts.url = "github:hercules-ci/flake-parts";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -42,6 +45,36 @@
           # was developed in, so it is untested.)
           armGcc = pkgs.gcc-arm-embedded-13;
 
+          # OpenOCD master contains the Silicon Labs Series-2 DCI/MSC support
+          # needed to erase and program the BGM220. Keep this in the flake so
+          # Linux and Darwin hosts use the same audited debugger revision.
+          openocd = pkgs.openocd.overrideAttrs (old: {
+            version = "0.12.0-unstable-2026-10-24";
+            src = pkgs.fetchFromGitHub {
+              owner = "openocd-org";
+              repo = "openocd";
+              rev = "cb0c224e936091156ecf3025ba05657408ed64c8";
+              hash = "sha256-RKDOs7CaTAc61Ae6TPaG9oG8zHYfL62DvZXIxvXmGgA=";
+            };
+            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+              pkgs.autoconf
+              pkgs.automake
+              pkgs.libtool
+              pkgs.which
+            ];
+            preConfigure = ''
+              ./bootstrap nosubmodule
+            '';
+            meta = old.meta // {
+              platforms = [
+                "x86_64-linux"
+                "aarch64-linux"
+                "x86_64-darwin"
+                "aarch64-darwin"
+              ];
+            };
+          });
+
           # Python modules west and Zephyr's build scripts import: scripts/requirements-base.txt
           # minus the compliance-only entries (reuse, spdx-python-model).
           python = pkgs.python3.withPackages (
@@ -71,7 +104,12 @@
           );
         in
         {
-          _module.args.pkgs = import inputs.nixpkgs {
+          _module.args.pkgs = import (
+            if system == "x86_64-darwin" then
+              inputs.nixpkgs-darwin-x86
+            else
+              inputs.nixpkgs
+          ) {
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
@@ -81,6 +119,7 @@
               rustToolchain
               python
               armGcc
+              openocd
               pkgs.cmake
               pkgs.ninja
               # Host dependencies for the pinned QEMU submodule.  Keeping
@@ -132,6 +171,42 @@
               echo "               ninja -C build/qemu qemu-system-arm"
               echo "  host tests:  cargo test --manifest-path crates/owo-core/Cargo.toml"
               echo "               cargo test --manifest-path modules/owo-stim/rust/Cargo.toml"
+            '';
+          };
+
+          packages.openocd = openocd;
+
+          # Standalone ARMv6-M firmware for the BG22 radio sequencer core.
+          # This deliberately has its own output rather than being linked as
+          # M33 code: hardware boots it from private SEQRAM at local address 0.
+          packages.sequencer-probe = pkgs.stdenvNoCC.mkDerivation {
+            pname = "owo-bg22-sequencer-probe";
+            version = "0.1.0";
+            src = pkgs.lib.cleanSourceWith {
+              src = ./tests/sequencer-probe;
+              filter = path: type:
+                let name = baseNameOf path;
+                in !(type == "directory" && pkgs.lib.hasPrefix "build" name);
+            };
+            nativeBuildInputs = [ armGcc ];
+            dontConfigure = true;
+            buildPhase = ''
+              runHook preBuild
+              mkdir build
+              arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -nostdlib \
+                -Wa,-defsym,STOP_EXCEPTION=0 \
+                -Wl,--build-id=none -Wl,-T,$src/link.ld \
+                $src/probe.S -o build/sequencer.elf
+              arm-none-eabi-objcopy -O binary \
+                build/sequencer.elf build/sequencer.bin
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/share/owo-bg22-sequencer
+              cp build/sequencer.elf build/sequencer.bin \
+                $out/share/owo-bg22-sequencer/
+              runHook postInstall
             '';
           };
 

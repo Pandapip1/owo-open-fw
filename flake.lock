@@ -34,6 +34,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-darwin-x86": {
+      "locked": {
+        "lastModified": 1792903400,
+        "narHash": "sha256-NMFXwzxYx7bg2DQdAYNlj4m+Xfl2/icx3shcMofoU+U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ba26c90ece3a71bf862ec76712d390c6105b6bde",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-26.05-darwin",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "nixpkgs-lib": {
       "locked": {
         "lastModified": 1790477367,
@@ -53,6 +69,7 @@
       "inputs": {
         "flake-parts": "flake-parts",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-darwin-x86": "nixpkgs-darwin-x86",
         "rust-overlay": "rust-overlay"
       }
     },
