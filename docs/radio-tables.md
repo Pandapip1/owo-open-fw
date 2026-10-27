@@ -2214,7 +2214,33 @@ unconditionally touches seven more RAC offsets — two of them (`0x10`,
 RAC access this project has decompiled so far. This single function names
 nine previously-unidentified RAC offsets
 (`0x10`/`0xE0`/`0x108`/`0x130`/`0x140`/`0x144`/`0x160`/`0x16C`/`0x174`).
-The remaining as-yet-unexamined callees (`fn_0x1a18`, `fn_0x13b0`,
+`fn_0x1a18` (also called from `fn_0x2362`) is the largest fully-traced
+function from this pass: a mode-selecting hardware setup sequence gated
+entry/exit on a raw, un-aliased `RAC+0x44` bit 17 (early-return if clear
+on entry; unconditionally cleared on exit — the same "service and ack"
+shape already established for `RAC.SEQIF` bits, here on a different
+register and convention). It reads a one-time snapshot of `RAC+0x3FC`
+and branches its whole body on that snapshot's bits 0/1, selecting one of
+three mutually exclusive value pairs written into `RAC+0x148` (both via
+its SET alias and, later, its CLR alias), and calls `fn_0x21d8` four
+times (arguments `1,1,4,1`, not yet examined — interspersed between
+hardware writes, the shape fits a short calibration-settle delay
+primitive, not confirmed). Names fourteen previously-unidentified
+addresses: `RAC+0x3FC`/`0x11C`/`0x114`/`0x148`/`0xB4`/`0x188`, plus two
+more offsets (`RAC+0x140`, `RAC+0x160`) this project had already named
+from *different* functions touching them through *different* mechanisms
+— `fn_0xc02.c` writes both directly/raw; this function touches the same
+two offsets through their CLR aliases instead, a real, now-documented
+case of one register reached two different ways by two different
+callers. Also names two `MODEM` offsets (`0xC4`, `0x24C`). Fully lifted
+and verified in `sequencer-decomp/src/fn_0x1a18.c`; the first draft
+missed a real write (folding a separate `RAC+0x11C` SET-alias store into
+the later `RAC+0x148` one), caught the same way as every other bug this
+pass has found — diffing the compiled output against the original
+instruction-by-instruction, not trusting the hand-trace on the first
+pass.
+
+The remaining as-yet-unexamined callees (`fn_0x21d8`, `fn_0x13b0`,
 `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
 lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
