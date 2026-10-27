@@ -1802,14 +1802,30 @@ from the one previously documented in §7.4 (`0x00001000`, `RXWORD=1`)
 for the same checkpoint, so *something* about the system's behavior has
 changed, just not the bit that matters.
 
-**Recommended next step:** a single-step poll of `FRC.STATUS` across the
-`RAC.CMD.TXEN` → first-IRQ8 window on the *working* stock controller (same
-technique as `trace_stores.py`, polling a read instead of recording writes)
-to find the exact instruction after which `ACTIVETXFCD` flips, then check
-whether the open path ever reaches an equivalent point. This still has not
-been attempted; now that the open stack reaches and holds `RAC.STATUS=TX`
-rather than aborting immediately, this comparison is more likely to be
-informative than it was when this note was first written.
+**Done: the timing comparison this note recommended.** Single-stepping
+turned out to be the wrong tool (debug-halting this chip freezes the
+radio peripheral clocks too — confirmed directly: polling `FRC.STATUS`
+twenty times in a row *while halted* reads a constant `0x0` every time,
+only changing once the core is actually resumed and allowed to run
+freely). The working method instead: `bg22_reset_to_breakpoint` to catch
+each build at its own `RAC.CMD.TXEN` write (stock: `0xe3a0`, right after
+`stage2-m33.dis:0xe39a`; open: `0x16606`, right after
+`radio_tx_enable()`'s own TXEN write at `0x16602`), `resume`, a real
+(non-single-step) `sleep`, then `bg22_require_sram_execution` again to
+re-halt and read. Bisected on stock: `ACTIVETXFCD` is still `0` at 10 ms
+after `TXEN`, already `1` by 30 ms (coarse — most of that window is this
+measurement's own re-halt overhead, not real radio timing, so this
+bounds the *measurement*, not necessarily the hardware). At a clearly
+sufficient 100 ms, stock reads `FRC.STATUS=0x20` (`ACTIVETXFCD=1`) and
+`RAC.STATUS=0x400000` (`STATE=4`, **RXPD** — it has completed TX and
+moved on). The open stack at the identical 100 ms checkpoint reads
+`FRC.STATUS=0x1100200` (`ACTIVETXFCD=0`, unchanged from immediately after
+`TXEN`) and `RAC.STATUS=0x9400000` (`STATE=9`, **still TX**, not stuck
+earlier in the sequence and not aborted back to `OFF` either — genuinely
+holding steady in the TX state with the frame coder never engaging). This
+is now a clean, timing-eliminated comparison: stock finishes a complete
+TX cycle and advances in well under 100 ms; the open stack does not
+advance at all given 10x that margin.
 
 **Ruled out: software TIFS.** `radio_tmr_tifs_set()`, `radio_tmr_hcto_configure()`,
 and the rest of the `radio_tmr_*` family are pure software bookkeeping on
