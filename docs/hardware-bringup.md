@@ -523,10 +523,13 @@ The resulting build must be labelled stage 2.5 in paths and reports and can
 only distinguish M33-side configuration from coprocessor behavior. It cannot
 be promoted, shipped, or counted as stage 3.
 
-The first reproducible stage-2.5 run used the exact 20,480-byte capture
+The first attempted stage-2.5 run used the 20,480-byte runtime capture
 `stage2-seq-frcram-2a2c.bin` (SHA-256
 `096de38f7f0262c4af9e2caeeaf78cf71f20c2f2c88c9cad34c8dc89e3e52c2f`),
-whose vector table has SP `0x3e30` and Thumb reset vector `0x2a2d`. The build
+whose vector table actually has SP `0x3e30` and Thumb reset vector `0x2adf`,
+not the previously reported `0x2a2d`. It also contains mutable FRCRAM state,
+so this run is retained as a negative experiment but is not a clean test of
+the proprietary coprocessor firmware. The build
 completed from the vendored Zephyr tree and open M33 module at 177,800 flash
 bytes and 32,664 RAM bytes. The generated image declares
 `efr32_radio_seq_image_is_open = false`, and configure emits the expected
@@ -543,6 +546,22 @@ flash image under QEMU reports `bt_enable: 0`, `adv_start: 0`, and reaches
 so this is not an on-air success. QEMU's existing eager TX snapshot still
 omits the silicon FRC continuation/abort behavior and remains the simulator
 divergence to fix once that contract is decoded.
+
+The corrected isolation build extracts the immutable sequencer section
+`.rodata.sli_rail_6c7715fcf8a536bb641f7a33742a842f` directly from the vendored
+SDK's `generic_efr32xg22_release_seq.o`. The 12,140-byte image has SHA-256
+`b775ea32a025dd829f4c86503d3d812f149ca9441884082ee533354b242d08d4`, SP
+`0x3e30`, and Thumb reset vector `0x2a2d`; the containing object has SHA-256
+`b57b5fa71557874355d1994fc565f05917722b9f5f9056d375aecde157097b64`.
+It remains outside the repository under
+`Projects/owo-bg22-proprietary-baselines/stage2.5-sdk-sequencer/`. The corrected
+Zephyr image uses 169,460 flash bytes and 32,664 RAM bytes. OpenOCD again
+passed SRAM preflight, erase, write, and verification. A 30-second BlueZ LE
+scan did not observe `E9:CE:28:2D:07:20`. The identical corrected image in
+QEMU reports `bt_enable: 0`, `adv_start: 0`, and `RAC TXEN observed`. Thus the
+clean stage-2.5 result is negative on silicon while QEMU still declares the
+launch successful too early; the remaining on-air blocker is not explained
+solely by substituting the proprietary coprocessor code.
 
 The private radio Cortex-M0+ firmware is part of the open driver, not a
 precondition supplied by RAIL, a debugger, or retained SEQRAM. Its reviewed
