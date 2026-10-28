@@ -20,21 +20,21 @@
  *
  * RAM CAVEAT, recorded honestly rather than silently assumed safe: this
  * firmware links at ~99.68% SRAM utilization (ninja's own build output).
- * There is no genuinely free scratch region. The addresses used here
- * (0x200007d0 for this probe's own code, matching every other probe in
- * this project; 0x20000900 for the copied table) fall inside the live
- * `bt_workq`/`acl_conns`/`db_hash`/`gatt_sc` globals (confirmed via
- * `nm -S`). This is the same region
- * bg22_require_sram_execution's own fixture and every prior probe in
- * this project have used throughout this entire investigation, and
- * every one of those tests reproduced the exact expected, stable
- * baseline afterward -- consistent with (not proof of) this specific
- * connectionless single-advertiser smoke test never touching its own
- * work-queue/ACL-connection state in the narrow pre-TXEN window being
- * probed, but it is a real, not fully eliminated risk, not a verified
- * absence of side effects. Do not extend this technique to a test where
- * Bluetooth connection/work-queue behavior is itself part of what is
- * being measured.
+ * There is no genuinely free scratch region. 0x200007d0 (this probe's
+ * own code) matches `bt_workq`, the same region every probe in this
+ * project uses. The 256-byte copied table was first tried at
+ * 0x20000900 -- that landed inside the GATT-related `acl_conns`/
+ * `db_hash`/`gatt_sc` globals and produced a confounded, invalidated
+ * result (the TX attempt aborted regardless of whether the interrupt
+ * was ever taken -- docs/radio-tables.md SS7.35). Moved to
+ * 0x20007d00: 256-byte-aligned (VTOR's low bits are hardware-forced to
+ * 0 for anything less) and entirely within the HCI-command/ACL-TX
+ * net_buf pools (`_net_buf_hci_cmd_pool`/`_net_buf_fragments`/
+ * `net_buf_data_acl_tx_pool`/`_net_buf_acl_tx_pool`, confirmed via
+ * `nm -S`), which this connectionless, no-HCI-command, no-connection
+ * smoke test should never touch. Still a real, not fully eliminated
+ * risk (there is no genuinely free SRAM anywhere in this firmware),
+ * not a verified absence of side effects.
  */
 .syntax unified
 .cpu cortex-m33
@@ -45,7 +45,7 @@
 .equ NVIC_IRQ36_BIT,     (1 << 4)      /* IRQ36 - 32 = bit 4 of ISER1 */
 
 .equ OLD_VECTOR_TABLE,   0x00000000    /* VTOR_NS, confirmed via probe-read-vtor.S */
-.equ NEW_VECTOR_TABLE,   0x20000900    /* 256-byte, 0x100-aligned -- moved clear of this probe's own code (0x200007d0-0x884, confirmed via `size`), which the copy loop would otherwise overwrite mid-execution, corrupting trivial_irq36_handler before it's ever used */
+.equ NEW_VECTOR_TABLE,   0x20007d00    /* 256-byte, 0x100-aligned -- moved clear of this probe's own code (0x200007d0-0x884, confirmed via `size`), which the copy loop would otherwise overwrite mid-execution, corrupting trivial_irq36_handler before it's ever used */
 .equ VECTOR_WORDS,       64
 .equ IRQ36_VECTOR_INDEX, 52           /* 16 fixed exceptions + IRQ36 */
 

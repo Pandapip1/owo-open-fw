@@ -3917,3 +3917,49 @@ entirely, like `tests/hardware-lockstep/m33-seq-txwarm.S`) or finding
 a genuinely unused RAM window in this specific firmware image (not
 attempted here). Hardware reconfirmed back to the exact baseline
 afterward, both times.
+
+### 7.36 §7.35's attribution retracted: it's the `VTOR` redirect itself, not the destination -- still not root-caused
+
+§7.35 attributed the abort to the copied vector table's SRAM
+destination corrupting live Bluetooth GATT globals
+(`acl_conns`/`db_hash`/`gatt_sc`). **That attribution was wrong, caught
+by the same "verify before moving on" discipline that caught the
+original false positive.** Moved the destination to `0x20007d00` --
+256-byte-aligned (`VTOR`'s low bits are hardware-forced to 0 for
+anything less, a bug in the first attempt's `0x20000900` too, though
+it happened not to matter there) and entirely within HCI-command/ACL-TX
+`net_buf` pools instead (`_net_buf_hci_cmd_pool`/`_net_buf_fragments`/
+`net_buf_data_acl_tx_pool`/`_net_buf_acl_tx_pool`) -- territory this
+connectionless, no-HCI-command smoke test should never touch. **The
+exact same abort happened anyway**, including in the isolation variant
+that never unmasks IRQ36.
+
+Went further: built `probe-vtor-only.S`, which does *only* the 64-word
+table copy and the `VTOR` write -- no `PROTIMER` touch, no `NVIC`
+touch, nothing else at all. **Still aborts to `OFF`, already by just
++30ms after resuming** (confirmed via a shortened checkpoint, not the
+usual 450ms). Tried to root-cause it with the same technique §7.27
+used successfully (a hardware breakpoint on `z_arm_fault`'s entry,
+armed before resuming, to catch a real fault before Zephyr's handler
+clears `CFSR`): **the breakpoint was never hit within a 2-second
+window.** This is itself informative -- whatever causes the abort is
+most plausibly not a CPU fault at all, but some other software path
+(a scheduling/timing decision elsewhere in the LLL or kernel) reacting
+to the `VTOR` change, or a fault type/path this specific catch doesn't
+cover. Not root-caused further; flagged honestly as unresolved rather
+than guessed at.
+
+**Net effect on the investigation:** redirecting `VTOR` on this live
+firmware -- for any destination tried, regardless of `PROTIMER`
+involvement -- reliably and near-immediately aborts the TX attempt via
+an unknown mechanism that isn't a caught CPU fault. This closes off
+"inject a real IRQ36 handler via a `VTOR`-redirected SRAM table into
+the running production firmware" as a technique entirely, not just a
+RAM-destination problem to route around. Testing the IRQ-handshake
+sub-hypothesis (still genuinely untested) needs a from-scratch bootable
+image with its own vector table instead -- there is no way to install a
+real interrupt handler in-place on this firmware image via this
+approach. All three `VTOR`-touching probes (`probe-irq-handler.S`,
+`probe-irq-handler-no-enable.S`, `probe-vtor-only.S`) are kept, along
+with this retraction, so the dead end and why it's a dead end are both
+on record. Hardware reconfirmed back to the exact baseline afterward.
