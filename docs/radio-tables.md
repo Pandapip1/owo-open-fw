@@ -4672,3 +4672,144 @@ engineering target in its own right (likely a checksum/signature the
 M0+'s own boot or mailbox-service path checks against the object's
 real bytes), but a different task from decompiling `fn_0x894`'s call
 tree, and not yet attempted.
+
+### 7.53 The M0+ AP3 single-stepping harness attempted -- found and fixed two real bugs, then found something much bigger: the "integrity gate" was partly a test-methodology artifact
+
+Picked up §7.52's open item: single-step the M0+ core directly (AP3,
+`tests/sequencer-probe/xg22-dual-core.cfg`) to see where it actually
+diverges, rather than inferring purely from the M33-side symptom.
+
+**AP3 access confirmed still working, and a reliable catch recipe
+found.** `tests/sequencer-probe/README.md`'s existing dual-core config
+(M33 GDB on 3333, M0+ on 3334) connects and examines cleanly on this
+OpenOCD build. The same "arm a breakpoint before the reset" principle
+`bg22_reset_to_breakpoint` already established for the M33 works for
+M0+ too, and more simply -- M0+ is plain Armv6-M with no Secure state
+to refuse the halt in the first place: arm `bp <addr> 2 hw` on
+`efm32.seq`, `resume` it, then pulse the M33's own
+`AIRCR.SYSRESETREQ` (`mww 0xe000ed0c 0x05fa0004` on `efm32.cpu`) --
+the M33's own reset cascades into redoing the whole RAC-driven M0+
+hold/release dance, and the pre-armed M0+ breakpoint catches the
+*exact* instant M0+ reaches its own reset vector (confirmed:
+`pc=0x00002a2c`, matching the already-known Reset_Handler address).
+Reused `tests/hardware-lockstep/trace_stores.py` unmodified for the
+actual single-stepping (it already defaults to port 3334 -- this tool
+was clearly built with exactly this use in mind).
+
+**Bug #1, found immediately: `build_patched_stage.sh`'s own splice
+script was corrupting the sequencer's vector table in every single
+test this whole `build-stage2.3` thread has ever run, stock or
+modified.** The very first AP3 catch attempt on the (apparently
+working, per §7.52) 10-function splice hit a genuine M0+ `HardFault`/
+lockup almost immediately (`pc=0xfffffffe`, garbage `msp`), not the
+expected reset-vector breakpoint. Tracing it down: `patched_seqram.bin`
+itself had a scrambled vector table. Root cause: GNU `dd`'s
+`seek=$appended_base` passed the *literal string* `"0x3000"` as a
+command-line argument -- and GNU `dd` parses `0x` as **a zero
+multiplier** (`dd: warning: '0x' is a zero multiplier`), not hex
+notation, silently treating `seek=0x3000` as `seek=0`. The ten
+relocated functions were being written starting at byte offset `0`
+-- directly over the vector table -- not at local `0x3000` as
+intended. The five small per-call-site patches were unaffected (they
+use `seek=$((off))`, arithmetic-evaluated by *bash* first, which does
+understand hex -- only the one appended-block `dd` was missing that
+wrapper). Fixed by adding the same `$(())` wrapper. Rebuilt: the
+vector table, the five call-site patches, and the appended block at
+`0x3000` are now all exactly where they should be (verified by
+direct byte inspection, not just "it built"). Re-tested on AP3: no
+more `HardFault` -- M0+ now boots cleanly to the identical resting
+point stock reaches (`pc=0x2bba`, `msp=0x3e30`).
+
+**Bug #2, found next: my own manual OpenOCD commands this session were
+using `board/efm32.cfg` (stock OpenOCD's own file, which sources
+`target/efm32.cfg` → `target/silabs/series0.cfg` -- wrong, Series 0
+Gecko) instead of `target/silabs/xg21.cfg` (what
+`scripts/flash-bg22-openocd.sh` actually uses, correct Series 2).**
+This was invisible for ordinary halt/read/breakpoint work (the generic
+`cortex_m` target behaves the same either way), but broke flash
+*writes* outright (`Error: Failed to write memory at 0x10000000`) the
+moment a test needed flash+run+check in one continuous session rather
+than delegating to the wrapper script.
+
+**With both bugs fixed, re-testing surfaced something far more
+significant than either bug: running flash+run+check in one
+*continuous* OpenOCD session (no disconnect/reconnect at any point)
+changes the outcome.** Checking **stock** this way --
+`bg22_fast_flash` then `sleep 500` then `halt`, all in one session --
+reaches `RAC.STATUS=0x00400000` (**`STATE=4`, `RXPD`** -- a real,
+successful TX-then-RX transition, same as every other confirmed-good
+stock measurement in this document). Checking stock the *other* way
+this session had been using for quick comparisons -- flash via the
+wrapper script (which runs its own session and exits), then open a
+*separate* fresh session and just `init`+`sleep`+`halt` with no reset
+of its own -- reliably catches stock stuck at the identical
+`pc=0x00013056` mailbox-wait this whole §7.5.4 thread has been
+chasing as a sign of sequencer-blob corruption. **Same stock binary,
+same hardware, two different outcomes, purely as a function of
+whether a fresh OpenOCD session's own connect/examine happens to land
+inside some real-time-sensitive window during early boot.** This is a
+test-methodology confound this project had not previously isolated:
+reconnecting a debug session (even just to `halt` and read, no
+breakpoints, no single-stepping) during this specific early window
+can itself cause the same hang §7.5.4 attributed entirely to blob
+modification.
+
+**This does not fully exonerate the splice, though -- re-tested both
+builds with the *identical*, now-confound-free continuous-session
+method, and they still disagree.** Stock: `RXPD`, success, every
+time tried this way. The (now vector-table-correct) 10-function
+`build-stage2.3`: still stuck at `pc=0x00013056`, `RAC+0x4C` bit 17
+still clear. So there is a real difference tied to the splice after
+all -- just not the all-or-nothing "any single byte anywhere trips an
+unlocated integrity gate" framing §7.5.4 built on data that, with
+hindsight, wasn't free of this exact confound. The more defensible
+framing now: `RAC+0x4C` bit 17 (already flagged by this project,
+`fn_0xd38.c`, as "new, unnamed, read-only" -- hardware-set, not
+software-set) gates a pre-existing, unmodified stock busy-wait loop at
+local `0x2b6a` (confirmed via AP3: M0+ parks there, repeatedly cycling
+through a real `wfi`, for as long as observed -- re-confirmed after
+letting it run completely freely for whole seconds, not a single-step
+artifact). Stock's real boot reaches this exact loop too, and plainly
+gets past it quickly enough in normal operation; the splice's extra
+~1.9 KB of copy length and its five relocated, far-jump call sites are
+the most likely source of whatever real-time shift keeps this specific
+run from reaching bit 17's trigger condition in time -- a genuine, if
+mundane, timing sensitivity in stock's own calibration/mailbox
+handshake, not a deliberate anti-tamper mechanism. What exactly sets
+`RAC+0x4C` bit 17, and how tight the real timing margin actually is,
+remains unestablished.
+
+**Net result:** two real, fixed bugs in this project's own tooling
+(the `dd` hex bug, the wrong target file); one major, now-documented
+methodological hazard for all future AP3/OpenOCD work on this chip
+(§7.54 below); and the splice-into-stock vehicle's own verdict
+narrowed from "mysterious integrity gate, blocks everything" to "a
+real timing sensitivity in a stock-only calibration path, triggered by
+splicing's own overhead" -- still blocking this specific validation
+technique, but no longer mysterious, and still independently confirmed
+irrelevant to `ACTIVETXFCD` (the open stack's own code never
+references the mailbox addresses at all, re-confirmed by direct grep
+this session).
+
+### 7.54 New standing methodology hazard: a fresh OpenOCD session's own connect/examine can itself hang this chip's early boot, indistinguishable from a real firmware bug unless ruled out
+
+Any check of this chip's state that connects a *new* OpenOCD session
+to hardware that is already running (rather than including its own
+fresh, in-session reset) risks observing a spurious hang that has
+nothing to do with the firmware under test -- confirmed directly in
+§7.53 on unmodified, known-good stock firmware. The project's own
+established `bg22_reset_to_breakpoint` pattern (arm a breakpoint,
+*then* pulse `AIRCR.SYSRESETREQ` from within that same session, then
+proceed) is not just a workaround for Secure-debug-disabled halt
+refusal -- it also happens to avoid this hazard, because it always
+performs its own fresh reset immediately after connecting, before any
+measurement. **Any test that flashes or connects in one OpenOCD
+session and then checks state in a separate, later session without
+first doing a fresh in-session reset should be treated as unverified
+until redone the safe way.** This was not an issue for the bulk of
+this project's own `ACTIVETXFCD` measurements, which have consistently
+used the `bg22_reset_to_breakpoint` pattern throughout -- but it did
+affect several of this session's own quick stock-vs-modified
+comparisons in §7.53 before being caught, and should be checked for in
+any future ad hoc hardware check that skips the full reset dance for
+convenience.
