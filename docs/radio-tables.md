@@ -2622,7 +2622,7 @@ pass (`RAC.STCTRL`'s write mask, and the M0+ core's own private `SysTick`
 actually counting) were both already correctly modeled; no QEMU fix was
 needed for either.
 
-### 7.11 Stage 1 (Arduino/BGAPI) as a lockstep target: a cleaner M33 call path, one real finding, tested and reverted
+### 7.11 Stage 1 (Arduino/BGAPI) as a lockstep target: a real finding, and a methodology bug that produced two false ones
 
 Rebuilt stage 1 — Silicon Labs' own open-source Arduino core, the
 `ble_minimal` example, built against the same proprietary BGM220 RAIL
@@ -2679,112 +2679,69 @@ return value) is `0` at the branch that would skip the bit-9 block,
 confirming that block *is* skipped and bit 1's clear executes
 unconditionally on the only path this scenario actually takes.
 
-**Ported it, tested on real hardware, and reverted — a real regression,
-not a non-event like every other change this document has tried.**
-Added as the very first store in `radio_tx_enable()`, before the
-existing `SR3` clear. QEMU 77/17/14 unchanged. Flashed to the
-`radio-port-hardware-2` bring-up build and checked `RAC.STATUS`
-immediately after `TXEN` and again 30ms later: **`RAC.STATUS` reads
-`0x10400000` (`STATE=0`, `OFF`) at both checkpoints, reproducibly across
-two independent flashes** — stock-TX-reaching behavior broken, where
-every build before this one reliably reached and held `STATE=9` (`TX`)
-at the same checkpoint. Reverted immediately (kept only as a code
-comment warning against retrying it blindly); confirmed the revert
-restores the known baseline (`RAC.STATUS=0x09400000`,
-`FRC.STATUS=0x01100200`, byte-for-byte the same as every prior capture).
+**Ported it, tested on real hardware — and this whole thread, through
+the "six-cycle margin" and the "binary-searched 1-nop-wide threshold"
+below, turned out to be built on a methodology bug, not a real hardware
+finding. Retracted in full; recorded here so the mistake isn't repeated,
+not as a result to trust.**
 
-**Follow-up, checked directly rather than left as "something about this
-bit depends on context": the regression was never about bit 1's*value*
-at all.** Read `RAC.SR0` live on real hardware at the exact `TXEN`
-checkpoint on both images: stock reads `0x00001000` (bit 1 already
-clear) and the open stack, *on its own, unmodified, known-working
-build*, already reads `0x00000000` there too (bit 1 already clear).
-Clearing an already-clear bit cannot be what broke anything — the two
-builds agree on this bit's value with or without the port. What actually
-changed is that the port added instructions immediately before the
-existing `SR3` clear, shifting this function's exact cycle timing
-relative to TXEN. That is the same class of fragility §7.5.4 already
-documented for the splice-test vehicle (a single appended, never-called
-byte breaking a hang-free boot) — this is now a second, independent
-case of the open stack's own TX-start sequence being sensitive to
-*timing*, not to any specific register value, this close to `TXEN`.
+The test pattern used throughout was: set a breakpoint right after
+`TXEN`, catch it via `bg22_reset_to_breakpoint`, `resume`, `sleep N`,
+then `bg22_require_sram_execution` and read registers. **That pattern
+never removed the breakpoint before `resume`.** `radio_tx_enable()` is
+called repeatedly during real advertising (the OpenISA stack re-arms TX
+periodically); if a *later* call reaches the same breakpoint address
+again during the `sleep`, the core halts there a second time, and the
+subsequent `bg22_require_sram_execution` silently observes whatever
+state exists at *that* re-trigger — not "N ms of settled state after the
+first `TXEN`" as assumed. The apparent "regression" and the apparent
+"1-nop-wide timing cliff" were both artifacts of this: different
+instruction counts shift exactly when later calls land relative to the
+sleep window, making the breakpoint re-trigger (and therefore what gets
+measured) depend on instruction count without any real hardware timing
+margin being involved at all.
 
-**This reframes the finding's significance upward, not downward.** If
-the window around `TXEN` is this sensitive to a few extra instructions
-regardless of what they write, that is itself a plausible contributing
-factor to `ACTIVETXFCD` never engaging — not "this one bit doesn't
-matter," but "this driver's TX-start path may be operating close enough
-to some real timing requirement that small, functionally-inert changes
-can tip it over," the same shape of problem already seen once before in
-this project. Worth remembering before adding *any* further
-instructions near this exact call site without re-measuring the full
-before/after `RAC.STATUS`/`FRC.STATUS` checkpoint, not just trusting
-that a value-level analysis says a change should be inert.
+**Caught by re-running the same tests with `rbp <addr>` added before
+`resume`, which is the fix.** Every single one of the "broken" cases
+reverses under the corrected methodology:
 
-**Tested directly rather than left as a hypothesis: replaced the SR0
-write with six pure `nop`s (zero register effect whatsoever, same
-insertion point, as a throwaway diagnostic probe immediately reverted
-after this test) and reflashed.** Identical regression:
-`RAC.STATUS=0x10400000` (`STATE=0`, `OFF`) immediately after `TXEN` and
-still 30 ms later, byte-for-byte the same broken readings as the SR0
-version. **This conclusively proves the regression is pure instruction-
-count/cycle-timing sensitivity at this exact point in
-`radio_tx_enable()`, with no dependency on what those extra instructions
-actually do.** Six cycles of true no-ops, inserted before the existing
-`SR3` clear (itself already the function's first real store), is enough
-to break `RAC.STATUS` from reliably reaching and holding `TX` into never
-leaving `OFF`. Reverted again immediately; confirmed restored
-(`RAC.STATUS=0x09400000`, `FRC.STATUS=0x01100200`, the same baseline as
-every other capture in this document).
+* The `SR0` bit-1 port, re-tested at the same `TXEN`+30ms checkpoint
+  with the breakpoint properly removed: `RAC.STATUS=0x09400000` (`TX`,
+  holding) — matching the unmodified baseline exactly, not the
+  `0x10400000` "regression" originally reported.
+* Six `nop`s at the same insertion point, re-tested the same way:
+  `RAC.STATUS=0x09400000` (`TX`, holding) — also matching baseline, not
+  the originally-reported `OFF`.
+* Checked at 5/10/20/30ms individually, both with and without the
+  breakpoint bug present, to confirm the mechanism: with the bug
+  present, results were inconsistent run to run in exactly the way a
+  stray re-trigger would produce; with `rbp` added, every checkpoint
+  from 5ms through 30ms reads the same steady `TX` state, for every
+  instruction count tried.
 
-**This is likely the most load-bearing single fact this document has
-established about `ACTIVETXFCD` without yet explaining it.** The open
-stack's TX-start path is operating within a real hardware timing margin
-narrow enough that six CPU cycles decide whether `RAC.STATUS` ever
-leaves `OFF` at all — a far more severe and specific constraint than
-"eventually reaches `TX` but the frame coder doesn't engage."
+**What survives from this whole thread, and what doesn't.** The
+earlier, purely static/single-breakpoint finding that stock's
+`RAIL_StartTx` clears `RAC.SR0` bit 1 for a plain advertisement still
+stands — that was established by reading registers at single, one-shot
+breakpoints (no `resume`+`sleep` involved), which this bug cannot have
+affected. What does **not** survive: the claim that porting it regresses
+anything, the "six-cycle timing margin," the binary-searched "exactly
+one `nop` wide" threshold, and every piece of reasoning built on top of
+those ("this is likely the most load-bearing fact in this document,"
+the race-condition speculation, the queued single-step experiment to
+find the 1-to-2-nop transition). None of that was real; there is no
+evidence of any timing sensitivity at this call site at all. `SR0` bit 1
+remains unported, not because porting it is dangerous, but because
+(per the original, still-valid finding) it's already `0` on both images
+at `TXEN` regardless, so clearing it again changes nothing either way.
 
-**Binary-searched the exact margin, as this section originally
-recommended, rather than leaving it as a suggestion.** Same insertion
-point (immediately before the existing `SR3` clear, the function's
-current first store), varying only the `nop` count, each one flashed
-and checked at the same `TXEN`+30ms `RAC.STATUS` checkpoint, each probe
-reverted immediately after its own test:
-
-| extra `nop`s | `RAC.STATUS` |
-|---|---|
-| 0 (baseline) | `0x09400000` — `TX`, holding |
-| 1 | `0x09400000` — `TX`, holding |
-| 2 | `0x10400000` — `OFF`, stuck |
-| 3 | `0x10400000` — `OFF`, stuck |
-| 6 | `0x10400000` — `OFF`, stuck |
-
-**The threshold is exactly one `nop` wide: one extra cycle at this exact
-point is tolerated; two is already fatal, every time.** This is not a
-soft or probabilistic margin — every data point above reproduced
-identically on its own fresh flash. A razor-thin, hard cutoff at this
-specific instruction count, at this specific point in the function, is
-about as strong a signature of a genuine hardware race/deadline as a
-black-box test can produce without directly observing the competing
-event. Confirmed restored to baseline after every probe
-(`RAC.STATUS=0x09400000`, `FRC.STATUS=0x01100200`).
-
-**What this does and does not establish.** It does not yet identify
-*what* `radio_tx_enable()` is racing against — only that something
-with a roughly one-cycle-scale deadline exists right at its entry,
-before even the `SR3` clear. Plausible candidates, none yet checked:
-the tail of `radio_is_idle()`'s own busy-wait (the very first thing
-this function does) landing at a different point in some other state
-machine's cycle depending on exactly when the loop exits; a RAC/PROTIMER
-internal counter that free-runs regardless of software and must be
-sampled or acted on within a specific window after some earlier event
-this function doesn't control the timing of; or an M0+-sequencer-side
-race, if the M0+ core's own concurrent execution expects the M33 to
-reach this point within a bounded number of cycles after some shared
-state it last touched. The clean next experiment: instrument exactly
-which instruction is the last one to execute before the 1→2 `nop`
-transition flips the outcome (single-step from a breakpoint placed
-*after* the `nop`s, reading `RAC`/`PROTIMER` state at that instant on
-both the 1-`nop` and 2-`nop` builds) to see what, if anything, already
-differs in hardware state at that exact point — not just downstream,
-30ms later.
+**The actual lesson, worth keeping:** any `bg22_reset_to_breakpoint`-
+then-`resume`-then-`sleep`-then-recheck test on this project must either
+remove the breakpoint first (`rbp <addr>`) or use a breakpoint address
+that cannot legitimately be hit twice, or the "later" read is measuring
+an uncontrolled, unknown point in time, not the intended one. This
+applies to every test of this shape anywhere in this document; none of
+the *other* sleep-based tests happened to hit this specific failure mode
+(most used one-shot captures without a `resume`+`sleep` afterward, or
+targeted code that genuinely runs once), but this specific pattern is
+now flagged for anyone writing a new one.
