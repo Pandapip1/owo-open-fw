@@ -2981,5 +2981,55 @@ project's own rule to fully understand a disproven hypothesis before
 moving on. Thread 3 is now closed as "link-layer call chain to
 `RAIL_StartTx` fully mapped; the one concrete idea it suggested is tested
 and ruled out; the specific attribution that motivated the idea does not
-hold up either, corrected rather than left stated." Thread 1 (M0+
-live-state tooling) is the one remaining open thread from §7.12.
+hold up either, corrected rather than left stated."
+
+### 7.15 Thread 1 closed: the M0+ TXWARM handler isn't stuck anywhere -- proven directly, not inferred, so AP3 live-CPU tooling wouldn't have helped
+
+Thread 1 from §7.12 asked for a trustworthy way to inspect the M0+
+sequencer core's own live state (PC, registers) during an in-flight TX,
+on the theory that it might be caught doing something relevant partway
+through. Re-reading `radio_seq.S`'s own control flow first (rather than
+immediately fighting the AP3/dual-core OpenOCD SWD-contention problem
+again) found a cheaper, more direct way to answer the *specific* question
+that tooling was for.
+
+`efr32_radio_seq_exception` is one shared handler for both `IRQ8`
+(TXWARM) and `IRQ9` (TX); the label `2:` that both paths converge on sits
+**after** the TXWARM-only block, meaning the TX/`IRQ9` entry always skips
+both of that block's bounded wait loops entirely and returns almost
+immediately -- it was never a candidate for being "stuck." The TXWARM
+entry, though, has two genuinely bounded poll loops (`EFR32_RAC_TXWARM_WAIT_BOUND`
+= `0x10000` iterations each): one polling `RAC.SR0`'s `WAIT_BIT`, one
+polling `RAC.SEQIF`'s TXWARM-ack bit. Critically, **the hardware's own
+`RAC.STATUS` state machine does not visibly wait on either loop** --
+`RAC.STATUS` reaching `TX` (state 9) says nothing about whether the M0+
+firmware that reacted to the *preceding* TXWARM interrupt ever finished.
+If either loop were silently timing out (spinning for its full bound
+before giving up), the M0+ core could in principle still be active,
+spinning, well past the point `RAC.STATUS` already reads `TX` -- a
+genuinely plausible mechanism, and a case where catching the M0+ core's
+live PC really would have been the right tool.
+
+**Tested directly instead of inferring: added two diagnostic trace
+words** (`EFR32_SEQ_TRACE_WAIT_BIT_REMAINING`/`_SEQIF_ACK_REMAINING`,
+`radio_seq.S`), recording each loop's remaining counter (`r3`) at the
+exact point it exits -- `0` means it ran out the full bound without the
+condition ever being met; the untouched bound value means it exited on
+the very first check, no spinning at all. QEMU 77/17 still pass.
+Hardware-tested at both the standard 30ms and 100ms checkpoints (same
+methodology as §7.6/§7.11, breakpoint removed before `resume`): **both
+words read exactly `0x10000` -- the untouched bound -- every time.**
+Both loops succeed on their very first iteration; the M0+ TXWARM handler
+is not spinning, has never been spinning, and returns to `WFI` within
+microseconds of being entered.
+
+**This closes the thread by disproving its premise, which is a complete
+answer, not a non-answer.** The M0+ core is provably idle, not doing
+anything relevant, for the entire 30-100ms window this project has been
+probing `RAC.STATUS`/`FRC.STATUS` at. Building the AP3 dual-core live-CPU
+inspection tooling thread 1 asked for would not have revealed anything
+new about `ACTIVETXFCD`, because there is nothing happening on the M0+
+side left to catch -- the stuck state is entirely in the RAC/FRC
+autonomous hardware state machine, which this project's existing M33
+register access already inspects exhaustively (§7.4-§7.14). All three
+threads from §7.12 are now closed.

@@ -19,6 +19,15 @@
 .equ EFR32_SEQ_IDENTITY_OPEN_V1,      0x4f535131 /* "OSQ1" */
 .equ EFR32_SEQ_TRACE_TXWARM,          0x00004fc0
 .equ EFR32_SEQ_TRACE_TX,              0x00004fd0
+/* Diagnostic only: the remaining loop-counter value when each of the
+ * TXWARM handler's two bounded wait loops exits (docs/radio-tables.md
+ * SS7.15) -- 0 means the loop was still waiting when it hit its bound
+ * (never acked/cleared in time), nonzero means it exited early with that
+ * much headroom left. Lets a post-hoc debug-probe read distinguish "timed
+ * out" from "succeeded quickly" without needing to catch the M0+ core
+ * itself mid-loop. */
+.equ EFR32_SEQ_TRACE_WAIT_BIT_REMAINING,  0x00004fa8
+.equ EFR32_SEQ_TRACE_SEQIF_ACK_REMAINING, 0x00004fac
 /* Diagnostic only (not part of the bounded production trace words above):
  * FRC.STATUS before this handler acts, and again just before it returns, so
  * a later debug-probe attach can see whether this image's own mechanics
@@ -345,7 +354,9 @@ efr32_radio_seq_exception:
     beq 12f
     subs r3, #1
     bne 10b
-12: ldr r0, =EFR32_RAC_PRESC_SET
+12: ldr r0, =EFR32_SEQ_TRACE_WAIT_BIT_REMAINING
+    str r3, [r0]
+    ldr r0, =EFR32_RAC_PRESC_SET
     movs r1, #EFR32_RAC_PRESC_SET_VALUE
     str r1, [r0]
     ldr r0, =EFR32_RAC_SR0_CLR
@@ -426,9 +437,11 @@ efr32_radio_seq_exception:
     ldr r1, [r0]
     ldr r2, =EFR32_RAC_SEQIF_TXWARM_ACK_MASK
     ands r1, r2
-    beq 2f
+    beq 14f
     subs r3, #1
     bne 11b
+14: ldr r0, =EFR32_SEQ_TRACE_SEQIF_ACK_REMAINING
+    str r3, [r0]
 2:
     ldr r0, =EFR32_FRC_STATUS
     ldr r1, [r0]
