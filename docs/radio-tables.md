@@ -3460,3 +3460,39 @@ integration, not a register poke) to test conclusively -- recorded here
 in full rather than attempted as a hasty, risky change to a scheduling
 mechanism that other code (RX launch, general event timing) also
 depends on.
+
+### 7.26 A cheap, bounded test of §7.25's latency: crashed with a `UsageFault`, not a clean answer either way
+
+Before accepting that testing §7.25 requires full `PROTIMER` integration,
+tried one cheap, reversible experiment first: made
+`efr32_radio_launch_wake()`'s TX branch call `radio_tx_enable()` directly
+from the tick-compare ISR (the same `atomic_cas` pattern already used in
+`efr32_radio_tx_job()`, just invoked from the ISR instead of waking the
+thread) -- matching the zero-added-latency path `lll_adv.c`'s own
+continuation channels already use, with no new magic numbers and nothing
+obviously ISR-unsafe in `radio_tx_enable()`'s own body (checked first: no
+mutexes, semaphores, or sleeps). This does not implement real `PROTIMER`
+timing; it only removes the §7.25 software delay, as the cheapest
+possible test of whether *that specific latency* matters.
+
+QEMU 77/17 passed. **On real hardware, this crashed with a `UsageFault`**
+(caught directly: `bg22_require_sram_execution` reported `current mode:
+Handler UsageFault` immediately after resuming) -- not a clean "no
+change," and not evidence either way about `ACTIVETXFCD`. Reverted
+immediately; confirmed the hardware recovered fully (normal `Thread`-mode
+halts, `RAC.STATUS=0x09400000` exactly as the established baseline) once
+back on the unmodified build.
+
+**This is itself worth recording, not just discarding as a failed
+experiment.** Calling `radio_tx_enable()`'s full call chain directly from
+this specific ISR is unsafe as currently written -- plausibly a stack-depth
+issue (interrupt stacks are typically much smaller than thread stacks, and
+`radio_tx_enable()`'s chain through `efr32_tx_fifo_publish()`/
+`efr32_packet_stage_arm()`/etc. was never verified against an ISR-sized
+stack), though the exact cause was not root-caused here. **Any future
+attempt to reduce or remove this latency (including real `PROTIMER`
+integration) needs to account for this: the fix cannot simply move the
+existing `radio_tx_enable()` call earlier in the same call chain without
+also addressing whatever caused this fault.** §7.25's architectural
+finding stands; this experiment answers "how would you cheaply test it"
+with "you can't, this way" rather than resolving the hypothesis itself.
