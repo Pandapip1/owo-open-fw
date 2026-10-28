@@ -3354,3 +3354,36 @@ weight of evidence now points away from "one more missing static register
 value or command bit" and toward either a precise write-*ordering*/timing
 dependency this project has not yet isolated, or a hardware-autonomous
 precondition neither stack's software explicitly asserts.
+
+### 7.24 The first concrete ordering test: `RAC.DIGCLKRETIMECTRL`/`XORETIMECTRL` positioned exactly as stock writes them -- still no change
+
+Pursued the ordering/timing hypothesis §7.23 pointed toward with the
+first genuinely testable case: `tests/hardware-lockstep/stage2-m33-tx-prepare.json`
+shows stock writing `RAC.XORETIMECTRL` then `RAC.DIGCLKRETIMECTRL`
+in a specific position -- between `SYNTH.FREQ` and `FRC.WCNTCMP2` --
+but this project's own `radio_freq_chan_set()` has never written either
+register at all, in any position. The earlier §4.2 "channel-37
+calibration word" test injected these same two values, but there is no
+record that it matched this exact position in the channel-set sequence,
+so this is a real, not-yet-tried case, not a re-run.
+
+Added both writes to `radio_freq_chan_set()`, positioned exactly between
+`FREQ` and `WCNTCMP2` to match the trace precisely. QEMU 77/17 passed.
+Hardware-tested at the standard checkpoint: **no change** --
+`RAC.STATUS`/`FRC.STATUS` identical to every prior reading. Directly
+confirmed the writes actually landed (`RAC.XORETIMECTRL` read back
+`0x770`, `RAC.DIGCLKRETIMECTRL` read back `0x430`, both exactly as
+written) before accepting this as a real negative, not a silent
+failure. Reverted; not kept.
+
+This specific ordering test came back negative, but it does not close
+the broader ordering/timing hypothesis -- it only rules out *this one*
+relative position. The rest of stock's tx-prepare sequence (§7.22's
+four still-unidentified writes, already tested at this same relative
+position in §7.23 and also negative) has now been tried in-place too;
+what remains untried on the ordering axis is the *timing* dimension
+specifically (how soon after channel setup `TXEN` follows, not just
+which writes precede which), which this project's current call
+structure (`radio_freq_chan_set()` and `radio_tx_enable()` as two
+independent public functions, called from different points in the LLL)
+has not been checked against stock's single-interrupt atomicity at all.
