@@ -3963,3 +3963,35 @@ approach. All three `VTOR`-touching probes (`probe-irq-handler.S`,
 `probe-irq-handler-no-enable.S`, `probe-vtor-only.S`) are kept, along
 with this retraction, so the dead end and why it's a dead end are both
 on record. Hardware reconfirmed back to the exact baseline afterward.
+
+### 7.37 Starting a from-scratch probe the safe way: a real execution trace instead of hand-transcribing the PHY table
+
+With live `VTOR`-redirect on the running firmware closed off (§7.36),
+the only way left to test the IRQ-handshake sub-hypothesis is a
+from-scratch bootable image with its own vector table. Hand-transcribing
+the ~150-write PHY config table into assembly for that image would
+reintroduce exactly the transcription-error risk this project has
+already been burned by once (§7.13's `PROTIMER_0x38`/`FRC_0x1C` mixup).
+Used `tests/hardware-lockstep/trace_stores.py` (already built earlier
+in this project for M0+ IRQ8/IRQ9 traces) instead: caught the real M33
+at `radio_phy_set()`'s entry via the usual `bg22_reset_to_breakpoint`,
+then single-stepped it live, recording every MMIO store as JSON.
+
+Got 159 real, directly-executed register writes this way -- the entire
+base PHY config table plus `radio_setup()`'s own writes, byte-for-byte
+authoritative because they're what the chip actually did, not
+re-derived from reading source. (`--mask-interrupts` turned out unsafe
+for a span this long: it stops `SysTick` from ever ticking, so a
+`k_sleep`/timeout wait anywhere in the path spins forever once
+interrupts are masked -- confirmed by resolving the resulting "stuck"
+PC to `z_thread_halt` in `kernel/sched.c`, ordinary scheduler code, not
+a crash.) Retrying without `--mask-interrupts` hit unrelated host-system
+memory pressure (other long-running processes, not this project's own
+tooling) that made further real-hardware single-stepping impractically
+slow for this session; not a hardware or technique problem, just bad
+timing. Saved the partial capture as
+`tests/hardware-lockstep/radio-setup-trace-partial.json` (kept, per the
+standing instruction for this probe family) rather than losing it --
+it already covers the single largest, most error-prone part of what a
+from-scratch image would need, and resuming the trace later just needs
+`--current` from its exact stopping PC, without `--mask-interrupts`.
