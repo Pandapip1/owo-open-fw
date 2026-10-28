@@ -1067,14 +1067,27 @@ static void efr32_ble_phy_info_publish(const uintptr_t *phy_info)
  * and radio_whiten_iv_set() deliberately replace its dynamic defaults later.
  */
 static const uint32_t efr32_ble_1m_base_table[] = {
-	0x0001400CU, 0x00018101U, /* FRC.DFLCTRL */
-	0x00024020U, 0x00000000U, 0x00000001U, /* FRC.WCNTCMP0..1 */
-	0x00034030U, 0x00000000U, 0x00000000U, 0x00000000U, /* FRC.WHITE* */
+	/*
+	 * Every FRC value below is decoded against the public field model
+	 * (build/reference-models/FRC_S_field.py) rather than left as a bare
+	 * cited register name -- each named field's bit offset/width comes
+	 * directly from that generated model, not re-derived by hand.
+	 */
+	0x0001400CU, 0x00018101U, /* FRC.DFLCTRL: DFLMODE=1, DFLOFFSET=1,
+				    * DFLBITS=8, MINLENGTH=1 (DFLBITORDER,
+				    * DFLSHIFT, DFLINCLUDECRC, DFLBOIOFFSET=0) */
+	0x00024020U, 0x00000000U, 0x00000001U, /* FRC.WCNTCMP0.FRAMELENGTH=0,
+						  * FRC.WCNTCMP1.LENGTHFIELDLOC=1 */
+	0x00034030U, 0x00000000U, 0x00000000U, 0x00000000U, /* FRC.WHITE*: all zero */
 	0x00024040U, 0x00000000U, 0x00004000U, /* FRC RAM addresses */
-	0x00014060U, 0x00000101U, /* FRC.PUNCTCTRL */
-	0x000140A8U, 0x00000007U, /* FRC.AUTOCG */
+	0x00014060U, 0x00000101U, /* FRC.PUNCTCTRL: PUNCT0=1, PUNCT1=1 */
+	0x000140A8U, 0x00000007U, /* FRC.AUTOCG.AUTOCGEN=7 */
 	0x000440BCU, 0x00000000U, 0x00000000U, 0x00000000U, 0x00000000U,
-	0x00034108U, 0x00004CFFU, 0x00004DFFU, 0x00004DFFU, /* FRC.FCD1..3 */
+	0x00034108U, 0x00004CFFU, 0x00004DFFU, 0x00004DFFU, /* FRC.FCD1..3: all
+				    * three have WORDS=255, INCLUDECRC=1,
+				    * CALCCRC=1, SKIPWHITE=1; FCD1.BUFFER=0,
+				    * FCD2/3.BUFFER=1 (SKIPCRC/ADDTRAILTXDATA/
+				    * EXCLUDESUBFRAMEWCNT=0 on all three) */
 	0x1001C020U, 0x0007F800U, 0x3001C020U, 0x000802F5U, /* AGC.CTRL0 */
 	0x1001C024U, 0x000000FFU, 0x3001C024U, 0x00001300U, /* AGC.CTRL1 */
 	0x0007C028U, 0x83B380ECU, 0x51407543U, 0x48000FA0U, 0x00004030U,
@@ -1117,12 +1130,21 @@ static const uint32_t efr32_ble_1m_base_table[] = {
 
 static const uint32_t efr32_ble_1m_delta_table[] = {
 	/* The omitted first record is the non-portable SEQ.PHYINFO pointer. */
-	0x00014010U, 0x00004101U, /* FRC.MAXLENGTH */
-	0x0001403CU, 0x00000000U, /* FRC.FECCTRL */
-	0x00014048U, 0x000407A0U, /* FRC.CTRL */
-	0x00014050U, 0x00000000U, /* FRC.TRAILTXDATACTRL */
-	0x0001405CU, 0x00000000U, /* FRC.CONVGENERATOR */
-	0x00014104U, 0x00004CFFU, /* FRC.FCD0 */
+	0x00014010U, 0x00004101U, /* FRC.MAXLENGTH: MAXLENGTH=257, INILENGTH=4 */
+	0x0001403CU, 0x00000000U, /* FRC.FECCTRL: all fields zero (no FEC on
+				    * an uncoded 1M PHY) */
+	0x00014048U, 0x000407A0U, /* FRC.CTRL: TXFCDMODE=2, RXFCDMODE=2,
+				    * BITSPERWORD=7, LPMODEDIS=1 (RANDOMTX,
+				    * UARTMODE, BITORDER, RATESELECT,
+				    * TXPREFETCH, SEQHANDSHAKE, PRBSTEST,
+				    * WAITEOFEN, RXABORTIGNOREDIS=0);
+				    * docs/radio-tables.md §7.16 */
+	0x00014050U, 0x00000000U, /* FRC.TRAILTXDATACTRL: all fields zero */
+	0x0001405CU, 0x00000000U, /* FRC.CONVGENERATOR: all fields zero */
+	0x00014104U, 0x00004CFFU, /* FRC.FCD0: WORDS=255, BUFFER=0,
+				    * INCLUDECRC=1, CALCCRC=1, SKIPWHITE=1
+				    * (SKIPCRC/ADDTRAILTXDATA/
+				    * EXCLUDESUBFRAMEWCNT=0) */
 	0x01034020U, 0x86000000U, 0x0001C01FU, 0x00006000U, /* MODEM.CTRL0..2 */
 	0x01014038U, 0x40000000U, /* MODEM.CTRL6 */
 	0x01044058U, 0x00FF04C8U, 0x00000840U, 0x00000001U, 0x00040092U,
@@ -1151,12 +1173,18 @@ static const uint32_t efr32_ble_1m_delta_table[] = {
 
 /* Public BLE viterbi 2M delta at configurator_out.c:537-598; PHYINFO omitted. */
 static const uint32_t efr32_ble_2m_delta_table[] = {
-	0x00014010U, 0x00004101U, /* FRC.MAXLENGTH */
-	0x0001403CU, 0x00000000U, /* FRC.FECCTRL */
-	0x00014048U, 0x000407A0U, /* FRC.CTRL */
-	0x00014050U, 0x00000000U, /* FRC.TRAILTXDATACTRL */
-	0x0001405CU, 0x00000000U, /* FRC.CONVGENERATOR */
-	0x00014104U, 0x00004CFFU, /* FRC.FCD0 */
+	/* Same FRC field decode as efr32_ble_1m_delta_table above -- the
+	 * values are identical between the two PHYs. */
+	0x00014010U, 0x00004101U, /* FRC.MAXLENGTH: MAXLENGTH=257, INILENGTH=4 */
+	0x0001403CU, 0x00000000U, /* FRC.FECCTRL: all fields zero (no FEC on
+				    * an uncoded 2M PHY) */
+	0x00014048U, 0x000407A0U, /* FRC.CTRL: TXFCDMODE=2, RXFCDMODE=2,
+				    * BITSPERWORD=7, LPMODEDIS=1 (all other
+				    * fields 0); docs/radio-tables.md §7.16 */
+	0x00014050U, 0x00000000U, /* FRC.TRAILTXDATACTRL: all fields zero */
+	0x0001405CU, 0x00000000U, /* FRC.CONVGENERATOR: all fields zero */
+	0x00014104U, 0x00004CFFU, /* FRC.FCD0: WORDS=255, BUFFER=0,
+				    * INCLUDECRC=1, CALCCRC=1, SKIPWHITE=1 */
 	0x01034020U, 0x86000000U, 0x0001C01FU, 0x00006000U, /* MODEM.CTRL0..2 */
 	0x01014038U, 0x40000000U, /* MODEM.CTRL6 */
 	0x01044058U, 0x00FF0264U, 0x00000840U, 0x00000001U, 0x00080092U,
@@ -1185,10 +1213,28 @@ static const uint32_t efr32_ble_2m_delta_table[] = {
 
 /* Public BLE long-range 125 kb/s delta at configurator_out.c:600-661. */
 static const uint32_t efr32_ble_coded_s8_delta_table[] = {
-	/* The omitted first record is the non-portable SEQ.PHYINFO pointer. */
-	0x00014010U, 0x00004100U, 0x0001403CU, 0x00000010U,
-	0x00014048U, 0x00040720U, 0x00014050U, 0x00000400U,
-	0x0001405CU, 0x00000F0DU, 0x00014104U, 0x0001C003U,
+	/* The omitted first record is the non-portable SEQ.PHYINFO pointer.
+	 * Unlike the 1M/2M tables above, this table and the S2 one below
+	 * previously had no per-register naming at all; naming (and, for the
+	 * FRC entries specifically, full field decode against
+	 * build/reference-models/FRC_S_field.py) added here. The MODEM/SYNTH/
+	 * RAC calibration words further down remain named-register-only --
+	 * a real, scoped gap, not yet decoded field-by-field (see project
+	 * memory: radio config tables undecomposed). */
+	0x00014010U, 0x00004100U, /* FRC.MAXLENGTH: MAXLENGTH=256, INILENGTH=4 */
+	0x0001403CU, 0x00000010U, /* FRC.FECCTRL: CONVMODE=1 (coded PHY uses
+				    * the convolutional encoder; all other
+				    * fields 0) */
+	0x00014048U, 0x00040720U, /* FRC.CTRL: TXFCDMODE=2, RXFCDMODE=0,
+				    * BITSPERWORD=7, LPMODEDIS=1 (all other
+				    * fields 0) */
+	0x00014050U, 0x00000400U, /* FRC.TRAILTXDATACTRL: TRAILTXDATACNT=4
+				    * (all other fields 0) */
+	0x0001405CU, 0x00000F0DU, /* FRC.CONVGENERATOR: GENERATOR0=13,
+				    * GENERATOR1=15 */
+	0x00014104U, 0x0001C003U, /* FRC.FCD0: WORDS=3, SKIPWHITE=1,
+				    * ADDTRAILTXDATA=1, EXCLUDESUBFRAMEWCNT=1
+				    * (BUFFER/INCLUDECRC/CALCCRC/SKIPCRC=0) */
 	0x01034020U, 0x46000030U, 0x0001C81FU, 0x10002000U,
 	0x01014038U, 0x00000000U,
 	0x01044058U, 0x00050018U, 0x00000840U, 0x00000009U, 0x000A0092U,
@@ -1214,10 +1260,21 @@ static const uint32_t efr32_ble_coded_s8_delta_table[] = {
 
 /* Public BLE long-range 500 kb/s delta at configurator_out.c:663-724. */
 static const uint32_t efr32_ble_coded_s2_delta_table[] = {
-	/* The omitted first record is the non-portable SEQ.PHYINFO pointer. */
-	0x00014010U, 0x00004100U, 0x0001403CU, 0x00000010U,
-	0x00014048U, 0x00041720U, 0x00014050U, 0x00000401U,
-	0x0001405CU, 0x00000F0DU, 0x00014104U, 0x0001C003U,
+	/* The omitted first record is the non-portable SEQ.PHYINFO pointer.
+	 * FRC entries named/decoded the same way as the S8 table above. */
+	0x00014010U, 0x00004100U, /* FRC.MAXLENGTH: MAXLENGTH=256, INILENGTH=4 */
+	0x0001403CU, 0x00000010U, /* FRC.FECCTRL: CONVMODE=1 (all other
+				    * fields 0) */
+	0x00014048U, 0x00041720U, /* FRC.CTRL: TXFCDMODE=2, RXFCDMODE=0,
+				    * BITSPERWORD=7, RATESELECT=2, LPMODEDIS=1
+				    * (all other fields 0) */
+	0x00014050U, 0x00000401U, /* FRC.TRAILTXDATACTRL: TRAILTXDATA=1,
+				    * TRAILTXDATACNT=4 */
+	0x0001405CU, 0x00000F0DU, /* FRC.CONVGENERATOR: GENERATOR0=13,
+				    * GENERATOR1=15 */
+	0x00014104U, 0x0001C003U, /* FRC.FCD0: WORDS=3, SKIPWHITE=1,
+				    * ADDTRAILTXDATA=1, EXCLUDESUBFRAMEWCNT=1
+				    * (BUFFER/INCLUDECRC/CALCCRC/SKIPCRC=0) */
 	0x01034020U, 0x46000030U, 0x0001C81FU, 0x10002000U,
 	0x01014038U, 0x00000000U,
 	0x01044058U, 0x00050018U, 0x00000840U, 0x00000009U, 0x000A0092U,
