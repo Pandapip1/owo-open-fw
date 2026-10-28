@@ -630,6 +630,12 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_RAC_SR0_INIT_CLEAR (1U << 6)
 #define EFR32_RAC_SR0_TX_PREPARE_SET BIT(7)
 #define EFR32_RAC_SR0_TX_PREPARE_CLEAR BIT(3)
+/* SR0 bit 1: hardware-confirmed (stage-1/Arduino BGAPI lockstep) that
+ * stock's RAIL_StartTx clears this via SR0's CLR alias for a plain
+ * advertisement, before anything below. Tried porting it as the very
+ * first store in this function and tested on real hardware: regression,
+ * not a fix -- RAC.STATUS never reached/held TX afterward, reverted. See
+ * docs/radio-tables.md SS7.11 before retrying this. */
 #define EFR32_RAC_RXENSRCEN_OFFSET 0x008U
 #define EFR32_RAC_STATUS_OFFSET 0x00CU
 #define EFR32_RAC_CMD_OFFSET 0x010U

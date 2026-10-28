@@ -2621,3 +2621,84 @@ move anything, independent of whatever is actually gating
 pass (`RAC.STCTRL`'s write mask, and the M0+ core's own private `SysTick`
 actually counting) were both already correctly modeled; no QEMU fix was
 needed for either.
+
+### 7.11 Stage 1 (Arduino/BGAPI) as a lockstep target: a cleaner M33 call path, one real finding, tested and reverted
+
+Rebuilt stage 1 — Silicon Labs' own open-source Arduino core, the
+`ble_minimal` example, built against the same proprietary BGM220 RAIL
+archives as stock-stage2 (`hardware-bringup.md`'s original stage-1
+artifacts no longer existed on disk; rebuilt from scratch via `arduino-
+cli` against `github.com/SiliconLabs/arduino`, installed into
+`/home/gavin/Projects/owo-bg22-proprietary-baselines/arduino-cli-home/`).
+Compiled and flashed cleanly; `RAIL_StartTx` is reachable and catchable
+by a plain symbol breakpoint (`nm` still exposes real RAIL public API
+symbols even though internal helpers are hash-named `RAILINT_<hash>` by
+Silicon Labs' own build, independent of this project's own compiler
+flags). Motivation: stage 1 calls BGAPI directly
+(`sl_bt_legacy_advertiser_start` → `RAIL_StartTx`), with no Zephyr/
+OpenISA LLL layer in between — fewer *software layers* than stock-
+stage2, confirming the premise behind trying it.
+
+**That premise didn't translate into easier static disassembly, though
+— and that's a real, recorded lesson, not just friction.** The prebuilt
+RAIL library is whole-program LTO'd, which both strips meaningful
+internal names (Silicon Labs' own `RAILINT_<hash>` convention) and, more
+disruptively, loses Thumb/ARM interworking state across large stretches
+of `.text` for `objdump`'s default disassembly mode — large regions
+print as nonsense ARM-mode instructions where real Thumb code lives,
+requiring `--disassembler-options=force-thumb` plus manually computing
+bin-file-offset-to-VMA mappings by hand to get a trustworthy
+disassembly. Fewer software layers did not mean an easier-to-read
+binary; if anything, stock-stage2's own (non-LTO, Zephyr) build was
+easier to statically trace than this one.
+
+**What did work well: hardware watchpoints did not trigger reliably on
+this chip (tried both the secure and non-secure `RAC.CMD` aliases,
+`bg22_reset_to_breakpoint`-style polling after setting each), consistent
+with this project's other secure-debug-disabled limitations — but
+breakpoints at known RAIL symbols, combined with single-stepping/
+re-breakpointing to walk forward from there, worked perfectly.** This is
+the technique that actually cracked the binary: breakpoint at
+`RAIL_StartTx` (caught reliably, ~250ms after reset every time),
+disassemble forward from there with `force-thumb`, then breakpoint at
+specific candidate instructions and read registers live to resolve
+branches a pure static read could not (argument values, which path a
+conditional actually takes) — faster and more reliable than continuing
+to fight the LTO'd disassembly in isolation.
+
+**The finding: `RAIL_StartTx`'s own top-level internal dispatcher
+(`fn@0x2951c`, called one level inside the public `RAIL_StartTx` stub at
+`0x3708a`) unconditionally clears `RAC.SR0` bit 1 via its CLR alias for a
+plain advertisement, before any of the already-known TXEN-adjacent
+handshake this project's own `radio_tx_enable()` already reproduces.**
+Confirmed live, not inferred from static reading alone: breakpointed the
+gating branch for a sibling, conditionally-touched bit (bit 9, same
+function) and read `r0`/`r5` directly —`r5` (`RAIL_TxOptions_t`) is `0`
+for a plain `ADV_IND` from this sketch, and `r0` (an internal helper's
+return value) is `0` at the branch that would skip the bit-9 block,
+confirming that block *is* skipped and bit 1's clear executes
+unconditionally on the only path this scenario actually takes.
+
+**Ported it, tested on real hardware, and reverted — a real regression,
+not a non-event like every other change this document has tried.**
+Added as the very first store in `radio_tx_enable()`, before the
+existing `SR3` clear. QEMU 77/17/14 unchanged. Flashed to the
+`radio-port-hardware-2` bring-up build and checked `RAC.STATUS`
+immediately after `TXEN` and again 30ms later: **`RAC.STATUS` reads
+`0x10400000` (`STATE=0`, `OFF`) at both checkpoints, reproducibly across
+two independent flashes** — stock-TX-reaching behavior broken, where
+every build before this one reliably reached and held `STATE=9` (`TX`)
+at the same checkpoint. Reverted immediately (kept only as a code
+comment warning against retrying it blindly); confirmed the revert
+restores the known baseline (`RAC.STATUS=0x09400000`,
+`FRC.STATUS=0x01100200`, byte-for-byte the same as every prior capture).
+
+**Why this is still a valuable result, not a wasted detour:** it rules
+out one more candidate, with hardware evidence instead of a static
+guess, and it's informative in its own right — porting a real, confirmed
+piece of stock's own sequence made things actively *worse*, which means
+something about *this* bit's effect depends on context this project
+hasn't replicated (ordering relative to some other state, or a
+precondition `RAIL_StartTx`'s own caller already established that this
+driver's call site doesn't). That's a sharper, hardware-grounded
+question for whoever picks this up next than "untested, might help."
