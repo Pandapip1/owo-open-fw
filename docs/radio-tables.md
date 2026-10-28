@@ -4470,3 +4470,46 @@ real, and in the expected direction -- that stock itself likely
 doesn't exercise it in a plain single-TX scenario either. Not escalated
 further without a genuinely new technique for observing sub-instruction
 hardware state, which this project does not have.
+
+### 7.48 A new, direct intervention tried on real hardware: forcing `BUFC`'s `READOFFSET` past the header does not unstick `FRC`
+
+Every prior check of this stall read registers; none had tried actually
+*writing* one to see what happens. §7.31 established `READOFFSET` sits
+at `2` (the header) forever while `WRITEOFFSET` sits at `0xB` (the full
+staged frame) -- `FRC` never asks for a third byte. Tried directly
+forcing the question: halt the open build at its usual settled `TXEN`
+checkpoint (`RAC.STATUS=0x09400000`, `FRC.STATUS=0x01100200`,
+`READOFFSET=2` -- baseline, as always), then `mww 0xba000018 3` (the
+real non-secure `READOFFSET` address, per §7.31) to advance the pointer
+by hand, as if `FRC` had consumed one payload byte.
+
+**First attempt, resumed for 100 ms, found the forced value had reverted
+to `2`** -- initially looked like `FRC` was actively fighting the write.
+**Re-tested at 1 ms/5 ms/20 ms instead and the forced `3` held exactly
+as written at every one of those shorter windows.** The 100 ms reversion
+is therefore not `FRC` self-correcting; it's this project's own
+already-documented fact resurfacing (§7.6's "methodology bug" note):
+the open LLL re-arms/retries `TXEN` periodically on roughly this
+timescale, and each fresh attempt re-stages the `BUFC` channel from
+scratch, incidentally overwriting whatever a debugger had poked in
+during the previous attempt. Not a new finding by itself, but it's why
+this test has to use a short resume window to mean anything.
+
+**With the forced value genuinely held (confirmed stable at 20 ms,
+not yet reverted), `FRC.STATUS` and `RAC.STATUS` were read again:
+byte-for-byte unchanged (`0x01100200`/`0x09400000` -- same
+`ACTIVETXFCD=0`, same `FSMSTATE=17`, same stuck `TX`).** Advancing the
+externally-visible read pointer by hand does not nudge the frame
+coder's internal state machine at all. **This is a real, clean negative
+result with a concrete implication**: `READOFFSET` advancing is purely
+an *output* of `FRC`'s internal FSM making real progress, not an input
+that can drive it -- the FSM must track its own notion of how many
+bytes it has actually processed internally (separately from, or in
+addition to, this externally-writable register), so spoofing the
+externally-visible counter alone cannot fool it into proceeding. The
+real block is entirely inside `FRC`'s own internal, unexported state,
+consistent with every other negative result in this investigation, but
+now demonstrated by direct intervention rather than inferred from
+reading status bits alone. No further externally-writable register in
+this project's current map is a plausible next lever to try along
+these lines.
