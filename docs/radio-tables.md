@@ -2488,13 +2488,31 @@ unidentified configuration gap, not because it's confirmed load-bearing.
 
 **Then, gated behind the loop, `fn_0x77a` itself — fully lifted and
 verified in `sequencer-decomp/src/fn_0x77a.c`, matching the original
-exactly.** It writes a hardcoded constant to `RAC.STCTRL`
-(`0x01061A7F` — not derived from any per-chip calibration data visible
-in this object, and the *exact* value independently measured live on
-stock hardware in §7.8, closing that loop), then configures this core's
-own private Armv6-M `SysTick` timer from its own standard
-`SYST_CALIB.TENMS` field (reload = `TENMS * 25`, enabled from the
-processor clock, no interrupt). Ordinary, well-understood ARM core
+exactly.** It writes a hardcoded constant to `RAC.STCTRL` — decomposed by
+that register's own two documented fields (`RAC_S_field.py`: `STCAL`
+bits `[23:0]` = `0x061A7F`, `STSKEW` bit `24` = `1`) rather than left as
+one opaque `0x01061A7F` blob, even though `STCAL`'s own numeric content
+is still an opaque empirical value this project has no theory for, the
+same epistemic status as the `PATRIM`/`IFADCTRIM` trim words elsewhere
+in this register block. (Checked and ruled out as a lead: a text search
+for "STCAL" elsewhere in the SDK tree only turns up `SYSCFG.CFGNSTCALIB`
+— "Configure Non-secure Sys-Tick Cal." — matched purely by the substring
+"STCALIB" inside "CFGNSTCALIB", a different peripheral register
+entirely, not evidence about this field.) The one real, structural
+observation: `STCTRL`'s own bit layout (`STCAL[23:0]`, `STSKEW[24]`) is
+identical to the standard Armv6-M `SysTick.CALIB` register's own layout
+(`TENMS[23:0]`, `SKEW[24]`, `NOREF[25]`) that this same function reads a
+few lines later — plausibly `RAC`'s internal "Sequencer Timer" is modeled
+the same way `SysTick` is, with `STCAL` playing an analogous calibration-
+tick-count role for whatever clock domain it runs on. That's a structural
+parallel, not a confirmed explanation of the number itself. The combined
+value is the *exact* one independently measured live on stock hardware
+in §7.8, closing that loop. `fn_0x77a` then configures this core's own
+private Armv6-M
+`SysTick` timer from its own standard `SYST_CALIB.TENMS` field (reload =
+`TENMS` times a named, documented-as-stock's-own-choice `25` multiplier,
+enabled from the processor clock, no interrupt). Ordinary, well-understood
+ARM core
 housekeeping, not a radio-specific mechanism.
 
 **The real significance is what gates reaching it at all.** Immediately
