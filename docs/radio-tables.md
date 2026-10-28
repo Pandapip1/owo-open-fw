@@ -3584,3 +3584,40 @@ point, both showing the same "stuck" status word. But it closes a real,
 confirmed instance of the simulator previously disagreeing with silicon
 on a register this investigation depends on reading correctly in every
 other test on this chip.
+
+### 7.29 A second real QEMU fidelity divergence, found and fixed: `FRC.WCNTCMP0`'s dynamic length
+
+`vendor/qemu` had no special-case handling for `FRC.WCNTCMP0` at all --
+it just held whatever software last wrote (the open stack's bootstrap
+sentinel `0xFF`), never updating it, even though §7.20 already
+established that real FRC genuinely parses the packet's own length
+byte (`WCNTCMP0` reads `0xA` for an 11-byte frame). Got a second,
+independent confirmed data point before implementing anything (per
+[[feedback-rigor-and-methodology]] and the `ACTIVETXFCD`/`SEQSLEEPING`
+precedent of never synthesizing from one data point): temporarily grew
+`tests/radio-port`'s advertising payload from 1 byte to 4 bytes (a
+reversible, deliberately small diagnostic change, reverted immediately
+after measuring) and re-measured on real hardware -- `WCNTCMP0` moved
+from `0xA` to `0xD`, exactly `+3` for `+3` payload bytes. This confirms
+a clean 1:1 linear relationship, not just one coincidental number.
+
+Both measurements fit exactly: `WCNTCMP0 == DFLOFFSET + <the
+DFLCTRL-configured length field, read from the real staged packet
+bytes> + 3` (BLE's fixed 3-byte CRC, added because this project's one
+and only `DFLCTRL` configuration has `DFLINCLUDECRC=0`). `DFLOFFSET=1`
+plugged in: `1 + 6 + 3 = 10` and `1 + 9 + 3 = 13`, both exact.
+
+**Implemented in `efr32_rac_capture_tx_snapshot()`** (which already had
+the real staged packet bytes in hand for the RF-medium snapshot
+mechanism) -- a new `efr32_frc_dynamic_length_wcntcmp0()` helper reads
+the real, currently-configured `DFLCTRL` fields (`DFLMODE`, `DFLOFFSET`,
+`DFLBITS`, `DFLSHIFT`, `DFLBITORDER`, `DFLINCLUDECRC`) generically
+rather than hardcoding this one configuration, extracts the length
+field from the actual packet bytes, and only updates `WCNTCMP0` when
+`DFLMODE==1` -- the only value this project's firmware ever configures,
+and the only one with any real-hardware confirmation. Other `DFLMODE`
+values have no public description text in the generated field model
+and are deliberately left alone (matching the `ACTIVETXFCD` precedent:
+don't synthesize what isn't confirmed). Added
+`test_frc_wcntcmp0_dynamic_length`, encoding both real measurements
+directly. QEMU 78/17 (one new test) confirmed passing.
