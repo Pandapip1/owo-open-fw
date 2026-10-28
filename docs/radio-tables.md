@@ -3331,6 +3331,26 @@ The traces also surfaced two still-unidentified write sites at
 offset this project's own `OBS_BLOCK_A8015020`/`OBS_BLOCK_A8016100`
 constants already use, nor any peripheral in the fetched public
 register models -- `0xA8015000`/`0xA8016000` are not `AGC`/`RFCRC`/
-`MODEM`/`SYNTH`/`RAC`/`FRC`'s base addresses). Not tested this pass;
-flagged as the next concrete thing to try if this thread is picked up
-again, rather than left unrecorded.
+`MODEM`/`SYNTH`/`RAC`/`FRC`'s base addresses).
+
+### 7.23 The four new write sites from §7.22's traces, tested exactly as captured: no change
+
+Replayed all four stock-captured values from `stage2-m33-tx-prepare.json`
+(`0xB801610C=0x000FFFFF`, `0xB801510C=0x00025CEB`, `0xB80160EC=0x0FFFF8FF`,
+`0xB80150EC=0x0C2F2891`) in the exact order the trace shows them,
+immediately before `RAC.CMD.TXEN` -- the same relative position stock's
+own M33 TX-prepare code writes them. QEMU 77 still passed. Hardware-tested
+at the standard checkpoint: **no change** -- `RAC.STATUS`/`FRC.STATUS`
+identical to every prior reading. Reverted; not kept.
+
+This does not prove these four registers are irrelevant in general --
+only that replaying them with this project's own minimal, already-correct
+setup produces no observable difference, consistent with every other
+static-value-injection result this project has found (the §4.2 "channel-37
+calibration word" test reached the same conclusion for a different set of
+registers). Combined with §7.22's structural finding (the M0+ sequencer's
+own dispatch path writes no `FRC.CMD` bit for a plain TX either), the
+weight of evidence now points away from "one more missing static register
+value or command bit" and toward either a precise write-*ordering*/timing
+dependency this project has not yet isolated, or a hardware-autonomous
+precondition neither stack's software explicitly asserts.
