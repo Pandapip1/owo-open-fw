@@ -3542,3 +3542,45 @@ changes memory layout project-wide for a diagnostic) or actual
 
 Reverted the ISR-bypass edit (`git diff --stat` confirmed empty);
 rebuilt the clean baseline; QEMU 77/17 re-confirmed passing.
+
+### 7.28 A real QEMU fidelity divergence, found and fixed: `RAC.STATUS.TXENS`/`SEQACTIVE` during `TX`
+
+Separately from the `ACTIVETXFCD` search itself, checked whether
+`vendor/qemu`'s device model (`hw/arm/efr32bg22.c`) actually reproduces
+what this whole investigation has repeatedly, directly measured on real
+hardware -- per the standing dual-goal mandate's second half ("every
+divergence you find must be recorded and fixed"), this is exactly the
+kind of check that shouldn't wait for someone to notice it by accident.
+
+`efr32_rac_status()` previously derived `SEQACTIVE` (bit 28) as `state
+!= OFF` and `TXENS` (bit 30) as `state == TX` -- the naive assumption
+that these status-mirror bits simply track the coarse `STATE` field.
+This directly contradicts the baseline this entire document has
+measured over and over (`RAC.STATUS == 0x09400000` after the real
+`RAC.CMD.TXEN` sequence settles, `STATE=9/TX` with `SEQACTIVE=0`,
+`TXENS=0`) -- not a one-off, the single most-repeated measurement in
+this whole investigation. QEMU's model and its own `test_rac_tx_commands`
+qtest both asserted the opposite (`TXENS=1` on `TXEN`), meaning the
+simulator was *not* faithfully reproducing real silicon's behavior for
+this exact, heavily-tested scenario.
+
+**Fixed**, scoped to exactly what's confirmed: `TXENS` no longer has
+any state that sets it (there is no confirmed state where real hardware
+shows it as 1, so -- same precedent as `ACTIVETXFCD` just above it in
+the same file -- it is left unset rather than guessing a new trigger).
+`SEQACTIVE` is now `0` specifically for `state == TX` (confirmed), left
+as the prior `state != OFF` formula for every other state (unconfirmed,
+not disproven -- no equivalent real-hardware RX measurement exists, so
+changing it would just swap one guess for another). `SEQSLEEPING` (bit
+22) stays entirely unmodeled, for the same "don't synthesize an
+unconfirmed trigger" reason. Updated `test_rac_tx_commands` to assert
+the hardware-confirmed `TXENS=0`/`RXENS=0` during `TX` instead of the
+previous (disproven) `TXENS=1` expectation. QEMU 77/17 re-confirmed
+passing with the fix.
+
+This does not resolve `ACTIVETXFCD` itself -- the open stack's real
+hardware and the now-corrected QEMU model agree with each other on this
+point, both showing the same "stuck" status word. But it closes a real,
+confirmed instance of the simulator previously disagreeing with silicon
+on a register this investigation depends on reading correctly in every
+other test on this chip.
