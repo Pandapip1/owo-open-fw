@@ -3295,3 +3295,42 @@ M0+ live-state tooling question closed in §7.15 was about the M0+ CPU
 specifically, not about catching the M33-visible `RAC.STATUS` register
 at finer time resolution, so that specific gap is not actually closed
 by this project's existing tooling.
+
+### 7.22 The M0+ sequencer's own direct TXWARM/TX dispatch path writes no `FRC.CMD` bit at all; a fresh look at two never-analyzed stock traces; `RAC.SR0` bit 19 tested, no change
+
+Revisited the hypothesis that the real `FRC` activation trigger lives
+inside the M0+ sequencer's own job-dispatch logic (`fn_0x894`/`fn_0xd38`),
+which this project's charter deliberately does not port. Checked it
+directly against the decompiled code rather than leaving it as a guess:
+`fn_0x894`'s `FRC.CMD.FRAMEDETRESUME` write is gated behind `irq_number
+== 5` (not `8`/`9`); `fn_0x19d0`'s `FRC.CMD.TXSUBFRAMERESUME` write (the
+same bit already tested and ruled out from the M33 side in §7.20) lives
+in a function reached only via `IRQ13`'s own vector, never called from
+`fn_0x894`/`fn_0xd38` at all. **For the plain `TXWARM`/`TX` path this
+project's open stack actually exercises, the M0+ sequencer's own direct
+dispatch code (`fn_0x894` -> `fn_0xd38`, the only two functions the
+vector table reaches for `IRQ8`/`IRQ9`) does not write `FRC.CMD` at
+all.** This specific hypothesis does not survive checking against the
+real code -- both stacks' dispatch logic is a no-op for `FRC` here, so
+the missing trigger is not hiding in the excluded M0+ policy logic.
+
+**Found and used two never-analyzed stock traces.** `stage2-m33-prepare.json`
+and `stage2-m33-tx-prepare.json` (pre-existing capture files, never
+referenced anywhere in this document before now) single-step a stock
+M33 TX-preparation window and record every store. Most of what they
+contain overlaps material already tried: `RAC.SR3` bits 14/30 (§7.5.1,
+already fixed), `SYNTH.FREQ`/`RAC.DIGCLKRETIMECTRL`/`RAC.XORETIMECTRL`
+(§4.2's "channel-37 calibration word" injection, already tested and
+confirmed negative). One item was genuinely new: a clear of `RAC.SR0`
+bit 19 via its CLR alias, never previously isolated or tested on its
+own (this project's own SR0 usage only ever touches bits 0-3/5-7/18).
+**Tested it directly: no change on real hardware.** Reverted.
+
+The traces also surfaced two still-unidentified write sites at
+`0xA8016000+0x10C` and `0xA8015000+0x10C`/`+0xEC` (neither matches any
+offset this project's own `OBS_BLOCK_A8015020`/`OBS_BLOCK_A8016100`
+constants already use, nor any peripheral in the fetched public
+register models -- `0xA8015000`/`0xA8016000` are not `AGC`/`RFCRC`/
+`MODEM`/`SYNTH`/`RAC`/`FRC`'s base addresses). Not tested this pass;
+flagged as the next concrete thing to try if this thread is picked up
+again, rather than left unrecorded.
