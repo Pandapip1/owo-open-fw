@@ -4143,3 +4143,30 @@ or `BUFC` are trying to signal via an interrupt at all, from any angle
 tested in this whole `PROTIMER`/IRQ thread -- it's a silent internal
 stall in `FRC`'s own datapath (`FSMSTATE=17`), with nothing visible to
 any of the interrupt-enable/pending machinery checked so far.
+
+### 7.42 A genuinely new lead: `SYNTH.STATUS.INLOCK=0` at the stuck baseline -- the PLL is not locked
+
+With the entire interrupt-handling thread closed, checked two blocks
+this investigation had never directly examined at the settled stuck
+baseline: `MODEM` and `SYNTH`. `MODEM.STATUS`/`STATUS2`/`STATUS3`/
+`FSMSTATUS`/`TIMDETSTATUS` read `0`/`0`/`0x3000`/`0`/`0x4000000` --
+decoding their fields (`DEMODSTATE`, `FRAMEDETID`, `VITERBIDEMOD*`,
+`DSASTATE`, `CHPWRACCUMUX`, `BBPFOUTABS`, `LRDSALIVE`) shows these are
+all RX-demodulator/power-measurement diagnostics, unsurprising and
+unpromising for a TX stall -- not pursued further.
+
+`SYNTH.STATUS` (`0xb8018008`), checked next, reads `0x4`:
+`SYNTHREADY=1` (bit 2) but **`INLOCK=0`** (bit 0) -- the frequency
+synthesizer's PLL is not locked. `IFFREQEN`(bit1)=0,
+`CAPCALRUNNING`/`CAPCALBITRESULT`/`CAPCALFULLWAIT`/`CAPCALERROR`
+(bits 8/9/10/14)=0, `VCOFREQACTIVE`(bit16)=0 -- no calibration is
+reported running or erroring, the VCO simply isn't shown active
+either. This is the first genuinely new, concrete lead since the
+entire `PROTIMER`/interrupt thread closed: if the PLL never actually
+locked onto the target channel frequency, the radio cannot be
+transmitting real RF at a stable frequency, which is a very plausible
+reason for whatever gates `FRC` from ever pulling a second byte out of
+`BUFC`. Not yet investigated further (what should set `INLOCK`,
+whether this is expected at this specific point in the sequence, or a
+genuine fidelity gap) -- the next concrete step if this is picked up
+again.
