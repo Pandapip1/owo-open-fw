@@ -3805,3 +3805,52 @@ a from-scratch bootable image with a real vector table (like
 `IRQ_CONNECT()`/software-ISR-table mechanism to install a real (even if
 trivial) handler before unmasking IRQ36 in this same injection
 technique. Hardware reconfirmed back to the exact baseline afterward.
+
+### 7.34 `PROTIMER.IEN` all-ones: it genuinely reacts (`IF` pends, partially acks), but neither pending-unserviced nor partially-acked changes anything
+
+Checked first whether `PROTIMER` even *tries* to request an interrupt
+at all: at the unmodified baseline, `PROTIMER.IEN` (`+0x070`) reads `0`
+and `NVIC`'s pending register (`ISPR1`, `0xE000E204`) shows nothing for
+IRQ36 -- consistent with everything else established, `PROTIMER` is
+fully inert. This chip's `IF`/`IEN` bit meanings are unresolved
+(§7.9), but "pending" can be checked via `NVIC` without unmasking the
+interrupt (pending latches independently of enable), which is a safe
+way to test "does anything happen" before escalating.
+
+Built a second kept probe, `tests/protimer-probe/probe-ien-sweep.S`
+(same base enable sequence as `probe.S`, plus `PROTIMER.IEN = 0xFFFFFFFF`
+-- a blanket sweep, explicitly not a field-decoded value, since the
+named-bit meanings aren't known). With that in place: `ISPR1` bit 4
+(IRQ36) sets, and `PROTIMER.IF` reads `0x3` after a real `TXEN`
+sequence -- **`PROTIMER` genuinely reacts to the real TX attempt**, not
+inert even with `NVIC` itself left masked (no vector-table risk, same
+as `probe.S`). But with the interrupt still unserviced for the usual
+450ms settle window, `READOFFSET`/`FRC.STATUS`/`RAC.STATUS` are
+unchanged from baseline -- pending-but-unserviced doesn't help either.
+
+Separately checked whether merely *acknowledging* the pending flag
+(writing its `CLR` alias, `0xb801e064`, no vector dispatch needed) has
+any effect on its own: `IF` went from `0x3` to `0x1` immediately after
+writing all-ones to the alias -- one bit (bit 1) is a real, clearable
+one-shot latch; the other (bit 0) re-asserts instantly, consistent with
+a persistent status-style condition rather than a one-shot event. (A
+follow-up attempt to then let the real firmware continue and recheck
+hit a test-harness gotcha, not a hardware finding: a bare `resume`
+with no address just continues from wherever the core is currently
+halted, which after `bg22_require_sram_execution` is that fixture's
+own tiny proof code, not the real firmware's genuine run point --
+`bg22_require_sram_execution` is destructive to the real PC/SP by
+design, so "ack now, then let the real firmware keep going and
+recheck" needs a non-destructive halt for the ack step, not attempted
+here. Caught before being reported as a real negative result.)
+
+**Net position after §7.32-7.34: the simplest and the next-simplest
+versions of the `PROTIMER` hypothesis are both now cleanly ruled out**
+(clock-only; pending-but-unserviced). **What remains is specifically
+whether the CPU must actually take the IRQ36 exception and run real
+handler logic** -- genuinely testing that needs a real installed vector
+(either a from-scratch bootable image with its own vector table, or a
+`VTOR`-redirected SRAM-resident copy of the real table with just IRQ36
+overridden) rather than another register poke. This is a larger,
+riskier undertaking than anything tried so far in this sub-thread and
+was not attempted this round.
