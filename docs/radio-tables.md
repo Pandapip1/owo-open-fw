@@ -3118,3 +3118,28 @@ belongs to a different FIFO-population mechanism than the one actually
 exercised. Consistent with the already-present code comment that
 explicitly warns against conflating the two
 ("`SetTxFifo's initial-count path were RAIL_WriteTxFifo`").
+
+### 7.18 `RAC.CMD.FRCWR`/`FRCRD`: named exactly for this handoff, both orderings tested, no change
+
+`RAC.CMD` (the same write-only command register `TXEN`/`TXDIS`/`RXDIS`
+already use) has two fields this project had never considered:
+`FRCWR` (bit 10) and `FRCRD` (bit 11), both `write-only`
+(`RAC_S_field.py`). By name alone these look like exactly the RAC-side
+trigger this whole investigation has been missing -- a command telling
+`FRC` to start writing (transmitting), distinct from `TXEN`'s own role
+of committing `RAC`'s own state machine to the TX sequence (synth/PA
+ramp) without necessarily also kicking `FRC`'s engine.
+
+**Tested both plausible orderings on real hardware** (same low-risk
+category as the already-used `RAC.CMD` bits): `TXEN` then `FRCWR`, and
+`FRCWR` then `TXEN`. QEMU 77/17 passed for both. Hardware-tested at the
+standard 30ms checkpoint: **no change in either ordering** --
+`RAC.STATUS=0x09400000`/`FRC.STATUS=0x01100200`, identical to every
+prior reading. Reverted both; not kept.
+
+This does not fully explain *why* `FRCWR` has no effect (unlike §7.17's
+`PREFETCH`, no deeper mechanism was found to explain the null result --
+it is a clean negative, not yet a *understood* one). Worth remembering
+if a future pass finds evidence that `FRCWR`/`FRCRD` require some other
+precondition this project hasn't established, rather than re-testing
+blind.
