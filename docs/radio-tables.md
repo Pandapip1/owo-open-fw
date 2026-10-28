@@ -4633,3 +4633,42 @@ than assuming the existing "five" count was exhaustive, is exactly the
 kind of check this project's own rigor standard calls for. `fn_0xace`
 and `fn_0xb74` themselves remain undecompiled; both their known callers
 (`fn_0x23a0`/IRQ1 and now `fn_0x2898`/IRQ11) are confirmed unreachable.
+
+### 7.52 Retried §7.5.4's splice-into-stock test (`build-stage2.3`) with the now much fuller decompiled set -- same hang, as §7.5.4 already predicted
+
+§7.5.4 (above) only relocated five functions and hit a hang in stock's
+M33-side RAIL calibration helper, then went on to conclusively show
+(still in §7.5.4) that the hang is **not** about those functions at
+all: a "null" variant that relocated nothing and redirected no call
+sites, and a variant that changed a single unrelated byte deep inside
+the object with the length completely untouched, both hang identically
+at the same `0x13056` busy-wait -- an unlocated M0+-side integrity gate
+that fails on *any* byte-level change to the sequencer object,
+confirmed via register-level lockstep against stock down to the exact
+diverging status bit (`RFMAILBOX` bit 0, `0xB802C040`), and explicitly
+confirmed **not** on the open stack's own TX path (`radio.c`/
+`radio_seq.S` reference neither mailbox address, and the stock
+calibration helper this hangs inside is only ever called by stock's
+own RAIL library at boot, before any TX attempt).
+
+Extended `sequencer-decomp/build_patched_stage.sh`/`link_patch.ld` to
+relocate every function this project has since verified that's
+actually reachable from `fn_0x894`'s real IRQ8/IRQ9 dispatch tree --
+`fn_0xd38`/`fn_0x80c`/`fn_0x1af4`/`fn_0x1a18`/`fn_0x21d8`, ten total,
+up from the original five -- and reran the full pipeline (compiles
+clean, `west build` succeeds, flashes and boots). **Result: the
+identical hang, at the identical instruction** (`pc=0x13056`, same
+busy-wait on the same `RFMAILBOX` bit). Exactly what §7.5.4's own
+"integrity gate" conclusion already predicted, not a new finding --
+recorded because the harness itself is now a meaningfully more
+complete, reusable tool (every function with a known-correct lift is
+now exercised end-to-end by this test, not just the first five), and
+because re-deriving an already-closed conclusion from scratch (rather
+than finding and reading §7.5.4 first) cost real effort that a closer
+read of this document would have saved. **This splice vehicle remains
+blocked for validating any further sequencer modification until the
+integrity gate itself is located** -- a bounded, well-defined reverse-
+engineering target in its own right (likely a checksum/signature the
+M0+'s own boot or mailbox-service path checks against the object's
+real bytes), but a different task from decompiling `fn_0x894`'s call
+tree, and not yet attempted.
