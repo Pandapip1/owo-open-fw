@@ -2408,3 +2408,51 @@ gated on read values, the same shape as `fn_0x894`'s own gate bracket --
 but it is reached, on real stock hardware, exactly as often as `RAC.SR1`
 bit 17 is set during a real TX, which the hardware test above already
 measured as never. `fn_0x572` and `fn_0x64c` remain unexamined.
+
+### 7.8 Full `FRC` register-bank diff, stock vs. open, same checkpoint
+
+Tried a broader diagnostic instead of guessing which single field
+matters: dumped all of `FRC`'s first 64 words (`0xB8004000`..`0xB80040FC`,
+non-secure alias — the secure alias `0xA8004000` reads back all-zero
+through the debugger with Secure debug disabled, a real pitfall hit and
+corrected here, not a finding) on stock and on the open
+`radio-port-hardware-2` bring-up build, both ~30 ms after their own
+`RAC.CMD = TXEN` write, and diffed every word against the public
+`FRC_S_register.py` names.
+
+**Real, static config differences found, none of them a clean
+explanation:**
+
+* `IEN` (`+0x06C`): stock `0xA000` (`BUSERROR`, `TXRAWEVENT`); open
+  `0x11` (`TXDONE`, `RXDONE` — exactly what `radio.c` explicitly enables).
+  `IEN` only gates whether a pending bit raises a CPU interrupt; it does
+  not gate whether `FRC.STATUS` itself advances, so this is a real,
+  recorded divergence but not a plausible cause of `ACTIVETXFCD` staying
+  clear.
+* `RXCTRL` (`+0x04C`): stock sets `ACCEPTCRCERRORS` and
+  `RXFRAMEENDAHEADBYTES=4`; open leaves both clear. RX-path configuration,
+  active during a TX-only test only if some shared internal state machine
+  needs it set regardless of direction — not established either way.
+* `SNIFFCTRL` (`+0x084`): differs in several sniff/monitor-mode bits.
+  Diagnostic/monitor configuration, not an obvious TX-completion gate.
+* `WCNTCMP0` (`+0x020`): stock `0xFF`, open `0xA`. **Not treated as a bug**
+  — `radio.c`'s own comment at the `WCNTCMP0` write site already
+  documents that this starts at a `0xFF` sentinel and gets dynamically
+  replaced with the real remaining word count once the BLE header's
+  length byte is parsed; `0xA` is consistent with that replacement having
+  already happened for a short test packet by the time this capture was
+  taken, not with the sentinel having leaked through unwritten. Comparing
+  against stock's *own* real advertising packet (a different length) at
+  the same wall-clock offset is not a controlled comparison -- this
+  needs re-running with byte-identical packet content/length on both
+  sides to mean anything.
+
+**Net result:** a real, useful diagnostic pass that surfaced genuine
+config differences worth having on record, but none of them is a
+demonstrated cause of the `ACTIVETXFCD` gap, and the comparison itself is
+confounded by stock and open transmitting different-length packets in
+this test. The concrete next step, if this thread is picked back up: redo
+this exact dump with both builds transmitting the *same* fixed-length
+test payload, so `DATABUFFER`/`WCNT`/`WCNTCMP0`'s differences (all
+plausibly just packet-length artifacts here) can actually be trusted
+either way.
