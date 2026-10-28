@@ -4388,3 +4388,29 @@ the register level, per §7.1-7.44) or deeper reading of the M0+
 sequencer's own dispatch logic (`fn_0x894`/`fn_0xd38`, deliberately
 never ported per this project's charter, but still readable purely for
 understanding).
+
+### 7.46 QEMU fidelity: modeled the one `RFCRC.CMD.INITIALIZE` side effect §7.43 confirmed on real hardware
+
+§7.43's real production fix (`radio_crc_configure()` never issuing
+`RFCRC.CMD.INITIALIZE`) was confirmed, on real hardware, to make
+`RFCRC.DATA` load from `RFCRC.INIT` -- a genuine silicon semantic this
+project now has direct evidence for. Checked whether `vendor/qemu`'s
+model implements that semantic at all: it does not. `RFCRC.CMD`/
+`INIT`/`DATA` were fully generic, behaviorless register-table latches
+(`EFR32_RFCRC_BASE` had only `IPVERSION` and the `EN`/`CTRL` write
+masks modeled; nothing else). Added a dedicated `RFCRC.CMD` write
+handler in `hw/arm/efr32bg22.c`, mirroring the existing `FRC.CMD`
+handler's own shape exactly (write-only, early `return`, no
+`efr32_radio_mask_write` table entry -- that path is dead code for a
+register already fully handled by a dedicated block, confirmed by
+checking `FRC.CMD`'s own precedent has none either): on
+`INITIALIZE` (bit 0), `DATA := INIT`. Does **not** model the actual
+running per-byte CRC computation during a real TX/RX byte stream --
+there is no BUFC byte-stream hookup in this model to drive that, and
+building one would be a much larger, separate undertaking disconnected
+from any currently observed divergence; only this one directly-measured
+register side effect is modeled. Added `test_rfcrc_cmd_initialize`
+(`efr32bg22-test` 78→79 tests, all passing); `efr32bg22-rf-test`
+(17/17) unaffected and still passing. Commit `1b7fa04e36` in the
+`vendor/qemu` submodule (`Pandapip1/qemu.git` fork), bumped in the
+superproject at `b1dc525`.
