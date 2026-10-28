@@ -3748,3 +3748,60 @@ forward directly, but it upgrades "`PROTIMER` integration is unproven
 but promising" to "`PROTIMER` is confirmed completely off, confirmed
 non-trivial to even just turn on safely" -- real scoping information
 for whoever attempts that integration next.
+
+### 7.33 A proper, safe `PROTIMER` enable test, built as a kept standalone probe: clean negative, narrows the hypothesis
+
+Built `tests/protimer-probe/` (`probe.S` + `build.sh` + `README.md`,
+kept as a permanent, reusable artifact per the user's explicit request,
+not reverted the way every other hardware-tested change this session
+has been) -- standalone Cortex-M33 assembly, independent of Zephyr and
+the real driver, that does only the `PROTIMER` enable sequence
+(`EN`/`CTRL`/two further config writes/`CMD=START`, matching stock's
+own observed init sequence) with NVIC's IRQ36 deliberately left masked
+-- no vector-table risk, unlike §7.32's crash. Injected via the
+debugger into SRAM and run from a halt-point right before the real
+firmware's own `TXEN` write, then handed back to the real firmware to
+continue -- this reuses the real, already-correct `FRC`/`BUFC`/`RAC`
+bring-up instead of hand-duplicating the ~30-write PHY config table in
+a from-scratch image (real risk of exactly the kind of transcription
+error §7.13 already caught once).
+
+**Two real debugging pitfalls hit and fixed while building this (both
+documented in the probe's own `README.md` so they aren't rediscovered):**
+the probe's writes silently had no effect the first time, because it
+used the *secure* `0xa801c000` `PROTIMER` window -- the probe inherits
+the host firmware's Non-secure CPU state, same as every other radio
+register access in this project, and needs the `0xb801c000` alias, not
+the secure one, even though reads/writes to the wrong window neither
+faulted nor erred. Separately, the injected code took an immediate
+`MemManage` fault the first time it was run after
+`bg22_reset_to_breakpoint`: Zephyr's MPU marks SRAM execute-never, and
+disabling it (`mww 0xe000ed94 0`) *before* that proc's real
+`SYSRESETREQ` does not persist across the reset -- it must be disabled
+again afterward, immediately before injecting/running anything.
+
+**With both fixed, the probe ran cleanly (confirmed via its own
+completion marker, no fault) and genuinely started `PROTIMER`'s
+counter** (`0xb980` immediately after the probe, `0x1031a2` ~450ms
+later after the real firmware's `TXEN` ran to its usual hold -- a real,
+live, incrementing counter, not a stuck write). **Clean negative
+result: `WRITEOFFSET`/`READOFFSET`/`WCNTCMP0`/`FRC.STATUS`/`RAC.STATUS`
+all read byte-for-byte identical to the established baseline** (`0xB`/
+`0x2`/`0xA`/`0x01100200`/`0x09400000`) with `PROTIMER` running the
+entire time. Merely having `PROTIMER` powered and counting is **not**
+sufficient to unstick `FRC`'s frame coder.
+
+**What this does and doesn't rule out.** It cleanly eliminates the
+simplest version of the hypothesis ("`FRC` just needs `PROTIMER`'s
+clock/power to be present somewhere in the system"). It does **not**
+rule out the IRQ-handshake version (does `FRC` need to actually receive
+a *serviced* `PROTIMER` interrupt, or a specific compare/capture event,
+not just a running counter) -- testing that needs a real installed
+IRQ36 handler, which this probe deliberately avoided (§7.32's crash was
+most plausibly exactly that unhandled-interrupt case). That remains the
+next concrete, well-scoped experiment if this is picked up again: either
+a from-scratch bootable image with a real vector table (like
+`tests/hardware-lockstep/m33-seq-txwarm.S`), or Zephyr's own
+`IRQ_CONNECT()`/software-ISR-table mechanism to install a real (even if
+trivial) handler before unmasking IRQ36 in this same injection
+technique. Hardware reconfirmed back to the exact baseline afterward.
