@@ -3854,3 +3854,66 @@ handler logic** -- genuinely testing that needs a real installed vector
 overridden) rather than another register poke. This is a larger,
 riskier undertaking than anything tried so far in this sub-thread and
 was not attempted this round.
+
+### 7.35 The real-IRQ-servicing test attempt: confounded by the test apparatus itself, not a real finding either way
+
+Attempted the experiment §7.32-7.34 identified as the remaining gap:
+does `FRC` need the CPU to actually *take* the IRQ36 exception, not
+just have it pending? Built `tests/protimer-probe/probe-irq-handler.S`
+(kept, per the standing instruction to keep this whole probe family as
+evidence): since this build has no `CONFIG_DYNAMIC_INTERRUPTS`
+(`_sw_isr_table` is flash/const, confirmed via `nm`) and `VTOR_NS`
+reads `0` (flash-resident, confirmed by having the probe itself read it
+from the CPU's own Non-secure perspective rather than trusting a
+debugger-side read, which risks hitting the wrong TrustZone bank), the
+probe copies the live 64-word vector table into SRAM, patches only the
+IRQ36 entry to a trivial ack-and-return handler, repoints `VTOR_NS` at
+the copy, then does the same `PROTIMER` enable/`IEN`-sweep as §7.34 and
+unmasks IRQ36.
+
+Caught one real bug before testing on hardware: the first draft placed
+the copied table at `0x20000800`, inside this *same probe's own
+180-byte code* (`0x200007d0`-`0x884`, confirmed via `size`) -- the copy
+loop would have overwritten its own not-yet-executed instructions,
+including the handler, mid-run. Moved the table to `0x20000900`,
+clear of the probe's own code.
+
+**Result: with IRQ36 genuinely enabled and taken, the TX attempt
+aborted entirely** -- `RAC.STATUS` returned to `0x10400000` (`OFF`,
+matching the pre-`TXEN` baseline), `FRC.STATUS=0`, `WCNTCMP0=0xFF`
+(never even parsed) -- reproduced identically on a second run.
+Surprising enough that, per this project's own standing rule (a
+surprising result should be isolated before being accepted), built an
+isolation variant (`probe-irq-handler-no-enable.S`) that does
+everything identically *except* never unmasking IRQ36 in `NVIC` --
+confirmed via `ISER1` reading back with bit 4 clear, so the exception
+was never taken. **It reproduced the exact same abort-to-`OFF`
+result.** This proves the abort has nothing to do with taking the
+interrupt: it is an artifact of the `VTOR` table-copy destination
+itself. `0x20000900` falls inside live Bluetooth host-stack globals
+(`acl_conns`/`db_hash`/`gatt_sc`, confirmed via `nm -S` -- this
+firmware links at ~99.68% SRAM utilization, there is no genuinely free
+256-byte region anywhere), and corrupting that state is plausibly what
+causes the host stack to detect something wrong and abort the
+advertising attempt, confounding the result completely.
+
+**This is a negative methodological finding, not a resolved
+hypothesis.** The IRQ-handshake sub-hypothesis (does `FRC` need a
+*serviced* `PROTIMER` interrupt) remains genuinely untested, not
+disproven -- this attempt to test it was invalidated by its own side
+effects before it could say anything real. Testing it properly needs a
+destination for the copied vector table (and the handler, if not
+inlined in already-clear code) that doesn't live inside active
+Bluetooth host state -- which this packed-RAM firmware doesn't have
+anywhere nearby `0x200007d0`'s established scratch convention. The
+earlier, lower-risk probes in this family (`probe.S`,
+`probe-ien-sweep.S`) only ever touched `bt_workq` (clear in their
+narrow pre-`TXEN` test window, evidenced by their results reproducing
+the exact expected baseline both times) -- the jump specifically to
+also touching `acl_conns`/`db_hash`/`gatt_sc` is what broke this one.
+A real attempt at this test needs either a from-scratch bootable image
+with its own vector table (sidestepping the real firmware's RAM
+entirely, like `tests/hardware-lockstep/m33-seq-txwarm.S`) or finding
+a genuinely unused RAM window in this specific firmware image (not
+attempted here). Hardware reconfirmed back to the exact baseline
+afterward, both times.
