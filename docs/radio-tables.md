@@ -3621,3 +3621,35 @@ and are deliberately left alone (matching the `ACTIVETXFCD` precedent:
 don't synthesize what isn't confirmed). Added
 `test_frc_wcntcmp0_dynamic_length`, encoding both real measurements
 directly. QEMU 78/17 (one new test) confirmed passing.
+
+### 7.30 Single-stepping over the real `TXEN` write: independent reconfirmation, one new fact, no new lead
+
+Checked whether `FRC.STATUS`'s `FRAMEOK`(9)/`FSMSTATE=17`(20-24) bits
+pre-exist before `TXEN` or appear only afterward (if they pre-existed,
+they'd just be stale init state, not part of this stall). Broke
+*inside* `radio_tx_enable()` right at its own `TXEN` store
+(`0x16602` in the current build), read `FRC.STATUS` there: `0x0`
+(neither bit set) -- confirms they're a direct effect of the `TXEN`
+sequence, not leftover state. `RAC.STATUS` at that same pre-`TXEN`
+point: `0x10400000` (`STATE=OFF`, `SEQSLEEPING` already `1`) -- a new,
+minor fact: `SEQSLEEPING` is already set even while fully `OFF`, before
+any `TXEN` is issued, so it's not something that only becomes true once
+stuck in `TX`.
+
+Then single-stepped *one instruction* past the `TXEN` store and
+immediately read both registers (debugger still halted, no `sleep`):
+already `FRC.STATUS=0x01100200`, `RAC.STATUS=0x09400000` -- byte-for-
+byte identical to the fully-settled value measured 450ms later. This
+independently reconfirms, via a completely different technique than
+§7.20's `sleep 0/1/2/5`ms sweep, that the whole transition to the stuck
+state completes faster than any halt-based observation can catch mid-
+flight. Consistent with (not contradicting) the earlier, already-
+documented finding above this section that single-stepping "froze" the
+observed value while repeatedly polled *during* a halt -- here the full
+transition had already completed by the time even one single-step's
+worth of real wall-clock halt-latency had passed, so there was no
+"before" moment left to catch. **This closes off "try to catch it mid-
+transition via single-stepping" as a method, on both sides of this
+investigation** (already established for the open stack above; now
+confirmed the same physical limit applies here too) -- not a new lead,
+a method ruled out with a cleaner explanation than before.
