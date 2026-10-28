@@ -3995,3 +3995,48 @@ standing instruction for this probe family) rather than losing it --
 it already covers the single largest, most error-prone part of what a
 from-scratch image would need, and resuming the trace later just needs
 `--current` from its exact stopping PC, without `--mask-interrupts`.
+
+### 7.38 The trace reached `TXEN` -- and corrected a real bug in §7.29's own QEMU fix
+
+Resumed §7.37's trace (removing `--mask-interrupts` fixed the hang; it
+had been stuck in ordinary `z_thread_halt` scheduler code waiting on a
+`SysTick` that masking prevented from ever ticking) and it ran all the
+way to the real `RAC.CMD.TXEN` store this time -- `"complete": true,
+"boundary": "stop-address"`. Found several genuinely new things on the
+way (`RAC.CMD.RXDIS`/`TXDIS` issued as a reset-to-known-state step
+before the real `TXEN`; `RAC.SR3`'s CLR-alias write, matching the
+already-established "software only clears bits 14/30, never reads it"
+finding; two still-unidentified `0xb8005xxx`/`0xb8006xxx` writes; two
+SEQRAM-local writes, `0xB0003EC4`/`0xB0003EEC`, a likely M33-to-M0+
+handoff), but the most important finding was in the real staged packet
+bytes themselves.
+
+The trace captured the actual 11 bytes written to `BUFC`'s
+`WRITEDATA` port -- the real BLE `ADV_IND` PDU this project's own test
+harness transmits. Byte 1 (the PDU's `Length` header field, per the BLE
+spec) is `0x09` (9), not the `6` §7.29 assumed when it built
+`test_frc_wcntcmp0_dynamic_length` and derived
+`WCNTCMP0 == DFLOFFSET + field + 3`. **That formula was never actually
+checked against a real captured header byte -- it was back-derived
+from an assumed value that turned out to be wrong, and it only
+"passed" because the qtest it shipped with used the same wrong
+assumption.** With the real byte value (9) and the real measured
+`WCNTCMP0` (`0xA` = 10), the true relationship is simply `field + 1`,
+which equals `field + MINLENGTH` using `DFLCTRL`'s already-named
+`MINLENGTH` field (value `1` in this project's only-ever-configured
+`DFLCTRL`). The second §7.29 measurement (`WCNTCMP0 == 0xD` after
+growing the test payload by 3 bytes) is consistent: the real Length
+byte in that case is `12` (not `9` as previously labeled), and
+`12 + 1 = 13 = 0xD` fits exactly.
+
+**Fixed in `vendor/qemu`:** `efr32_frc_dynamic_length_wcntcmp0()` now
+returns `field + minlength` instead of `dfloffset + field +
+EFR32_BLE_CRC_LENGTH_BYTES`; the now-unused `DFLINCLUDECRC` extraction
+and the `EFR32_BLE_CRC_LENGTH_BYTES` constant were removed rather than
+left dangling. Updated `test_frc_wcntcmp0_dynamic_length` to use the
+real captured header values (9 and 12) instead of the old assumed ones
+(6 and 9) -- same expected `WCNTCMP0` results, now for the right
+reason. QEMU 78/17 re-confirmed passing. This is exactly the kind of
+divergence the project's own rigor standard exists to catch: a fix
+that passed its own self-constructed test can still be wrong, if the
+test's inputs were assumed rather than verified against real hardware.

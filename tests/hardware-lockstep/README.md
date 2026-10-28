@@ -92,7 +92,12 @@ not synthesized ones, until that's resolved. Retracing the remainder
 (through to `TXEN`) needs `--current` resumed from this capture's exact
 stopping PC, *without* `--mask-interrupts`, and tracking which store events
 have `"exception": 0` (thread mode) versus nonzero (so real interrupt
-activity during the longer un-masked trace can be filtered back out) --
-not yet done, blocked on this session hitting unrelated host-system memory
-pressure that made real-hardware single-stepping impractically slow, not a
-hardware or technique problem.
+activity during the longer un-masked trace can be filtered back out).
+
+**Update: done.** `radio-setup-trace-to-txen.json` is that continuation.
+It reaches the real `RAC.CMD.TXEN` store (`"complete": true, "boundary":
+"stop-address"`) and captures the actual 11 staged packet bytes, which
+corrected a real bug in an earlier QEMU fix (docs/radio-tables.md SS7.38):
+the BLE PDU `Length` header byte this project's test harness actually
+sends is `9`, not the `6` previously assumed, and the true `WCNTCMP0`
+relationship is `field + MINLENGTH`, not `DFLOFFSET + field + 3`.
