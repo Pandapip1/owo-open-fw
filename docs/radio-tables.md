@@ -2745,3 +2745,77 @@ the *other* sleep-based tests happened to hit this specific failure mode
 (most used one-shot captures without a `resume`+`sleep` afterward, or
 targeted code that genuinely runs once), but this specific pattern is
 now flagged for anyone writing a new one.
+
+### 7.12 `ACTIVETXFCD` status: every hypothesis tried so far, consolidated
+
+A long session's worth of hypotheses have now been tried and ruled out
+on this specific question. Consolidated here as one reference, so
+nobody re-spends effort re-testing any of these:
+
+**Ruled out, with hardware or official-source evidence, not just static
+reasoning:**
+
+* `RAC.SR3` (§7.5.2, §7.9) — open code never reads it anywhere; its
+  documented reset value (`0x00000000`) matches what the open stack
+  already observes; not a fidelity gap.
+* `fn_0x894`'s `SEQ_LOCAL_FNPTR_3850`/`3854` indirect-callback slots
+  (§7.7) — written by no image this project can inspect, on either
+  core; most likely dead code on stock too.
+* `fn_0x894`'s `RAC.SR1` bit-17-gated path into `fn_0x1af4`/`fn_0x1a18`
+  (§7.7) — directly measured on real stock hardware: bit 17 is `0`
+  throughout a real TX, so this path is never taken even on stock.
+* The NVIC priority setup and `RAC.STCTRL`/`SysTick` setup recovered
+  from the sequencer's own reset handler (§7.9, §7.10) — ported,
+  hardware-tested (correctly, after the §7.11 methodology fix), no
+  observable effect either way.
+* `RAIL_StartTx`'s `RAC.SR0` bit-1 clear (§7.11) — real on stock, but a
+  no-op to port: the bit already reads `0` on the open stack at `TXEN`
+  regardless.
+* A broad `FRC` register-bank diff at the same `TXEN`+30ms checkpoint
+  (§7.8) — found real config differences (`IEN`, `RXCTRL`,
+  `SNIFFCTRL`), none plausibly causal; `WCNTCMP0`'s difference explained
+  by the driver's own documented dynamic-length replacement, not a bug.
+* `FRC.PKTBUFCTRL`'s `PKTBUFTHRESHOLDEN` — `0` (disabled) on both
+  builds consistently; not a divergence.
+* The channel-37 `SYNTH`/`MODEM`/`RAC` calibration words already
+  characterized in §4.2 — injected on real hardware, no change.
+
+**Confirmed working, not in question:** `RAC.STATUS` reliably reaches
+and holds `TX` (state 9); `RAC.STCTRL` writes correctly; the BUFC
+per-byte staging sequence matches stock's own observed pattern;
+`RAC.SR3`'s two bits get cleared at the right point; the SEQIF-ack retry
+bug is fixed; the M0+ sequencer's own gate-pulse/ack mechanics match
+stock exactly, byte-for-byte, for everything this project has ported.
+
+**Not yet tried, genuinely still open:**
+
+1. **A trustworthy, synchronized live snapshot of the M0+ sequencer
+   core's own state during a real, in-flight TX attempt** (§7.11's final
+   thread). Attempted and inconclusive this session — connecting to the
+   M0+ core's own debug AP (AP3, `efm32.seq` in
+   `tests/sequencer-probe/xg22-dual-core.cfg`) appears to interact badly
+   with whatever resets the chip (either an implicit reset on examine,
+   or the M33's own `SEQRESET`/`SYSRESETREQ` activity, not yet
+   distinguished), and running both cores' targets simultaneously
+   introduced SWD-bus contention that broke the already-reliable M33-
+   side breakpoint catch. Needs either a verified-genuine-halt proof for
+   `efm32.seq` (the same shape as `bg22_require_sram_execution`, which
+   does not exist for this target yet) or a way to inspect the M0+ core
+   without disturbing the M33's own timing-sensitive boot sequence.
+2. **`fn_0xd38`'s own main body beyond the already-decoded `far_abort`
+   gate and distance<8 subset** (§7.3) — explicitly noted early in this
+   project as "continues past 100+ instructions already read... not yet
+   fully decoded," and never revisited once the broader §7.7-§7.9
+   decompilation pass moved on to other vectors. Given `fn_0xd38` is
+   `fn_0x894`'s own unconditional tail call on the exact IRQ8/IRQ9 path
+   this project's open stack actually exercises, this is arguably a
+   bigger gap than any of the newly-decompiled but unreachable IRQ0/1/
+   10/13 vectors — it was simply not the thread being pulled when this
+   session's decompilation effort started, not something ruled out.
+3. **A from-scratch review of what, if anything, stock's BLE host/
+   controller stack does between `sl_bt_legacy_advertiser_start`
+   returning and the actual `RAIL_StartTx` call this session traced** —
+   stage 1 (§7.11) now exists as a rebuildable, lockstep-able artifact
+   specifically to make this tractable; only `RAIL_StartTx` itself and
+   one of its immediate callees were examined before this session's
+   effort shifted to the (ultimately retracted) timing-margin thread.
