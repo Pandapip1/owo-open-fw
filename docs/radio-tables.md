@@ -2802,16 +2802,14 @@ stock exactly, byte-for-byte, for everything this project has ported.
    `efm32.seq` (the same shape as `bg22_require_sram_execution`, which
    does not exist for this target yet) or a way to inspect the M0+ core
    without disturbing the M33's own timing-sensitive boot sequence.
-2. **`fn_0xd38`'s own main body beyond the already-decoded `far_abort`
-   gate and distance<8 subset** (§7.3) — explicitly noted early in this
-   project as "continues past 100+ instructions already read... not yet
-   fully decoded," and never revisited once the broader §7.7-§7.9
-   decompilation pass moved on to other vectors. Given `fn_0xd38` is
-   `fn_0x894`'s own unconditional tail call on the exact IRQ8/IRQ9 path
-   this project's open stack actually exercises, this is arguably a
-   bigger gap than any of the newly-decompiled but unreachable IRQ0/1/
-   10/13 vectors — it was simply not the thread being pulled when this
-   session's decompilation effort started, not something ruled out.
+2. ~~**`fn_0xd38`'s own main body beyond the already-decoded `far_abort`
+   gate and distance<8 subset**~~ **Closed, §7.13.** Fully re-verified;
+   found and fixed one real production bug (the `distance` computation's
+   register addresses), confirmed it changes the measured value but not
+   observable behavior at this project's own test checkpoint. The
+   function's remaining logic (a polling loop, a calibration block, a
+   7-byte record write) is understood but deliberately not ported, same
+   rationale as §7.3.1's bit-22 pulse.
 3. **A from-scratch review of what, if anything, stock's BLE host/
    controller stack does between `sl_bt_legacy_advertiser_start`
    returning and the actual `RAIL_StartTx` call this session traced** —
@@ -2819,3 +2817,91 @@ stock exactly, byte-for-byte, for everything this project has ported.
    specifically to make this tractable; only `RAIL_StartTx` itself and
    one of its immediate callees were examined before this session's
    effort shifted to the (ultimately retracted) timing-margin thread.
+
+### 7.13 Thread 2 pursued: `fn_0xd38`'s full body re-verified, and a real (but behavior-preserving) production bug fixed
+
+Took up open thread 2 from §7.12. `sequencer-decomp/src/fn_0xd38.c`'s
+second half (0xde6 onward) was marked "lower confidence" since the
+project's early days, carried forward even through §7.3.1's own
+re-verification pass (which only re-checked the `far_abort` gate and the
+`distance < 8` subset, not everything past it). Going through the rest
+instruction-by-instruction against the raw literal pool (re-dumped
+directly via `od -A x -t x4` over `original/0xd38.bin`, not trusted from
+the prior disassembly reading) found it was not just low-confidence --
+it had several concrete, wrong claims in it:
+
+* **The `distance` computation's own inputs were wrong.** The prior
+  lift read `PROTIMER_0X38`/`FRC_0X1C` via fabricated pc-relative
+  literal loads. The real instructions (`ldr r2,[r6,#56]`/`ldr
+  r0,[r6,#88]`) are **not** pc-relative loads at all -- they are offset
+  reads off the *same* `r6` register the whole second half keeps loaded
+  as a base pointer to `OBS_BLOCK_AA000054` (`BUFC.BUF[1].XWRITE`,
+  §7.3). The real addresses are `0xAA00008C` and `0xAA0000AC`. The bit
+  extraction for the first term was also backwards: `lsls r2,r2,#29;
+  lsrs r2,r2,#29` isolates bits `[2:0]`, not bits `[31:29]` as
+  previously written (a left-shift by 29 discards everything above bit
+  2 before the right-shift ever runs).
+* **An entire polling loop and an entire calibration block were
+  missing.** The real code loops back to local `0xdaa` (re-running most
+  of the function's body, including the `far_abort` gate) as long as
+  `OBS_BLOCK_AA00011C` bit 8 stays set after a calibration block (local
+  `0xe5a..0xea8`) runs; that calibration block touches a previously
+  unnamed register (`0xA8014008`) and a previously unnamed SEQRAM-local
+  byte flag (`0x3EC0`), neither mentioned anywhere in the project before
+  now.
+* **The function's own tail was wrong in several ways**: two addresses
+  (`0x10e8`/`0x10ec`) were wrongly assumed to be `SEQ_LOCAL_3E73`/
+  `SEQ_LOCAL_3EDC`; they are actually a different SEQRAM-local (`0x385C`)
+  and a previously unnamed peripheral register (`0xA8005084`). The
+  7-byte record's `[6:7]` field read `PROTIMER_0X11C`; it actually reads
+  `MODEM_0X44`. And, the biggest structural miss: by the time either of
+  the function's two convergence points (`0xebc`/`0xed0`) are reached,
+  the stack slots originally holding `stack_flag` and `bit6_of_gate`
+  have been **overwritten** with the evolving `seqif_saved` and
+  `local_3f64_plus8` values -- so the function's real return value is
+  the final `seqif_saved`, not `stack_flag`, and its final call to
+  `fn_0x572` passes `(flags, local_3f64_plus8)`, not `(stack_flag,
+  state_nibble)` as previously written.
+
+All of this is now fully re-lifted in `fn_0xd38.c` (compiles cleanly,
+`-Wall -Wextra`, every literal pool address re-verified against the raw
+bytes) with an extensive header comment documenting the correction.
+
+**One of these -- the `distance` computation's wrong addresses -- was
+not just a decomp-notes error. It had already been ported into
+production** (`radio_seq.S`'s `EFR32_PROTIMER_0X38`/`EFR32_FRC_0X1C`,
+§7.3.1's "conservative, deterministic subset," hardware-tested and kept
+in the tree). Fixed the same way in `radio_seq.S`: the two operands are
+now `EFR32_OBS_BLOCK_AA000054_0X38`/`_0X58` (`0xAA00008C`/`0xAA0000AC`),
+and the bit extraction is a plain `& 0x7` instead of the wrong `lsrs
+r1,r1,#29`. QEMU 77/17 still pass. Assembled, rebuilt
+(`build/radio-port-hardware-2`, 158204 B flash, +8 B from the one extra
+literal pool word), and re-tested on real hardware at the same `TXEN`+
+30ms checkpoint used throughout §7.6, with the breakpoint properly
+removed before `resume` (§7.11's methodology fix):
+
+* `EFR32_SEQ_TRACE_DISTANCE` now reads **`0x40`** (64) instead of the old
+  wrong-address `0x1ffe` (8190) -- confirming the fix changed what gets
+  measured, not just what it's named.
+* `RAC.STATUS`/`FRC.STATUS` at the same checkpoint: **byte-for-byte
+  identical to baseline** (`0x09400000`/`0x01100200`), both before and
+  after the fix. Both `64` and `8190` are `>= 8`, so the conservative
+  pulse this project ported was never reachable either way -- the wrong
+  addresses happened to produce a wrong number that was *also* on the
+  "never fires" side of the threshold. This is a real, verified
+  silicon-fidelity bug (QEMU and any future static analysis of this
+  function would have computed a different, equally wrong, number from
+  the old addresses) with zero observable behavior change for this
+  project's own current test scenario -- recorded per this project's own
+  "every divergence must be recorded and fixed" rule regardless of
+  whether it happens to matter for `ACTIVETXFCD` today.
+
+**Everything else found in this pass (the loop, the calibration block,
+the tail's real addresses/return value) remains deliberately unported**,
+for the same reason §7.3.1 already gave for not porting the bit-22
+pulse's full gating logic: the broader job-dispatch state it depends on
+(`flags`, built from state this project does not reproduce) is not
+understood well enough to know it's safe to fire unconditionally. Thread
+2 from §7.12 is now closed as "fully re-verified, one real bug fixed,
+nothing new found that unblocks `ACTIVETXFCD`." Threads 1 and 3 remain
+open.

@@ -115,8 +115,18 @@
  * full original condition.
  */
 .equ EFR32_SEQ_TRACE_DISTANCE,         0x00004fb8 /* diagnostic only */
-.equ EFR32_PROTIMER_0X38,              0xa801c038
-.equ EFR32_FRC_0X1C,                   0xa800401c
+/* CORRECTION: a full re-verification of fn_0xd38.c's second half (see
+ * sequencer-decomp/src/fn_0xd38.c's header comment and docs/radio-tables.md
+ * SS7.13) found both operands below were wrong. Re-deriving the literal
+ * pool directly: both reads are off the *same* OBS_BLOCK_AA000054 base
+ * (BUFC.BUF[1].XWRITE, SS7.3) the surrounding function keeps in a register
+ * for its whole second half -- `ldr r2,[r6,#56]`/`ldr r0,[r6,#88]`, not
+ * pc-relative loads of PROTIMER_0X38/FRC_0X1C at all. The bit-extraction
+ * for the first term was also wrong: the real instructions (`lsls r2,r2,#29;
+ * lsrs r2,r2,#29`) isolate bits [2:0], not bits [31:29] (a left-shift that
+ * drops everything above bit 2 before the right-shift ever runs). */
+.equ EFR32_OBS_BLOCK_AA000054_0X38,   0xaa00008c
+.equ EFR32_OBS_BLOCK_AA000054_0X58,   0xaa0000ac
 /* Pulses SR0's SET alias again (not SR1, despite this constant's name
  * before this file's official-naming pass -- the operand at this call
  * site is EFR32_RAC_SR0_SET, confirmed by re-reading the code below, not
@@ -348,15 +358,16 @@ efr32_radio_seq_exception:
     ldr r1, =EFR32_RAC_SR1_BIT_FUNCTION_GATE
     str r1, [r0]
     /* fn_0xd38's conservative-subset second pulse; see its own comment
-     * above. r3 = (1 << ((PROTIMER+0x38 bits[31:29]) + 6)) - (FRC+0x1C
-     * & 0x1fff), truncated to 16 bits. */
-    ldr r0, =EFR32_PROTIMER_0X38
+     * above. r3 = (1 << ((OBS_BLOCK_AA000054+0x38 bits[2:0]) + 6)) -
+     * (OBS_BLOCK_AA000054+0x58 & 0x1fff), truncated to 16 bits. */
+    ldr r0, =EFR32_OBS_BLOCK_AA000054_0X38
     ldr r1, [r0]
-    lsrs r1, r1, #29
+    ldr r2, =0x7
+    ands r1, r2
     adds r1, r1, #6
     movs r2, #1
     lsls r2, r2, r1
-    ldr r0, =EFR32_FRC_0X1C
+    ldr r0, =EFR32_OBS_BLOCK_AA000054_0X58
     ldr r1, [r0]
     ldr r3, =0x1fff
     ands r1, r3
