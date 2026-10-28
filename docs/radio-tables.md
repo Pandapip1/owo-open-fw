@@ -2388,3 +2388,23 @@ full TX completion — `fn_0x894`'s branch into `fn_0x1af4`/`fn_0x1a18` is
 not taken in this scenario. This specific path is not the missing piece,
 confirmed by measurement rather than assumption, and this thread can be
 closed rather than revisited.
+
+**Lifted `fn_0x80c` and `fn_0x1af4` anyway, on the standing principle that
+a function existing in stock is itself a reason to understand it, not
+just a reason to chase it while it looked load-bearing.** Both fully
+verified in `sequencer-decomp/src/fn_0x80c.c`/`fn_0x1af4.c`, matching the
+original instruction-for-instruction, branch-for-branch, and literal-for-
+literal. `fn_0x80c` is exactly the small predicate already described
+above: `(0x3EB8 & 0x6) != 0 && REG32(0x3F68) not in {2,3}`. `fn_0x1af4`
+branches once on `RAC.SR1` bit 2 (not bit 17 -- a *different* bit of the
+same register than the one gating entry to this function from
+`fn_0x894`), does a small, symmetric-but-not-identical pair of writes
+into `RAC.SR0`'s SET alias and the SEQRAM word at `0x3F64`/the
+"unclaimed" register at `0xA8005068` depending on two bits of a masked
+`FRC.SEQIF` read, then unconditionally calls `fn_0x1a18` and `fn_0x572`
+before returning. Nothing in this body is job-dispatch *policy* in the
+sense `radio_seq.S`'s header excludes -- it's bounded register pokes
+gated on read values, the same shape as `fn_0x894`'s own gate bracket --
+but it is reached, on real stock hardware, exactly as often as `RAC.SR1`
+bit 17 is set during a real TX, which the hardware test above already
+measured as never. `fn_0x572` and `fn_0x64c` remain unexamined.
