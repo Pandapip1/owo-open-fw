@@ -3143,3 +3143,62 @@ it is a clean negative, not yet a *understood* one). Worth remembering
 if a future pass finds evidence that `FRCWR`/`FRCRD` require some other
 precondition this project hasn't established, rather than re-testing
 blind.
+
+### 7.19 A fresh, full `FRC` register-bank diff against real stock hardware: one dead end closed, one methodology caveat worth recording
+
+With `build-stage2/zephyr/zephyr.bin` (the project's own long-standing
+stock reference image) still available, re-ran a full, fresh `FRC`
+register-bank capture (every word, offset `0x000`..`0x120`) against
+real stock hardware at the same `TXEN`+30ms checkpoint used throughout
+this document, and diffed it against the open stack's own capture at
+the identical checkpoint.
+
+**First, closed a real dead end along the way.** Stock's actual
+`RAC.CMD.TXEN` store is at `0xe39a` (confirmed directly); the
+instruction immediately after it (`0xe3a0`, the breakpoint address
+already used throughout this document -- no citation error, re-checked)
+is `blx r3` into a function pointer loaded from a RAM-resident callback
+table (`0x200001d0`+`0x4`). Caught stock live and read the resolved
+address directly from the register: it resolves to a completely trivial
+stub (`movs r0,#0; bx lr`) -- a RAIL extensibility point that is a no-op
+in this configuration. Nothing to port, nothing to replicate; a genuine
+"nothing here" result, not a loose end.
+
+**The register-bank diff itself found real differences, but almost all
+of them resolve to a single, useful methodology lesson rather than new
+leads.** `WHITEINIT` (`0x038`, stock `0x67` vs. open `0x65`) and
+`WCNTCMP2` (`0x028`, stock's channel-tracking reuse of this register,
+stock `0x27`=39 vs. open `0x0`... decoded as channel 37) **agree with
+each other on which channel each build was actually on at the moment
+of capture** (`WHITEINIT = 0x40 | channel` per BLE's standard whitening
+seed derivation: `0x67 = 0x40|39`, `0x65 = 0x40|37`) -- confirming stock
+had already cycled forward to a *later* advertising event on channel 39
+by 30ms, while the open stack is still parked on its first and only
+attempt, channel 37. Every other BUFC/FRC "in-progress" counter that
+differed (`DATABUFFER`, `WCNT`, `WCNTCMP0`, `OTACNT`) is consistent with
+the same explanation: these are live, continuously-updated progress
+counters, not static config, so comparing them at a fixed wall-clock
+offset compares *different advertising events*, not the same moment on
+two builds. **This is a real caveat for any future register-snapshot
+comparison of this kind**: a fixed-time checkpoint is only a trustworthy
+comparison for registers that are genuinely static configuration,
+written once and never touched again (`DFLCTRL`, `MAXLENGTH`, `CTRL`,
+`PUNCTCTRL`, `AUTOCG`, `FCD0..3` -- all of which matched exactly, as
+expected) -- not for anything that updates live during a TX, where stock
+simply being faster and further along produces a difference that looks
+like a config bug but isn't one.
+
+**`RXCTRL` (`0x04c`, stock `0x262` vs. open's own `0x60`, exactly
+matching what `radio_setup()` writes) and `SNIFFCTRL`/`TRAILRXDATA`
+differences are plausibly real scope gaps** (stock's full legacy
+advertiser listens for scan/connect requests after each advertisement;
+this project's minimal OpenISA-contract driver does not), not
+necessarily anything connected to `ACTIVETXFCD` specifically -- flagged
+for completeness, not pursued further here since they're RX-side, and
+`ACTIVETXFCD`'s own TX-side engagement is what's blocked.
+
+No new `ACTIVETXFCD` lead from this pass, but a real methodology
+finding worth keeping: **if this kind of snapshot diff is tried again,
+restrict it to confirmed-static registers, or capture at `TXEN`+a few
+hundred microseconds instead of tens of milliseconds**, to avoid
+comparing two builds that are no longer on the same advertising event.
