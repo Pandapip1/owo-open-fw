@@ -4307,3 +4307,38 @@ this session). This closes the existing `tests/hardware-lockstep/`
 captures as a source of new leads -- not because the mining wasn't
 worthwhile (it found a real fix), but because what's left in them has
 now been checked and accounted for, not because it was skipped.
+
+### 7.45 Checked for public documentation of `FRC`'s internals -- confirmed, not just assumed, that none exists
+
+With the register-level search space exhausted, checked the one
+remaining easy avenue before reaching for the M0+ sequencer's own
+dispatch logic: does Silicon Labs' official, public EFR32 reference
+manual document `FRC`'s `FSMSTATE` values or `ACTIVETXFCD`'s real
+trigger condition? Found and read the official EFR32xG21 Wireless
+Gecko Reference Manual (Series 2's closest public sibling to this
+project's xG22 target, same radio IP) directly -- not inferred from
+search snippets, the actual document. **Chapter 5, "Radio
+Transceiver," is deliberately a black box**: a one-page overview
+diagram and the explicit statement "The Radio Transceiver interface
+is accessible through software drivers provided by Silicon Labs."
+Every other peripheral in this same manual (`MSC`, `CMU`, oscillators,
+etc.) gets a full register map and per-bit register description
+section; the radio chapter gets neither. **This confirms, with direct
+evidence from the actual official document rather than inference, that
+there is no public register-level documentation for `FRC`/`RAC`/
+`AGC`/`SYNTH`/`MODEM`/`BUFC` at all** -- not a gap in what this
+project happened to find, a deliberate choice by Silicon Labs to only
+expose this interface via the proprietary RAIL library. The `*_S_field.py`
+models this project has used throughout (named fields, empty
+description text) are evidently a byproduct of Silicon Labs' internal
+tooling leaking into the public `simplicity_sdk` repo, not intentional
+public documentation -- which is exactly why they have names but never
+explain what any of them actually do.
+
+This closes off "find a shortcut via public documentation" definitively,
+not just as an assumption carried from earlier sessions. The only
+remaining avenues are direct hardware experimentation (now exhausted at
+the register level, per §7.1-7.44) or deeper reading of the M0+
+sequencer's own dispatch logic (`fn_0x894`/`fn_0xd38`, deliberately
+never ported per this project's charter, but still readable purely for
+understanding).
