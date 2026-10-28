@@ -3496,3 +3496,49 @@ existing `radio_tx_enable()` call earlier in the same call chain without
 also addressing whatever caused this fault.** §7.25's architectural
 finding stands; this experiment answers "how would you cheaply test it"
 with "you can't, this way" rather than resolving the hypothesis itself.
+
+### 7.27 §7.26's `UsageFault` root-caused: confirmed `STKOF` (stack overflow), not a register/timing clue
+
+Root-caused §7.26's crash rather than leaving it as "plausibly a
+stack-depth issue." Re-applied the exact same ISR-bypass edit, then
+caught the fault with a hardware breakpoint (`bp 0x341c 2 hw` on
+`z_arm_fault`'s entry, armed before `bg22_reset_to_breakpoint`'s
+`SYSRESETREQ` pulse -- the FPB comparator survives the reset and fires
+the instant Non-secure code reaches it, per the reliable-breakpoint
+mechanism already documented above `bg22_reset_to_breakpoint`) --
+catching the fault *before* Zephyr's own handler logs and clears the
+sticky `CFSR` bits (`vendor/zephyr/arch/arm/core/cortex_m/fault.c`'s
+`usage_fault()` etc. deliberately write back `SCB->CFSR |=
+..._Msk` after decoding each fault reason, which is why a post-hoc read
+after the system settled into `arch_system_halt()`'s spin loop saw
+`CFSR=0`, `HFSR=0` -- those were already consumed by the time anyone
+could inspect them that way, not absent).
+
+At the breakpoint (`z_arm_fault(uint32_t msp, uint32_t psp, uint32_t
+exc_return, _callee_saved_t *callee_regs)`'s entry, before its
+prologue executes, so `r0`-`r3` still hold its arguments exactly as
+passed): `CFSR=0x100000`. Bit 20 of `CFSR` is `UFSR` bit 4
+(`UFSR` occupies `CFSR[31:16]`), which is **`STKOF`: stack overflow
+detected during exception stacking.** Reading the would-be exception
+stack frame at `r0` (the faulting `MSP`) returned all zeroes --
+consistent with, not contradicting, `STKOF`: the ARMv8-M architecture
+specifically skips writing the stack frame when stacking itself would
+overflow, to avoid compounding the corruption, so an unwritten frame is
+the expected signature, not a separate anomaly.
+
+**Conclusion:** calling `radio_tx_enable()`'s full call chain directly
+from `efr32_radio_launch_wake()`'s tick-compare ISR overflows the
+interrupt/`MSP` stack. That call chain normally only ever runs on
+`efr32_radio_tx_job_thread`'s own (larger) stack; the ISR stack was
+never sized for it. This fully explains §7.26's crash as a pure
+stack-depth artifact of *that specific bypass*, not a hardware-timing
+response or a new clue about `ACTIVETXFCD` -- §7.25's architectural
+finding (the ~94us kernel-thread-wakeup latency) stands exactly as
+recorded, neither strengthened nor weakened by this. A real test of
+§7.25 still requires either growing the interrupt stack specifically
+for this path (a real but orthogonal fix, not attempted here, since it
+changes memory layout project-wide for a diagnostic) or actual
+`PROTIMER` integration, as already concluded in §7.25.
+
+Reverted the ISR-bypass edit (`git diff --stat` confirmed empty);
+rebuilt the clean baseline; QEMU 77/17 re-confirmed passing.
