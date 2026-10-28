@@ -2742,11 +2742,49 @@ established about `ACTIVETXFCD` without yet explaining it.** The open
 stack's TX-start path is operating within a real hardware timing margin
 narrow enough that six CPU cycles decide whether `RAC.STATUS` ever
 leaves `OFF` at all — a far more severe and specific constraint than
-"eventually reaches `TX` but the frame coder doesn't engage." Candidate
-next step for whoever picks this up: this margin is almost certainly
-measurable precisely (binary-search the exact number of cycles between
-"still reaches `TX`" and "stuck at `OFF`", on either side of today's
-baseline, not just the two points already measured) and may point
-directly at whatever real hardware deadline stock's own, not-yet-
-identified mechanism is meeting and this driver currently meets only by
-accident at its current exact instruction count.
+"eventually reaches `TX` but the frame coder doesn't engage."
+
+**Binary-searched the exact margin, as this section originally
+recommended, rather than leaving it as a suggestion.** Same insertion
+point (immediately before the existing `SR3` clear, the function's
+current first store), varying only the `nop` count, each one flashed
+and checked at the same `TXEN`+30ms `RAC.STATUS` checkpoint, each probe
+reverted immediately after its own test:
+
+| extra `nop`s | `RAC.STATUS` |
+|---|---|
+| 0 (baseline) | `0x09400000` — `TX`, holding |
+| 1 | `0x09400000` — `TX`, holding |
+| 2 | `0x10400000` — `OFF`, stuck |
+| 3 | `0x10400000` — `OFF`, stuck |
+| 6 | `0x10400000` — `OFF`, stuck |
+
+**The threshold is exactly one `nop` wide: one extra cycle at this exact
+point is tolerated; two is already fatal, every time.** This is not a
+soft or probabilistic margin — every data point above reproduced
+identically on its own fresh flash. A razor-thin, hard cutoff at this
+specific instruction count, at this specific point in the function, is
+about as strong a signature of a genuine hardware race/deadline as a
+black-box test can produce without directly observing the competing
+event. Confirmed restored to baseline after every probe
+(`RAC.STATUS=0x09400000`, `FRC.STATUS=0x01100200`).
+
+**What this does and does not establish.** It does not yet identify
+*what* `radio_tx_enable()` is racing against — only that something
+with a roughly one-cycle-scale deadline exists right at its entry,
+before even the `SR3` clear. Plausible candidates, none yet checked:
+the tail of `radio_is_idle()`'s own busy-wait (the very first thing
+this function does) landing at a different point in some other state
+machine's cycle depending on exactly when the loop exits; a RAC/PROTIMER
+internal counter that free-runs regardless of software and must be
+sampled or acted on within a specific window after some earlier event
+this function doesn't control the timing of; or an M0+-sequencer-side
+race, if the M0+ core's own concurrent execution expects the M33 to
+reach this point within a bounded number of cycles after some shared
+state it last touched. The clean next experiment: instrument exactly
+which instruction is the last one to execute before the 1→2 `nop`
+transition flips the outcome (single-step from a breakpoint placed
+*after* the `nop`s, reading `RAC`/`PROTIMER` state at that instant on
+both the 1-`nop` and 2-`nop` builds) to see what, if anything, already
+differs in hardware state at that exact point — not just downstream,
+30ms later.
