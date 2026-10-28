@@ -2342,7 +2342,8 @@ annotation for a delay loop, not just a verification workaround.
 
 The remaining as-yet-unexamined callees (`fn_0x13b0`,
 `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
-lifted. None of this changes the `ACTIVETXFCD` picture yet — every one of
+lifted (`fn_0x13b0` is now done — see below, after `fn_0x80c`/`fn_0x1af4`).
+None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
 and no direct evidence ties any of them to the real TXWARM/TX path this
 project's own hardware traces exercise. **Checked, not left open: the
@@ -2408,6 +2409,32 @@ gated on read values, the same shape as `fn_0x894`'s own gate bracket --
 but it is reached, on real stock hardware, exactly as often as `RAC.SR1`
 bit 17 is set during a real TX, which the hardware test above already
 measured as never. `fn_0x572` and `fn_0x64c` remain unexamined.
+
+**`fn_0x13b0` (one of the "remaining as-yet-unexamined callees" listed
+above) is now also fully lifted and verified**, in
+`sequencer-decomp/src/fn_0x13b0.c`, matching the original
+instruction-for-instruction (confirmed via the standing compile-and-diff
+rule; the first draft misplaced one `RAC.RADIOEN` CLR-alias write and
+mis-attributed the function's final store as a second `RADIOEN` write
+when it is actually `RAC.SYNTHENCTRL`'s CLR alias clearing
+`SYNTHSTARTREQ`, not `VCOSTARTUP` again — both caught by the diff, not
+the hand-trace). It is an analog RF/synthesizer bias sequence: pulses
+`SYNTH.CMD`, writes a four-step ramp (`0x1000`, `0x200`, `0x100`,
+`0x68fd`) to an unnamed `RAC+0x15C` offset with no public field name,
+clears `RAC.SYNTHENCTRL.VCOSTARTUP` then later `SYNTHSTARTREQ`, pulses
+`SYNTH.VCDACCTRL`'s CLR alias, conditionally sets `RAC.RADIOEN`'s
+`PREEN`/`RFBIASEN` bits gated on a SEQRAM flag byte, and finishes by
+snapshotting `RAC.STIMER` (already established as live counter state,
+§7.44) into a SEQRAM scratch cell. Reachable only from `fn_0x2644`
+(IRQ10) and `fn_0x2362`/`fn_0x2390` (IRQ13) — confirmed via grep across
+every decompiled file in this directory, neither `fn_0x894` nor
+`fn_0xd38` reference it — so, like its callers, it is unreachable on the
+open build by the same already-established IRQ8/IRQ9-only scope
+argument. Decompiled for completeness, not because it changes the
+`ACTIVETXFCD` picture. `fn_0xa76` and `fn_0xa80` (called at its start)
+and `fn_0x7ac`/`fn_0x7be` (called mid-body) are left as opaque calls in
+this lift and remain unexamined, alongside the other still-outstanding
+callees `fn_0x388`, `fn_0xace`, `fn_0xb74`.
 
 ### 7.8 Full `FRC` register-bank diff, stock vs. open, same checkpoint
 
