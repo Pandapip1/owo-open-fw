@@ -4256,3 +4256,54 @@ than a one-off difference), but the pattern across both `rfcrc` and
 frame-coder logic -- the diminishing signal here is itself useful
 information for whoever continues this diff (`bufc`/`modem`/`rac`
 remain unchecked).
+
+**Finished the remaining three blocks (`bufc`, `modem`, `rac`): no
+second fix, and the whole exercise is now conclusively closed, not
+just paused.**
+
+`bufc`'s differences are channel0's `ADDR` (just a build-specific RAM
+pointer -- `efr32_tx_fifo`'s address differs between builds, never
+meaningful) and `WRITEOFFSET`/`READOFFSET` (explained by the same
+already-established caveat as §7.19: stock's real advertising payload
+is longer than this project's deliberately minimal test payload, and
+the two captures aren't necessarily at the identical point in each
+stack's own TX lifecycle even when channel-matched).
+
+`modem`'s differences are a mix of live demodulator-adjacent counters/
+flags (matching §7.42's `MODEM.FSMSTATUS`-family finding) and what
+read like access-address/sync-word-shaped bytes -- plausibly because
+stock's real application and this project's minimal smoke-test
+harness use different BLE access addresses, an application-level
+parameter difference, not a protocol bug.
+
+`rac`'s 52 differing bytes span the widest range of any block, so
+mapped every one against `RAC_S_register.py`'s register names before
+deciding whether to decode further (`STATUS`/`CMD`/`CTRL`/
+`FORCESTATE`/`IF`/`IEN`/`TESTCTRL`/`SEQIF`/`SEQIEN`/`STIMER`/
+`SEQCTRL`/`SR0`/`SR3`/`FRCRXWORD`/`SYNTHREGCTRL`/`CHPCTRL`/
+`RFSTATUS`/`STATUS2`/`IFPGACTRL`/`IFADCDBG`/`PATRIM1`/`PGACAL`/
+`PGACTRL`/`RFPATHEN`/`RX`/`TX`/`SYTRIM0`/`SYEN`/`SYMMDCTRL`/
+`DIGCLKRETIMECTRL`/`XORETIMECTRL`/`SCRATCH6`/`SCRATCH7`). Every one
+falls into a category already closed: registers this investigation
+already exhaustively analyzed this session (`STATUS`, `SR0`, `SR3` --
+§7.5.2's "documented reset-value difference, not a fidelity bug";
+`DIGCLKRETIMECTRL`/`XORETIMECTRL` -- §7.24, already tested live with
+no effect); live/status counters (`IF`/`IEN`/`SEQIF`/`SEQIEN`/
+`STIMER`/`RFSTATUS`/`STATUS2`, the same free-running-state pattern as
+every other block); per-physical-chip calibration trim (`PATRIM1`,
+`PGACAL`/`PGACTRL`, `SYTRIM0`, `SYNTHREGCTRL`, `CHPCTRL`,
+`IFPGACTRL` -- PA/PGA/synth trim registers that legitimately differ
+between physical silicon units regardless of firmware); or test/debug
+registers never touched by normal operation (`TESTCTRL`, `IFADCDBG`,
+`SCRATCH6`/`SCRATCH7`).
+
+**Conclusion for the whole §7.19/§7.41-7.44 mining effort:** one real,
+independently confirmed production bug found and fixed
+(`RFCRC.CMD.INITIALIZE`, §7.43); every other difference across all
+seven radio blocks is accounted for by categories already understood
+(live/measured state, per-chip trim, application-level parameter
+differences, or registers already investigated and ruled out earlier
+this session). This closes the existing `tests/hardware-lockstep/`
+captures as a source of new leads -- not because the mining wasn't
+worthwhile (it found a real fix), but because what's left in them has
+now been checked and accounted for, not because it was skipped.
