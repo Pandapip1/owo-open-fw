@@ -4902,3 +4902,56 @@ through to `TXEN` and asserts `RAC.STATUS` reaches `TX`, so this
 divergence has a standing regression the moment it's understood well
 enough to fix, and so any fix attempt has an immediate, automated
 pass/fail signal instead of needing a manual trace read each time.
+
+### 7.56 §7.55 retracted in full: there was no divergence -- a tracepoint-semantics misreading, not a real bug
+
+Asked to fix §7.55's "finding" and, in the course of trying,
+discovered the finding itself was wrong. `efr32bg22_rac_command`'s own
+trace line prints `s->rac_state` *at the moment `RAC.CMD` is written*
+-- for a `TXEN` write specifically, that is **always** `TXWARM`
+(state 8), by construction: `efr32_rac_set_state(s, TXWARM)` runs
+synchronously inside the same command-write handler this tracepoint
+instruments, before any later, *separate* code path (the one
+triggered by a subsequent write to `RAC.SEQIF`/`IF`/`IEN`/`SEQIEN`)
+ever gets a chance to advance the state further. Seeing
+`RAC.CMD=0x00000001 state=8` on every single `TXEN` in §7.55's trace
+was not evidence of being stuck -- it is *exactly* what a healthy,
+fully-working transition looks like through that specific tracepoint,
+which was never designed to report the eventually-settled state.
+
+**Directly disproved by re-running the identical scenario with the
+correct instrument for the question: `-trace enable=efr32bg22_rac_state`**
+(the tracepoint inside `efr32_rac_set_state()` itself, firing on every
+real transition, `previous_state -> state`), against the completely
+unmodified, un-instrumented code. Result, every cycle, with no
+exceptions across the whole run: `RAC state 0 -> 13`, `13 -> 8`
+(TXWARM), `8 -> 9` (**TX, reached cleanly, every single time**), then
+`9 -> 0` roughly 155 microseconds later (matching the already-
+documented, pre-existing `150-us TX timer` simulator abstraction from
+earlier work in this document -- not a new mechanism), then the whole
+cycle repeats roughly 100ms later, matching a normal BLE advertising
+interval. **QEMU's simulation of the open stack's own TX attempt
+reaching `RAC.STATUS=TX` works correctly and always has.** There is no
+fidelity gap here to fix.
+
+**What actually happened, for the record (this project's own standing
+rule is to document the mistake, not just quietly delete it):** every
+single piece of evidence in §7.55 (the repeated `state=8` readings,
+the 58:0 ratio of attempts to successes, the "sequencer vCPU runs but
+its ack never lands" narrative, the `-icount`-vs-`thread=multi`
+comparison) was real, reproducible, and correctly observed -- the
+*interpretation* of what "state=8 on every `RAC.CMD` trace line" meant
+was wrong. Two follow-up attempts at a "fix" (forcing the writing vCPU
+to yield via `cpu_exit()`, and explicitly `qemu_cpu_kick()`-ing the
+sequencer vCPU) were tried and, consistent with there being no real
+bug, made no observable difference to the (correctly unchanged)
+`rac_command` trace output -- which in hindsight is exactly what
+"the thing you're trying to fix was never broken" looks like, not
+evidence the fix failed. Those two change attempts were not kept; the
+device model is unmodified by this whole thread. **Lesson for next
+time, recorded in [[feedback-rigor-and-methodology]]: when a
+tracepoint's value doesn't match an independent, direct-register
+check, suspect the tracepoint's own placement/timing semantics before
+concluding the device model itself is wrong** -- especially for any
+tracepoint that fires *inside* a command handler rather than at the
+point a value actually settles.
