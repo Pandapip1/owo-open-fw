@@ -2343,7 +2343,8 @@ annotation for a delay loop, not just a verification workaround.
 The remaining as-yet-unexamined callees (`fn_0x13b0`,
 `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
 lifted (`fn_0x13b0` and `fn_0xa76` are now done — see below, after
-`fn_0x80c`/`fn_0x1af4`). None of this changes the `ACTIVETXFCD` picture yet — every one of
+`fn_0x80c`/`fn_0x1af4`; `fn_0x388` is also now done — see §7.50).
+None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
 and no direct evidence ties any of them to the real TXWARM/TX path this
 project's own hardware traces exercise. **Checked, not left open: the
@@ -2453,7 +2454,8 @@ wait for clock-select to settle → hold the retimer in reset → tear
 down the symbol-rate modulator's digital enable), not new names.
 `fn_0x7ac`/`fn_0x7be` (called mid-body of `fn_0x13b0`) are left as
 opaque calls in this lift and remain unexamined, alongside the other
-still-outstanding callees `fn_0x388`, `fn_0xace`, `fn_0xb74`.
+still-outstanding callees `fn_0xace`, `fn_0xb74` (`fn_0x388` is also
+now done — see §7.50).
 
 ### 7.8 Full `FRC` register-bank diff, stock vs. open, same checkpoint
 
@@ -4558,3 +4560,41 @@ a safe exploratory primitive, even though, unlike `BLOCKINIT`, its
 bits remain untried that look more promising than this; the
 intervention-based technique introduced in §7.48 has now been pushed
 about as far as this project's current register map supports.
+
+### 7.50 `fn_0x388` decompiled and verified: RX-side bookkeeping, same unreachable status as its siblings
+
+Continuing §7.7's M0+ sequencer sweep: `fn_0x388` (one of the
+"remaining as-yet-unexamined callees" listed there) is now fully
+lifted and verified in `sequencer-decomp/src/fn_0x388.c`. Called from
+exactly one place -- `fn_0x23a0` (IRQ1), conditionally -- confirmed via
+grep across every decompiled file in this directory; IRQ1 is not
+enabled by the open stack's own `radio_seq.S`, so this function (and
+everything it calls) is unreachable on the open build, the same status
+as `fn_0x13b0`/`fn_0xa76`/`fn_0xa80`.
+
+Takes two arguments, not one -- the first draft modeled it as a
+single-parameter `void` function and only caught the error by
+cross-checking `fn_0x23a0.c`'s own already-verified call site
+(`fn_0x388(local0, gate_base_val)`, using the return value). The real
+second parameter is `RAC_GATE_BASE`'s raw value (RAC+0x40, already
+named elsewhere in this project); the first is genuinely unused by
+this function's body at all (confirmed: no instruction anywhere in its
+disassembly reads the incoming `r0`), present only because the
+caller's own dispatch convention threads a value through regardless.
+Also hit, and fixed the same way as `fn_0x21d8`'s delay counter
+(`volatile`), a second instance of the "the optimizer proved a
+write-only value has no effect and deleted the instructions that
+compute it" pitfall.
+
+Semantically, this is RX-side bookkeeping, not TX: it acks
+`AGC.SEQIF.RSSIVALID` on an early-return path and
+`MODEM.SEQIF.RXTIMDET` on exit (both RX-measurement/timing-detect
+flags, newly identified this pass), and walks a small, previously-
+unidentified table of 24-byte records (base pointer at SEQRAM `0x3ec8`)
+looking for the first one whose own state byte reads below `8` --
+consistent with a per-channel or per-slot RX scheduling structure.
+This reinforces, independently of the reachability argument alone,
+that this function was never a plausible `ACTIVETXFCD` lead even
+before confirming it structurally unreachable. `fn_0x7d8`/`fn_0x690`/
+`fn_0x564`/`fn_0x7ea` are left as opaque calls in this lift. Remaining
+unexamined: `fn_0xace`, `fn_0xb74`.
