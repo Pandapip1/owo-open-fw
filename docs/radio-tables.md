@@ -3202,3 +3202,51 @@ finding worth keeping: **if this kind of snapshot diff is tried again,
 restrict it to confirmed-static registers, or capture at `TXEN`+a few
 hundred microseconds instead of tens of milliseconds**, to avoid
 comparing two builds that are no longer on the same advertising event.
+
+### 7.20 `FRC.WCNTCMP0` proves the frame coder *does* process the real packet before stalling; `TXSUBFRAMERESUME` tested, no change
+
+`radio_pkt_tx_set()` writes `FRC.WCNTCMP0 = EFR32_FRC_DYNAMIC_LENGTH_PENDING_WORD_COUNT`
+(`0xFF`, confirmed the *only* write site in `radio.c`) once, well before
+`TXEN`. On real hardware, at the standard checkpoint, it reads back
+**`0xA` (10)** -- not `0xFF`. Since nothing in this project's own code
+writes it again, this is a genuine, hardware-driven update: `FRC`
+parsed our real packet's own length byte (`DFLCTRL`'s `DFLOFFSET=1`
+field, the BLE PDU's own self-reported length) and correctly computed
+`total_frame_length - 1` for an 11-byte frame -- exactly consistent
+with the project's own minimal legacy-advertisement PDU (2-byte header
++ a small `AdvA`/`AdvData` payload). This is a materially different,
+more specific finding than "the frame coder never engages": **it reads
+and correctly interprets the real packet's header before stalling.**
+Whatever is missing is strictly downstream of length determination, not
+upstream of it.
+
+**Timing: the stall point is reached in microseconds, not milliseconds.**
+Swept `sleep 0/1/2/5` ms after `TXEN` (bounded below only by
+`bg22_require_sram_execution`'s own ~10ms halt overhead): `RAC.STATUS`,
+`FRC.STATUS`, and `FRC.WCNTCMP0` are already fully settled at their
+final, permanently-stuck values at every one of those checkpoints,
+identically. There is no gradual approach to the stuck state visible at
+this resolution -- whatever decides the outcome happens essentially
+immediately after `TXEN`, then holds forever.
+
+**Tested the next concrete idea from `FRC.CMD`'s remaining bits:
+`TXSUBFRAMERESUME` (bit 6)**, named for exactly the shape of problem
+`WCNTCMP0` now points to -- resuming a paused subframe feed, as
+opposed to the two already-tried init bits (`CONVINIT`, `STATEINIT`)
+which reset state rather than resume a pause. Added immediately after
+`RAC.CMD.TXEN` (already-named constant, no new magic number). QEMU 77
+still passed. Hardware-tested at the standard checkpoint: **no
+change** -- identical `RAC.STATUS`/`FRC.STATUS`/`FRC.WCNTCMP0` to every
+prior reading. Reverted; not kept.
+
+This narrows the remaining search space concretely: the blocker is not
+in `BUFC`'s data path (bytes are visibly reaching `FRC` and being
+parsed correctly), not in `FRC`'s own length-determination logic, and
+not released by any of `FRC.CMD`'s resume/init bits tried so far
+(`CONVINIT`, `STATEINIT`, `TXSUBFRAMERESUME`). The remaining untried
+`FRC.CMD` bits (`FRAMEDETRESUME`, `INTERLEAVEWRITERESUME`,
+`INTERLEAVEREADRESUME`, `CONVRESUME`, `CONVTERMINATE`,
+`INTERLEAVEINIT`, `INTERLEAVECNTCLEAR`, `BLOCKINIT`, `RXRAWUNBLOCK`) are
+mostly interleaver/convolution-specific, which an uncoded 1M PHY
+(`FECCTRL=0`) should not need -- plausible next candidates only if that
+assumption turns out wrong.
