@@ -3080,3 +3080,41 @@ out FRC's own static configuration and its two most plausible init/reset
 commands as the cause, narrowing further toward either a genuinely
 undocumented control path, or a precondition from somewhere this project
 has not yet looked at all.
+
+### 7.17 `BUFC.CMD.PREFETCH`: a strong-looking lead from the codebase's own history, tested and understood, not just ruled out
+
+`efr32_tx_fifo_publish()` (the function run before every `TXEN`) writes
+`BUFC` channel `CLEAR`/`CFG`/`ADDR` then each byte individually through
+`WRITEDATA` -- but never issues `BUFC.CMD.PREFETCH` (bit 1, the public
+`BUFC_BUF_CMD` field named in `build/reference-models/efr32bg21_bufc.h`).
+`radio_pkt_rx_set()`'s own existing comment already flags the asymmetry:
+*"Unlike TX, its [RX] helper does not issue PREFETCH"* -- strongly
+implying stock's TX-side helper does. `EFR32_BUFC_CMD_PREFETCH` itself
+was defined but completely unused anywhere in `radio.c`, which looked
+exactly like a leftover from a previously-tried, then-abandoned fix.
+
+**Tested directly: issuing `BUFC.CMD.PREFETCH` immediately after the
+per-byte `WRITEDATA` loop, before `TXEN`.** QEMU 77/17 still passed.
+Hardware-tested at the standard 30ms checkpoint: **no change** --
+identical `RAC.STATUS`/`FRC.STATUS` to every prior reading. Reverted.
+
+**Understood why, not just logged as a miss.** `EFR32_BUFC_WRITEOFFSET`
+(offset `+0x008`, a real public register, distinct from the per-byte
+`WRITEDATA` port at `+0x018`) is how `RAIL_SetTxFifo`'s *zero-copy*
+setup path declares "N bytes are already present starting at `ADDR`"
+*without* touching them one at a time -- and `PREFETCH`'s role, per the
+project's own older characterization of that path (`efr32_radio_table_apply`-adjacent
+code history, and the already-present comment this section started
+from), is to tell `BUFC` to treat that already-set `WRITEOFFSET` as
+valid and begin consuming from it. Our `WRITEDATA`-based per-byte fill
+(deliberately chosen to match stock's own DWT-observed *per-packet*
+write pattern, not its one-time FIFO-setup path) already advances
+`WRITEOFFSET` as a side effect of each write -- so there is no new
+information for `PREFETCH` to convey in this path; it would only matter
+for the *other*, bulk/zero-copy `WRITEOFFSET`-assignment path this
+project deliberately does not use. This is why `PREFETCH` tests as a
+no-op here: not because the register doesn't matter, but because it
+belongs to a different FIFO-population mechanism than the one actually
+exercised. Consistent with the already-present code comment that
+explicitly warns against conflating the two
+("`SetTxFifo's initial-count path were RAIL_WriteTxFifo`").

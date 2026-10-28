@@ -754,6 +754,12 @@ static inline void efr32_radio_trace_previous_seq_launch(void) { }
 #define EFR32_BUFC_IF_OFFSET 0x114U
 #define EFR32_BUFC_IEN_OFFSET 0x118U
 #define EFR32_BUFC_CMD_CLEAR 1U
+/* [regs-public] BUFC_BUF_CMD bit 1 (efr32bg21_bufc.h). Deliberately
+ * unused: it belongs to RAIL_SetTxFifo's bulk/zero-copy WRITEOFFSET-
+ * assignment path, not the per-byte WRITEDATA fill this driver uses
+ * (matching stock's own observed per-packet pattern). Tested anyway as
+ * a hardware hypothesis and understood why it's a no-op here, not just
+ * guessed to be irrelevant -- see docs/radio-tables.md §7.17. */
 #define EFR32_BUFC_CMD_PREFETCH 2U
 #define EFR32_BUFC_FIFO_512_CONFIG 3U
 #define EFR32_BUFC_RX_THRESHOLD 0x0FFFU
