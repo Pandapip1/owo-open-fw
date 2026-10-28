@@ -3653,3 +3653,47 @@ transition via single-stepping" as a method, on both sides of this
 investigation** (already established for the open stack above; now
 confirmed the same physical limit applies here too) -- not a new lead,
 a method ruled out with a cleaner explanation than before.
+
+### 7.31 A new, concrete, data-plane fact: `BUFC`'s TX `READOFFSET` never advances past the 2-byte header
+
+Every prior check of this stall looked at status/control bits
+(`FRC.STATUS`, `RAC.STATUS`) -- never at whether `FRC` actually *reads*
+any of the staged packet bytes out of `BUFC`'s TX FIFO. Checked this
+directly at the settled baseline: `BUFC`'s TX channel `WRITEOFFSET`
+(real address `0xba000014`, `EFR32_BUFC_TX_BASE_OFFSET` + `WRITEOFFSET`
+sub-offset) reads `0xB` (11, the full staged frame -- software wrote
+all of it, as expected), but `READOFFSET` (`0xba000018`) reads `0x2` --
+**`FRC` consumed exactly the 2-byte header (matching `WCNTCMP0`'s
+confirmed length-byte parse) and never advanced to read a single
+payload byte.** This is new: a hard, byte-level, data-plane
+confirmation of where the stall actually sits, not an inference from a
+status flag. It's consistent with every status-bit finding so far
+(`ACTIVETXFCD=0`, `FSMSTATE=17` stuck, `WCNTCMP0` correctly computed)
+but is a stronger, more direct form of evidence than any of them.
+
+**Tried a faster iteration technique on the strength of this: live
+`FRC.CMD` pokes via the debugger (`mww` while halted, `resume`, a short
+`sleep`, re-halt, re-check) instead of a full edit-rebuild-reflash cycle
+per hypothesis**, using `READOFFSET` advancing past `2` as a more
+sensitive success criterion than `ACTIVETXFCD` alone (a bit could
+plausibly nudge a byte or two through without the whole "active frame
+coder" status bit ever lighting up). Tried `FRAMEDETRESUME` and
+`TXSUBFRAMERESUME` (the latter already compile-time tested in §7.20
+against `FRC.STATUS` only, not `READOFFSET`) this way: both clean
+negatives, `READOFFSET` stays at `0x2` either way. **Tried `BLOCKINIT`
+this way too and it caused a real `HardFault`/CPU lockup** (OpenOCD's
+"clearing lockup after double fault" auto-recovery) -- not a useful
+signal, and risky: **do not live-poke `FRC.CMD.BLOCKINIT` on this chip
+again** outside of a full compiled, reviewed, revertible change.
+Recovered with a full fresh reflash; hardware reconfirmed back to the
+exact same baseline (`RAC.STATUS=0x09400000`, `READOFFSET=0x2`)
+afterward, so no lasting damage, but the live-poke technique itself
+carries real risk for some command bits and should be used cautiously.
+
+**This narrows the open question usefully, even without resolving it:**
+the real blocker is specifically "why does `FRC` never issue a second
+`BUFC` read" after the header -- not a vague "frame coder doesn't
+start" -- which is a sharper, more falsifiable question for whatever
+comes next (including evaluating a real `PROTIMER` integration attempt
+against this exact, now very concrete, success criterion: does
+`READOFFSET` ever pass `2`).
