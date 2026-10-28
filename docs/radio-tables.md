@@ -2342,8 +2342,8 @@ annotation for a delay loop, not just a verification workaround.
 
 The remaining as-yet-unexamined callees (`fn_0x13b0`,
 `fn_0xa76`, `fn_0x388`, `fn_0xace`, `fn_0xb74`) remain to be traced and
-lifted (`fn_0x13b0` is now done — see below, after `fn_0x80c`/`fn_0x1af4`).
-None of this changes the `ACTIVETXFCD` picture yet — every one of
+lifted (`fn_0x13b0` and `fn_0xa76` are now done — see below, after
+`fn_0x80c`/`fn_0x1af4`). None of this changes the `ACTIVETXFCD` picture yet — every one of
 these vectors is outside the open stack's own enabled-IRQ set by design,
 and no direct evidence ties any of them to the real TXWARM/TX path this
 project's own hardware traces exercise. **Checked, not left open: the
@@ -2431,10 +2431,29 @@ every decompiled file in this directory, neither `fn_0x894` nor
 `fn_0xd38` reference it — so, like its callers, it is unreachable on the
 open build by the same already-established IRQ8/IRQ9-only scope
 argument. Decompiled for completeness, not because it changes the
-`ACTIVETXFCD` picture. `fn_0xa76` and `fn_0xa80` (called at its start)
-and `fn_0x7ac`/`fn_0x7be` (called mid-body) are left as opaque calls in
-this lift and remain unexamined, alongside the other still-outstanding
-callees `fn_0x388`, `fn_0xace`, `fn_0xb74`.
+`ACTIVETXFCD` picture.
+
+**`fn_0xa76` and `fn_0xa80`, the two calls `fn_0x13b0` makes before
+touching `SYNTH`/`RAC.RADIOEN` at all, are now also fully lifted and
+verified**, in `sequencer-decomp/src/fn_0xa76.c`/`fn_0xa80.c` —
+confirmed, same as every other lift this pass, by compiling and diffing
+against the original rather than trusting the hand-trace. Together
+they're a clock-retimer teardown pair bracketing `fn_0x13b0`'s synth
+reconfiguration: `fn_0xa76` (a true leaf — no push/pop, matching its
+original) clears `RAC.XORETIMECTRL.XORETIMEENRETIME` then
+`RAC.DIGCLKRETIMECTRL.DIGCLKRETIMEENRETIME` (both via their CLR
+aliases); `fn_0xa80` then busy-waits on `RAC.XORETIMESTATUS`'s
+`XORETIMECLKSEL` bit to clear, clears `XORETIMECTRL.XORETIMERESETN`,
+busy-waits on `RAC.DIGCLKRETIMESTATUS`'s `DIGCLKRETIMECLKSEL` bit to
+clear, clears `DIGCLKRETIMECTRL.DIGCLKRETIMERESETN`, and finally clears
+`RAC.SYMMDCTRL.SYMMDENRSDIG`. All five fields and both status registers
+are already public (`RAC_S_register.py`/`RAC_S_field.py`); this lift's
+contribution is establishing the actual sequencing (disable retime →
+wait for clock-select to settle → hold the retimer in reset → tear
+down the symbol-rate modulator's digital enable), not new names.
+`fn_0x7ac`/`fn_0x7be` (called mid-body of `fn_0x13b0`) are left as
+opaque calls in this lift and remain unexamined, alongside the other
+still-outstanding callees `fn_0x388`, `fn_0xace`, `fn_0xb74`.
 
 ### 7.8 Full `FRC` register-bank diff, stock vs. open, same checkpoint
 
