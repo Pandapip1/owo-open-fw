@@ -2353,3 +2353,38 @@ as that link** — a whole-object scan finds them referenced nowhere outside
 both addresses finds zero hits either, so nothing in any image this
 project can inspect ever initializes them. The `PROTIMER+0x38` connection
 to `fn_0xd38` is the one new thread worth pulling on next.
+
+**A second, directly TXWARM-relevant reachability path for `fn_0x1a18`
+was found, traced, and then refuted on real hardware -- recorded in full
+because the refutation is itself the valuable result.** `fn_0x894`
+(called by both IRQ8 and IRQ9 directly, §7.2) has its own previously-
+unexamined branch: when `RAC.SR1` (`RAC+0x44`) bit 17 is set and
+`RAC.STATUS2.CURRSTATE` is not `TX` (true for `TXWARM` itself), it calls
+`fn_0x80c()` — which just re-tests the already-known `0x3EB8`/`0x3F68`
+flag pair (§7.3's own "byte/word flag pair... dereferenced by this object
+itself") — and on a false result, calls **`fn_0x1af4`**, a function not
+previously examined, which **unconditionally calls `fn_0x1a18`** — the
+same large "mode-selecting hardware setup" function this pass already
+fully lifted (`sequencer-decomp/src/fn_0x1a18.c`), previously only known
+reachable via the unreachable IRQ13 vector (`fn_0x2362`). Since
+`fn_0x1a18` has its own internal entry gate on the *same* `SR1` bit 17,
+reaching `fn_0x894`'s branch at all would guarantee `fn_0x1a18` runs its
+full body too — a real, structurally direct link from IRQ8/IRQ9 into a
+function this project has already fully decompiled and found does real
+PA/LNA/RF-path/`RAC.TX`/`RAC.CMD` hardware setup, not obviously
+job-dispatch policy.
+
+**Tested directly on real hardware rather than left as a static
+hypothesis.** Flashed stock (`build-stage2/zephyr/zephyr.bin`), set a
+hardware breakpoint right after the real `RAC.CMD = TXEN` write
+(`stage2-m33.dis:0xe39a`, breakpoint at `0xe3a0`), caught it via
+`bg22_reset_to_breakpoint`, and read `RAC.SR1` (`0xA8020044`) directly:
+**`0x00000000`** — bit 17 clear. Resumed, slept 100 ms (the already-
+established sufficient margin for a full TX cycle, §7.6), re-halted, and
+read it again: **still `0x00000000`**, confirmed a second time across a
+fresh reset/catch cycle. So on stock itself, during a real BLE
+advertising TX, `RAC.SR1` bit 17 is never set at all, from `TXEN` through
+full TX completion — `fn_0x894`'s branch into `fn_0x1af4`/`fn_0x1a18` is
+not taken in this scenario. This specific path is not the missing piece,
+confirmed by measurement rather than assumption, and this thread can be
+closed rather than revisited.
