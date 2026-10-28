@@ -68,23 +68,38 @@
  * the running SEQRAM (docs/radio-tables.md SS7.2). The stock handler's
  * intervening job-dispatch logic (SS7.3) is deliberately not reproduced here;
  * see this file's header comment.
+ *
+ * SR0/SR1 below are RAC+0x40/+0x44's *official* Silicon Labs names
+ * (build/reference-models/RAC_S_register.py, fetched directly from
+ * github.com/SiliconLabs/simplicity_sdk) -- and that model documents both
+ * as generic 32-bit read-write scratch words, reset value 0, with no
+ * hardware meaning assigned at all. So the "gate"/"wait" bits named below
+ * are not a documented hardware feature; they are stock's *own firmware
+ * convention*, using otherwise-blank scratch space as a software
+ * semaphore (this project replicates the exact bit pattern stock uses,
+ * confirmed byte-for-byte against the original, without claiming any
+ * hardware authority for what the bits mean).
  */
-.equ EFR32_RAC_TXWARM_GATE_BASE,      0xa8020040
-.equ EFR32_RAC_TXWARM_GATE_SET,       0xa8021040
-.equ EFR32_RAC_TXWARM_GATE_CLR,       0xa8022040
-.equ EFR32_RAC_TXWARM_GATE_BIT,       (1 << 18)
-.equ EFR32_RAC_TXWARM_GATE_WAIT_BIT,  (1 << 2)
-/* Observed at 0xa802113c (SET alias of 0xa802003c); semantics unestablished. */
-.equ EFR32_RAC_0X3C_SET,              0xa802113c
-.equ EFR32_RAC_0X3C_SET_VALUE,        5
+.equ EFR32_RAC_SR0_BASE,            0xa8020040
+.equ EFR32_RAC_SR0_SET,             0xa8021040
+.equ EFR32_RAC_SR0_CLR,             0xa8022040
+.equ EFR32_RAC_SR0_GATE_BIT,        (1 << 18)
+.equ EFR32_RAC_SR0_WAIT_BIT,        (1 << 2)
+/* RAC.PRESC's SET alias (official name; RAC+0x3C, SET alias at +0x1000).
+ * Semantics of writing value 5 to it here are unestablished -- PRESC is a
+ * documented prescaler-control register, but this project has not traced
+ * which of its fields bits 0/2 (value 5) actually correspond to. */
+.equ EFR32_RAC_PRESC_SET,              0xa802113c
+.equ EFR32_RAC_PRESC_SET_VALUE,        5
 /* fn_0x894's own unconditional entry/exit bracket (docs/radio-tables.md
  * SS7.3/SS7.6): set on entry, cleared at exit, around the whole call --
  * not part of the job-dispatch logic this project deliberately does not
  * port, just the one bounded hardware gate fn_0x894 itself brackets its
- * entire body with, regardless of IRQ number or RAC state. */
-.equ EFR32_RAC_0X44_BASE,              0xa8020044
-.equ EFR32_RAC_0X44_SET,               0xa8021044
-.equ EFR32_RAC_0X44_BIT_FUNCTION_GATE, (1 << 16)
+ * entire body with, regardless of IRQ number or RAC state. SR1, like SR0
+ * above, is officially blank scratch space, not a documented gate. */
+.equ EFR32_RAC_SR1_BASE,              0xa8020044
+.equ EFR32_RAC_SR1_SET,               0xa8021044
+.equ EFR32_RAC_SR1_BIT_FUNCTION_GATE, (1 << 16)
 /*
  * fn_0xd38's own second, previously-undocumented pulse of the TXWARM
  * gate's SET alias (docs/radio-tables.md SS7.3.1), reached from
@@ -102,16 +117,23 @@
 .equ EFR32_SEQ_TRACE_DISTANCE,         0x00004fb8 /* diagnostic only */
 .equ EFR32_PROTIMER_0X38,              0xa801c038
 .equ EFR32_FRC_0X1C,                   0xa800401c
-.equ EFR32_RAC_0X44_SECOND_PULSE_BIT,  (1 << 22)
+/* Pulses SR0's SET alias again (not SR1, despite this constant's name
+ * before this file's official-naming pass -- the operand at this call
+ * site is EFR32_RAC_SR0_SET, confirmed by re-reading the code below, not
+ * just renaming blindly). */
+.equ EFR32_RAC_SR0_SECOND_PULSE_BIT,   (1 << 22)
 .equ EFR32_OBS_BLOCK_A8015020,         0xa8015020
 .equ EFR32_OBS_BLOCK_A8015020_BIT,     (1 << 21)
 .equ EFR32_OBS_BLOCK_A8016100,         0xa8016100
-/* Three observed CLR-alias writes; semantics unestablished. */
-.equ EFR32_RAC_0X44_CLR,              0xa8022044
-.equ EFR32_RAC_0X44_CLR_MASK,         0x03
-.equ EFR32_RAC_TXWARM_GATE_CLR_MASK2, 0xa8
-.equ EFR32_RAC_0X08_CLR,              0xa8022008
-.equ EFR32_RAC_0X08_CLR_MASK,         0x10
+/* Three observed CLR-alias writes; semantics unestablished beyond
+ * RXENSRCEN's own official name (RAC+0x08, already used elsewhere in
+ * this project, e.g. docs/radio-tables.md SS1) -- which bit(s) of it
+ * value 0x10 actually clears is not traced. */
+.equ EFR32_RAC_SR1_CLR,                0xa8022044
+.equ EFR32_RAC_SR1_CLR_MASK,           0x03
+.equ EFR32_RAC_SR0_CLR_MASK2,          0xa8
+.equ EFR32_RAC_RXENSRCEN_CLR,          0xa8022008
+.equ EFR32_RAC_RXENSRCEN_CLR_MASK,     0x10
 /* The specific state-event bit the stock handler clears and confirms
  * cleared (by re-reading RAC.SEQIF) before returning. Within the already
  * broader EFR32_RAC_SEQIF_STATE_EVENTS mask cleared unconditionally below. */
@@ -210,7 +232,7 @@ efr32_radio_seq_exception:
     ldr r1, [r0]
     ldr r0, =EFR32_SEQ_TRACE_AA00011C
     str r1, [r0]
-    ldr r0, =EFR32_RAC_TXWARM_GATE_BASE
+    ldr r0, =EFR32_RAC_SR0_BASE
     ldr r1, [r0]
     ldr r0, =EFR32_SEQ_TRACE_GATE_VAL
     str r1, [r0]
@@ -219,28 +241,28 @@ efr32_radio_seq_exception:
     cmp r3, #EFR32_EXCEPTION_TXWARM
     bne 2f
     /* Bounded TXWARM gate pulse (docs/radio-tables.md SS7.2). */
-    ldr r0, =EFR32_RAC_TXWARM_GATE_SET
-    ldr r1, =EFR32_RAC_TXWARM_GATE_BIT
+    ldr r0, =EFR32_RAC_SR0_SET
+    ldr r1, =EFR32_RAC_SR0_GATE_BIT
     str r1, [r0]
     ldr r3, =EFR32_RAC_TXWARM_WAIT_BOUND
-10: ldr r0, =EFR32_RAC_TXWARM_GATE_BASE
+10: ldr r0, =EFR32_RAC_SR0_BASE
     ldr r1, [r0]
-    ldr r2, =EFR32_RAC_TXWARM_GATE_WAIT_BIT
+    ldr r2, =EFR32_RAC_SR0_WAIT_BIT
     ands r1, r2
     beq 12f
     subs r3, #1
     bne 10b
-12: ldr r0, =EFR32_RAC_0X3C_SET
-    movs r1, #EFR32_RAC_0X3C_SET_VALUE
+12: ldr r0, =EFR32_RAC_PRESC_SET
+    movs r1, #EFR32_RAC_PRESC_SET_VALUE
     str r1, [r0]
-    ldr r0, =EFR32_RAC_TXWARM_GATE_CLR
-    ldr r1, =EFR32_RAC_TXWARM_GATE_BIT
+    ldr r0, =EFR32_RAC_SR0_CLR
+    ldr r1, =EFR32_RAC_SR0_GATE_BIT
     str r1, [r0]
     /* fn_0x894's entry/exit gate bracket; see its own comment above. The
      * dispatch logic that would run between these two writes in stock is
      * deliberately not reproduced -- only the gate itself. */
-    ldr r0, =EFR32_RAC_0X44_SET
-    ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
+    ldr r0, =EFR32_RAC_SR1_SET
+    ldr r1, =EFR32_RAC_SR1_BIT_FUNCTION_GATE
     str r1, [r0]
     /* fn_0xd38's conservative-subset second pulse; see its own comment
      * above. r3 = (1 << ((PROTIMER+0x38 bits[31:29]) + 6)) - (FRC+0x1C
@@ -265,8 +287,8 @@ efr32_radio_seq_exception:
     str r3, [r0]
     cmp r3, #8
     bcs 13f
-    ldr r0, =EFR32_RAC_TXWARM_GATE_SET
-    ldr r1, =EFR32_RAC_0X44_SECOND_PULSE_BIT
+    ldr r0, =EFR32_RAC_SR0_SET
+    ldr r1, =EFR32_RAC_SR0_SECOND_PULSE_BIT
     str r1, [r0]
     ldr r0, =EFR32_OBS_BLOCK_A8015020
     ldr r1, =EFR32_OBS_BLOCK_A8015020_BIT
@@ -275,25 +297,25 @@ efr32_radio_seq_exception:
     movs r1, #1
     str r1, [r0]
 13:
-    ldr r0, =EFR32_RAC_0X44_CLR
-    ldr r1, =EFR32_RAC_0X44_BIT_FUNCTION_GATE
+    ldr r0, =EFR32_RAC_SR1_CLR
+    ldr r1, =EFR32_RAC_SR1_BIT_FUNCTION_GATE
     str r1, [r0]
     /* fn_0x894's own "done:" also does an unconditional *direct* (not
      * aliased) zero of the whole register, after the bit-16 clear above
      * and before returning -- not the conditional SEQIEN-clear next to it
      * in the original, which is RAC-state-dependent dispatch logic this
      * project does not reproduce, just this one unconditional write. */
-    ldr r0, =EFR32_RAC_0X44_BASE
+    ldr r0, =EFR32_RAC_SR1_BASE
     movs r1, #0
     str r1, [r0]
-    ldr r0, =EFR32_RAC_0X44_CLR
-    movs r1, #EFR32_RAC_0X44_CLR_MASK
+    ldr r0, =EFR32_RAC_SR1_CLR
+    movs r1, #EFR32_RAC_SR1_CLR_MASK
     str r1, [r0]
-    ldr r0, =EFR32_RAC_TXWARM_GATE_CLR
-    movs r1, #EFR32_RAC_TXWARM_GATE_CLR_MASK2
+    ldr r0, =EFR32_RAC_SR0_CLR
+    movs r1, #EFR32_RAC_SR0_CLR_MASK2
     str r1, [r0]
-    ldr r0, =EFR32_RAC_0X08_CLR
-    movs r1, #EFR32_RAC_0X08_CLR_MASK
+    ldr r0, =EFR32_RAC_RXENSRCEN_CLR
+    movs r1, #EFR32_RAC_RXENSRCEN_CLR_MASK
     str r1, [r0]
     /* Matches stock's fn_0x7c8(mask) exactly (docs/radio-tables.md SS7.2):
      * the CLR write is re-issued on *every* iteration, not just once

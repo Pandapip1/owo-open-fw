@@ -1251,6 +1251,32 @@ clear-and-wait `RAC.SEQIF` bit 24 via `0x7c8`. IRQ9's body opens with the
 *same* `bl 0x894` call, so `0x894` is a shared "RAC service" routine, not
 IRQ8-specific.
 
+**Official names, from the public register model, not more disassembly:**
+fetched Silicon Labs' own `RAC_S_register.py`/`RAC_S_field.py`
+(`build/reference-models/`) and found `0xA8020040`/`0xA8020044` are
+`RAC.SR0`/`RAC.SR1` — and, per that same model, **both are documented as
+generic 32-bit read-write scratch words, reset value `0`, with no
+hardware meaning assigned at all**. So the "gate pulse"/"busy-wait" this
+section already fully resolved and ported into production `radio_seq.S`
+is not a documented hardware feature; it is a **firmware convention**
+stock's own code invented, using otherwise-blank scratch registers as a
+software semaphore between whichever two logical halves of the system
+coordinate through it. `radio_seq.S` has been updated to use the
+official `SR0`/`SR1` names throughout (previously `TXWARM_GATE_BASE`/
+`0X44_BASE`), with this distinction called out directly in its own
+comments — this project still faithfully reproduces the exact bit
+pattern stock uses (bit 18/bit 2 on `SR0`, bit 16/22 on `SR1`), it just no
+longer implies that pattern is itself a silicon-defined gate. One real
+naming bug caught in the process: a bit constant applied to `SR0`'s SET
+alias (the second pulse in §7.3.1) had been named with an `0X44` (`SR1`)
+prefix since whenever it was first added — cosmetic, the correct address
+was always used at its one call site, but now corrected to
+`EFR32_RAC_SR0_SECOND_PULSE_BIT` to match where it's actually written.
+The fifth register at `0xA802113C` (SET alias of `0xA8020000+0x3C`) is
+also no longer unnamed: it's `RAC.PRESC`'s SET alias — a real, documented
+prescaler-control register, though which of its fields the written value
+`5` actually sets has not been traced.
+
 ### 7.3 `0x894`/`0xd38`: a stateful dispatcher, not a store sequence (partially resolved)
 
 `0x894` reads ARM core `SCB->ICSR` (`0xE000ED04`, bits `[31:23]`) and
