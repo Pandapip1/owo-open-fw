@@ -2456,3 +2456,72 @@ this exact dump with both builds transmitting the *same* fixed-length
 test payload, so `DATABUFFER`/`WCNT`/`WCNTCMP0`'s differences (all
 plausibly just packet-length artifacts here) can actually be trusted
 either way.
+
+### 7.9 `RAC.STCTRL` lines up exactly with a live hardware value, and the "19-entry calibration loop" is NVIC priority setup, not radio calibration
+
+Chasing `RAC.STCTRL`'s own real-hardware value (found as a genuine, non-
+packet-dependent config difference in §7.8: `0` on the open stack vs.
+`0x01061A7F` on stock) back to its write site in the sequencer object
+surfaced real new structure, not just one register.
+
+**The write site, `fn_0x77a`, is called from exactly one place: the
+sequencer's own reset handler (local `0x2ade`), immediately after the
+already-documented "19-entry calibration-table init loop."** That loop
+(`tests/sequencer-probe/README.md`/§7.5.4 both already named it without
+resolving what it configures) calls a helper, `fn_0x2a60(index, value)`,
+fourteen times with sequential indices `0..13` and value `1`, then five
+more times with indices `15`/`17`/`19`/`23`/`27`. Its two possible target
+base addresses resolve to **`0xE000E400`** (`NVIC.IPR0`, external
+interrupt priorities) and **`0xE000ED1C`** (`SCB.SHPR1`, internal
+exception priorities) — both standard, architected Armv6-M/Armv8-M core
+addresses, not vendor radio registers. Byte-addressable `NVIC.IPR[n]`
+means index `n` directly selects `IRQn`'s priority byte: **this loop sets
+priority `1` for, among others, IRQ8 and IRQ9 themselves** — the exact
+two interrupts this project's own `radio_seq.S` services. The open
+stack's reset handler never calls anything like this and never touches
+`NVIC.IPR`/`SCB.SHPR` at all (checked directly: zero references), so
+IRQ8/IRQ9 run at whatever priority the core resets to (architecturally
+0 — the *highest* priority, not lower as stock explicitly chooses). Not
+yet established whether this specific difference has any observable
+effect; recorded here because it's a real, concrete, previously-
+unidentified configuration gap, not because it's confirmed load-bearing.
+
+**Then, gated behind the loop, `fn_0x77a` itself — fully lifted and
+verified in `sequencer-decomp/src/fn_0x77a.c`, matching the original
+exactly.** It writes a hardcoded constant to `RAC.STCTRL`
+(`0x01061A7F` — not derived from any per-chip calibration data visible
+in this object, and the *exact* value independently measured live on
+stock hardware in §7.8, closing that loop), then configures this core's
+own private Armv6-M `SysTick` timer from its own standard
+`SYST_CALIB.TENMS` field (reload = `TENMS * 25`, enabled from the
+processor clock, no interrupt). Ordinary, well-understood ARM core
+housekeeping, not a radio-specific mechanism.
+
+**The real significance is what gates reaching it at all.** Immediately
+before calling `fn_0x77a`, the reset handler busy-waits
+(`while ((RAC.SR3 & BIT(17)) == 0) {}`) and then only proceeds if
+`RAC.SR3` bit 25 is also clear — both already among this project's five
+known `RAC.SR3` literal-pool references (§7.5.2), previously catalogued
+as "reads," now connected to a real consequence for the first time.
+**Stock does not hang at this busy-wait on real hardware** (it boots and
+transmits normally), which means `RAC.SR3` bit 17 must already read `1`
+by the time the M0+ core's *own reset handler* reaches this line — well
+before either examined firmware image (M33 application, M0+ sequencer
+object) has done anything at all. Combined with §7.5.2's already-
+exhaustive software-write search (zero write sites found anywhere, in
+either object or the entire unlinked M33 RAIL library), this is now a
+much sharper, hardware-pinned characterization than "boot-ROM-level
+mechanism, origin unknown": `RAC.SR3` bit 17 behaves like a genuine
+hardware-latched readiness flag (plausibly an oscillator/PLL-lock-style
+signal physically wired into this otherwise-generic scratch register's
+bit, not a software-written value at all) that becomes true extremely
+early in the M0+ core's own boot, independent of any firmware this
+project can inspect — not evidence against the official register
+model's documented `0` reset value (that's still correct for what
+software can write), just evidence that *something* drives this specific
+bit from outside software before the M0+'s own reset handler runs far
+enough to observe it. This does not, by itself, change the §7.5.2
+conclusion that `SR3` is not on the open stack's own execution path
+today; it does make "how does this bit actually become 1 on real
+silicon" a substantially better-posed question than it was before this
+section, for anyone who picks the `SR3`-origin thread back up.
