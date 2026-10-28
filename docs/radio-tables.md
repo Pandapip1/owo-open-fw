@@ -4955,3 +4955,61 @@ check, suspect the tracepoint's own placement/timing semantics before
 concluding the device model itself is wrong** -- especially for any
 tracepoint that fires *inside* a command handler rather than at the
 point a value actually settles.
+
+### 7.57 A genuinely new, direct, real-hardware confirmation: the open sequencer's own IRQ8 handler, single-stepped live via AP3 for the first time
+
+The QEMU investigation above (§7.55-7.56) ended up building, as a
+side effect, a detailed model of exactly how `RAC.SEQIF` bits 24/25
+drive the `TXWARM`→`TX` handshake. §7.15 already proved (via
+self-instrumented trace words) that the open sequencer's own real
+`IRQ8` handler completes within microseconds on real hardware --
+but that was always an indirect, after-the-fact proof (bounded
+counters read post-hoc), never a direct, instruction-by-instruction
+observation of the handler actually running. AP3 single-stepping was
+used earlier this session only against the *stock* sequencer
+(§7.53/7.54); it had not yet been pointed at the open stack's own
+`radio_seq.S`.
+
+Did that for the first time: flashed `build-stage3`, started the
+dual-core OpenOCD session (`xg22-dual-core.cfg`), armed a breakpoint
+on `efm32.seq` at `0x11e` (`efr32_radio_seq_exception`'s real address,
+read from `radio-sequencer.elf`'s own symbol table), and resumed.
+Caught reliably, repeatedly, confirmed via `current mode: Handler
+External Interrupt(8)` -- a real, live `IRQ8` entry, not an inferred
+one. **Found along the way that the M33 re-issues a fresh `SEQRESET`
+on every retry cycle** (visible as repeated `external reset detected`
+messages on `efm32.seq`), which disrupted the first single-step
+attempt mid-trace; halting `efm32.cpu` (the M33) immediately after
+catching the breakpoint, before single-stepping, fixed this cleanly --
+worth remembering for any future attempt at this same technique.
+
+`tests/hardware-lockstep/trace_stores.py` (unmodified, already built
+for exactly this) single-stepped the real handler to completion in 65
+steps (`"complete": true, "boundary": "exception-return"`), capturing
+every real MMIO write with real addresses and values: the gate-pulse
+prologue (`SR0`/`SR1`/RXENSRCEN clears, matching `radio_seq.S`'s own
+named constants exactly), then **`SEQIF_CLEAR=0x01000000` (bit 24,
+the `TXWARM` ack) immediately followed sixteen steps later by
+`SEQIF_CLEAR=0x02000000` (bit 25, the `TX` ack) -- both inside this
+single `IRQ8` invocation.** This means real silicon's own `RAC` state
+machine transitions `TXWARM`→`TX` essentially instantaneously once
+bit 24 clears (fast enough that the same handler's own universal
+exit-ack, reading whatever's currently in `SEQIF`, catches bit 25
+too) -- the exact same bit-24/bit-25 handshake shape this session
+independently reverse-engineered from `vendor/qemu`'s own model
+while investigating §7.55, now confirmed to be real silicon's actual
+behavior, not just this project's model of it.
+
+**Net result: another real, direct, hardware-level confirmation that
+the M0+/RAC dispatch handshake itself works correctly, reinforcing
+(not changing) the conclusion already reached by every other avenue
+in this document.** `ACTIVETXFCD`'s real blocker remains conclusively
+outside anything software-visible on either core -- it is inside
+`FRC`'s own internal, undocumented hardware state machine, which no
+further instruction-level tracing of the M33 or M0+ side can
+illuminate, since that machine's internal transitions are not
+observable except through its own status register (already read
+exhaustively throughout this document). This specific technique
+(AP3 single-step of the *open* sequencer's real `IRQ8`/`IRQ9` entry)
+is now proven and reusable, should a genuinely new angle on `FRC`
+itself ever surface.
