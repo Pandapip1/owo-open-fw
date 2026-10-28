@@ -5013,3 +5013,69 @@ exhaustively throughout this document). This specific technique
 (AP3 single-step of the *open* sequencer's real `IRQ8`/`IRQ9` entry)
 is now proven and reusable, should a genuinely new angle on `FRC`
 itself ever surface.
+
+### 7.58 Stage 2.5 revisited with AP3: the real proprietary coprocessor
+double-faults into CPU lockup under the open M33 driver, every launch
+attempt -- a sharper, more specific finding than §7.57's blanket "FRC
+is unknowable" conclusion, confined to this one configuration
+
+`docs/hardware-bringup.md`'s existing stage-2.5 write-up (open M33 +
+proprietary M0+, 2026-10-27) never attached a debugger to AP3 during a
+live run -- it only read M33-side peripheral registers afterward, and
+concluded the real coprocessor "did not consume the open driver's
+packet" (`BUFC.WRITE=11`, `READ=2`) without ever observing the M0+
+core's own state directly. §7.57's AP3 technique, proven minutes
+earlier against the *open* sequencer, had not yet been pointed at the
+*real* one running under the open M33. Did that now, for the first
+time.
+
+Reused the still-current `build-stage2.5` (confirmed via symbol table
+and unchanged `radio.c`/`CMakeLists.txt` history since the original
+build -- no rebuild needed), reflashed it fresh, and connected
+`xg22-dual-core.cfg`. **Before any command was issued** -- a fully
+passive connection, nothing armed, nothing resumed -- OpenOCD was
+already repeatedly logging `clearing lockup after double fault` /
+`external reset detected` on `efm32.seq` in a tight, continuous loop.
+Reproduced identically from a second clean reflash (byte-verified
+erase/write/verify) to rule out the first observation being an
+artifact of this session's own earlier (failed) breakpoint attempt.
+**The real proprietary M0+ coprocessor enters ARMv6-M CPU lockup --
+an unrecoverable double-fault state that halts the core until an
+external reset -- on every single launch attempt the open M33 driver
+makes, cycling continuously.** This is a qualitatively different and
+more severe failure than the "silently didn't finish" symptom
+documented in the original write-up; nobody had previously looked at
+the M0+ core itself to see that it was crashing, not just under- or
+non-responding.
+
+Freezing `efm32.cpu` (the M33) stops the open driver from re-issuing
+`SEQRESET`, which stops the loop and lets the M0+'s frozen lockup
+state be read at leisure. Armv6-M has no `CFSR`/`HFSR` (those are
+Armv7-M+; this core doesn't implement that fault-detail path at all,
+confirmed by both reading as `0`), so the only available clue is the
+stacked `LR`, which pointed into a small helper called from a function
+that stores a caller-supplied register argument into a memory location
+loaded from a nearby literal pool, then polls bit 0 of an offset from
+that same pointer -- consistent in shape with a configuration/handshake
+routine whose correct behavior depends on something the M33 side is
+expected to have already set up. That is the same general "M33-to-
+coprocessor ABI/launch contract" gap the original stage-2.5 write-up
+already named as the open suspect; this is now a direct, reproducible,
+instruction-level handle on it rather than an inference from absence.
+
+**This narrows, not widens, §7.57's conclusion: the "blocker is purely
+inside FRC's unobservable internal state machine" verdict holds for
+the all-open stage-3 configuration (confirmed repeatedly, most recently
+in §7.57 itself), but does not hold for stage 2.5 -- there, the real
+coprocessor crashes outright, which is observable, software-visible,
+and specific to whatever the open M33 driver fails to supply before
+release.** The natural next step is decoding exactly what that helper
+and its caller read from the pointer they're given -- the same kind of
+provenance-first, no-magic-numbers decomposition already applied to
+the FRCRAM indirect-call hook slots in `docs/hardware-bringup.md` --
+not yet done this session; this section records the crash and its
+location, not yet its root cause. Board restored to the ordinary
+`build-stage3` open image afterward; stage 2.5's diagnostic build and
+proprietary capture remain exactly where they already were, under
+`Projects/owo-bg22-proprietary-baselines/`, untouched and uncommitted
+to this repository.
