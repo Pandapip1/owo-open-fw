@@ -2720,3 +2720,33 @@ this project. Worth remembering before adding *any* further
 instructions near this exact call site without re-measuring the full
 before/after `RAC.STATUS`/`FRC.STATUS` checkpoint, not just trusting
 that a value-level analysis says a change should be inert.
+
+**Tested directly rather than left as a hypothesis: replaced the SR0
+write with six pure `nop`s (zero register effect whatsoever, same
+insertion point, as a throwaway diagnostic probe immediately reverted
+after this test) and reflashed.** Identical regression:
+`RAC.STATUS=0x10400000` (`STATE=0`, `OFF`) immediately after `TXEN` and
+still 30 ms later, byte-for-byte the same broken readings as the SR0
+version. **This conclusively proves the regression is pure instruction-
+count/cycle-timing sensitivity at this exact point in
+`radio_tx_enable()`, with no dependency on what those extra instructions
+actually do.** Six cycles of true no-ops, inserted before the existing
+`SR3` clear (itself already the function's first real store), is enough
+to break `RAC.STATUS` from reliably reaching and holding `TX` into never
+leaving `OFF`. Reverted again immediately; confirmed restored
+(`RAC.STATUS=0x09400000`, `FRC.STATUS=0x01100200`, the same baseline as
+every other capture in this document).
+
+**This is likely the most load-bearing single fact this document has
+established about `ACTIVETXFCD` without yet explaining it.** The open
+stack's TX-start path is operating within a real hardware timing margin
+narrow enough that six CPU cycles decide whether `RAC.STATUS` ever
+leaves `OFF` at all — a far more severe and specific constraint than
+"eventually reaches `TX` but the frame coder doesn't engage." Candidate
+next step for whoever picks this up: this margin is almost certainly
+measurable precisely (binary-search the exact number of cycles between
+"still reaches `TX`" and "stuck at `OFF`", on either side of today's
+baseline, not just the two points already measured) and may point
+directly at whatever real hardware deadline stock's own, not-yet-
+identified mechanism is meeting and this driver currently meets only by
+accident at its current exact instruction count.
