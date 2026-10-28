@@ -3387,3 +3387,76 @@ which writes precede which), which this project's current call
 structure (`radio_freq_chan_set()` and `radio_tx_enable()` as two
 independent public functions, called from different points in the LLL)
 has not been checked against stock's single-interrupt atomicity at all.
+
+### 7.25 A major architectural finding: the first TX's own launch path goes through a full kernel-thread wakeup, measured at ~94us, that stock's hardware-timed path does not have
+
+Traced the *first* TX's actual call path all the way from the LLL's
+advertising-event `prepare` callback to confirm the timing hypothesis
+§7.24 pointed toward, rather than continuing to guess at individual
+registers. The result is a genuinely different architectural finding
+from everything else in this document so far.
+
+**The mechanism, confirmed by reading the code, not inferred.**
+`lll_adv.c`'s `prepare` callback (reached once per advertising event)
+calls `radio_reset()`, `radio_phy_set()`, `chan_prepare()` (channel 37
+setup via `radio_freq_chan_set()`), then `radio_tmr_start(1, ticks_at_start,
+remainder)` -- **not** `radio_tx_enable()` directly. `radio_tmr_start()`
+is `efr32_radio_launch_schedule()` (`radio.c`): it arms a **Zephyr kernel
+scheduler tick/clock-event compare** (`cntr_radio_cmp_set()`, documented
+in `cntr.c`'s own header comment as "Tick counter of the ticker... on
+the kernel's scheduler clock service", `32.768 kHz`, and explicitly
+marked `UNVALIDATED ON HARDWARE`) -- **not `PROTIMER`**, the
+radio-specific hardware timer this project's own code marks unimplemented
+in thirteen separate places (`EFR32_RADIO_AIR_TODO("PROTIMER (timebase,
+compare, captures) and RTC syn")`, etc.). When that generic tick compare
+fires, its ISR calls `efr32_radio_launch_wake()` ("ISR-safe: publish only
+a generation and wake the pre-created job"), which posts a deadline event
+and wakes a **dedicated kernel thread** (`efr32_radio_tx_job_thread`,
+`K_HIGHEST_THREAD_PRIO`). Only once the Zephyr scheduler actually context-
+switches into that thread does it call `radio_tx_enable()`, which finally
+issues the real `RAC.CMD.TXEN` write.
+
+So for the very first TX of an advertising event, the real hardware
+`TXEN` write is separated from "channel setup completed" by: an ISR
+entry, a kernel scheduler wakeup/post, a thread context switch, and
+only then the function call chain into `radio_tx_enable()`'s own
+earlier setup (`SR3` clear, BUFC publish, `SR0` prepare, etc.) before
+`TXEN` itself. Stock's own equivalent is virtually certain to be driven
+by `PROTIMER`'s hardware compare/capture system, synchronized to the
+same timebase the rest of the radio's digital logic runs on -- a
+fundamentally different, hardware-paced mechanism, not a generic OS
+timer tick with software ISR/thread latency layered on top.
+
+**Measured, not guessed, how much latency this actually costs.** Added
+two diagnostic cycle-counter timestamps (`k_cycle_get_32()`, reverted
+after measuring, not kept): one at `efr32_radio_launch_wake()`'s TX
+branch (the moment the tick compare ISR decides to wake the thread),
+one at `radio_tx_enable()`'s own entry (the moment the thread actually
+starts running). QEMU 77 passed throughout. On real hardware, read
+back directly: a consistent **3141-cycle gap, `93.6us`** at this
+board's `32.768 MHz` (`CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=33554432`)
+core clock -- the actual, measured kernel-thread-wakeup latency between
+"scheduled launch decided" and "`radio_tx_enable()` running", for the
+very first TX of an event specifically. (Subsequent channels within the
+same event, `lll_adv.c`'s continuation path, call `radio_tx_enable()`
+directly from ISR context with no thread wakeup at all -- this specific
+latency is unique to the very first TX, the one this whole document's
+`ACTIVETXFCD` checkpoint has been testing against.)
+
+**What this does and does not establish.** It is a confirmed,
+measured, structurally real difference between this project's TX-launch
+path and what stock's `PROTIMER`-driven path almost certainly looks
+like -- not a guess, and not yet disproven the way the sixteen register-
+level hypotheses in §7.14-§7.24 were. `93.6us` is well within RAIL's
+documented general TX-scheduling margins, so this does *not* by itself
+prove the delay is disqualifying -- but if `FRC`'s frame-coder-activation
+logic depends on a much tighter hardware-timed window relative to
+channel/`BUFC` setup completing (plausible for a tightly-coupled digital
+block, not yet confirmed either way), a `~94us` software-scheduled gap
+could easily blow through it. This is the first hypothesis in the whole
+investigation that is architectural rather than register-level, and the
+first that would require a real engineering effort (actual `PROTIMER`
+integration, not a register poke) to test conclusively -- recorded here
+in full rather than attempted as a hasty, risky change to a scheduling
+mechanism that other code (RX launch, general event timing) also
+depends on.
