@@ -4510,6 +4510,51 @@ externally-visible counter alone cannot fool it into proceeding. The
 real block is entirely inside `FRC`'s own internal, unexported state,
 consistent with every other negative result in this investigation, but
 now demonstrated by direct intervention rather than inferred from
-reading status bits alone. No further externally-writable register in
-this project's current map is a plausible next lever to try along
-these lines.
+reading status bits alone. One further lever was worth trying along
+these lines: `FRC.CMD.STATEINIT` -- see §7.49 immediately below.
+
+### 7.49 `FRC.CMD.STATEINIT` tried live: moves `READOFFSET`, never touches `ACTIVETXFCD`/`FSMSTATE`, and repeated use crashes the chip
+
+`FRC_S_field.py` names one `FRC.CMD` bit this project had not yet
+tried live: `STATEINIT` (bit 11, write-only) -- a name that reads like
+exactly the kind of "reset the frame coder's internal state machine"
+primitive this stall seems to need, and a more plausible-sounding
+candidate than any bit tried before it. Tried it the same way as
+§7.48, on the open build at its usual settled, stuck baseline
+(`READOFFSET=2`, `FRC.STATUS=0x01100200`, `RAC.STATUS=0x09400000`):
+
+* **First write** (`mww` bit 11 of `FRC.CMD`, `0x800`, held `10 ms`):
+  `READOFFSET` advanced from `2` to `4` -- a real, repeatable effect,
+  not a no-op. `WRITEOFFSET` stayed `0xB` (the full 11-byte frame,
+  unchanged). **But `FRC.STATUS` and `RAC.STATUS` were byte-for-byte
+  identical to baseline** -- `ACTIVETXFCD` still `0`, `FSMSTATE` still
+  `17`, `RAC` still stuck in `TX`.
+* **Second write** (same bit, continuing from the first): `READOFFSET`
+  advanced again, `4` to `6` -- same `+2` step as the first write --
+  but this time the core came back **halted in a real `HardFault`**
+  (`Handler HardFault`, `pc=0x1d8d0`), not a clean debug-halt.
+* **Third write, same session, same fault state**: `READOFFSET`
+  advanced once more, `6` to `8` -- the write still "works" mechanically
+  even with the CPU already faulted, consistent with this being a pure
+  hardware-side effect independent of what the CPU is doing -- but the
+  chip was by this point in a confirmed bad state. Recovered with a
+  full reflash (confirmed clean: `READOFFSET` back to `2`, same
+  baseline as always, no lasting damage).
+
+**Interpretation, not overclaimed: `STATEINIT` does not reset the
+frame coder back to a *working* state -- it appears to re-run the same
+"treat the next two bytes as a length-style header and advance past
+them" step `FRC` already performed once at `TXEN`, but now starting
+from wherever `READOFFSET` currently sits, rather than from byte 0.**
+Since bytes 2-3 (and later 4-5) of a real BLE advertising PDU are not
+another length header, this just walks the read pointer further into
+the payload without ever resolving whatever condition keeps
+`FSMSTATE`/`ACTIVETXFCD` latched, and walking it far enough
+destabilizes something else into a fault. **Treat this the same as
+`BLOCKINIT` (§7.31): do not live-poke `FRC.CMD.STATEINIT` again
+outside of a full compiled, reviewed, revertible change** -- it is not
+a safe exploratory primitive, even though, unlike `BLOCKINIT`, its
+*first* use alone does not immediately fault. No further `FRC.CMD`
+bits remain untried that look more promising than this; the
+intervention-based technique introduced in §7.48 has now been pushed
+about as far as this project's current register map supports.
