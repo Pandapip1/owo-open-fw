@@ -4197,3 +4197,42 @@ with `agc`/`rfcrc` (smallest diffs) using the same field-decode
 discipline as §7.19, and watch specifically for anything that isn't
 explained by a RAM address, a channel-dependent config value, or a
 live counter.
+
+### 7.43 Started that diff with `rfcrc` -- a real production-code fix found, but not the `ACTIVETXFCD` cause
+
+Decoded `rfcrc`'s 12 differing bytes first (smallest set). All four
+repeats (the usual secure/non-secure alias pattern) reduce to one real
+difference: `RFCRC.DATA` (`+0x1C`, the live CRC accumulator,
+read-only) reads `0xAAAAAA` on stock -- exactly matching `INIT`
+(`+0x18`, which matches on both stacks already) -- but `0x0` on open.
+`RFCRC.CMD.INITIALIZE` (`+0x010`, write-only, bit 0) is the public
+command that loads `DATA` from `INIT`; `radio_crc_configure()` in
+`radio.c` configures `EN`/`CTRL`/`INIT`/`POLY` but never issues it --
+confirmed directly in source, no `RFCRC_CMD` offset was even defined
+in this file before this section.
+
+Tested live on hardware, carefully this time (an earlier attempt hit
+the same bare-`resume`-doesn't-continue-the-real-firmware methodology
+bug §7.34 already found -- caught again, redone correctly: catch
+exactly at the real `TXEN` breakpoint, poke there, `resume` to that
+exact address so the real firmware continues naturally). The poke
+confirmed the command works exactly as documented (`DATA` becomes
+`0xAAAAAA` immediately). But after letting `TXEN` execute and settle
+for the usual 450ms: `RFCRC.DATA` drifts to the same value
+(`0x34caed`) whether or not the poke was applied, and
+`READOFFSET`/`FRC.STATUS`/`RAC.STATUS` are completely unchanged either
+way. **This divergence is real but does not explain the
+`ACTIVETXFCD` stall** -- `RFCRC.DATA`'s post-settle drift looks
+free-running/incidental, not meaningfully coupled to processing the
+actual staged packet.
+
+**Fixed anyway, on its own merits.** This is a genuine, independently
+confirmed divergence from stock's real CRC-engine initialization
+behavior, unrelated to whether it explains the central mystery --
+consistent with this project's standing "every divergence you find
+must be recorded and fixed" goal applying to real hardware, not just
+QEMU. Added the `CMD.INITIALIZE` write to `radio_crc_configure()`,
+confirmed on hardware: `RFCRC.DATA` now reads `0xAAAAAA` right at
+`TXEN`, matching stock exactly. QEMU 78/17 re-confirmed passing
+(unaffected -- QEMU doesn't model `RFCRC.DATA`'s live accumulator at
+all, so this is purely a real-hardware fidelity fix).

@@ -555,9 +555,11 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_RFCRC_BASE 0xB8010000UL
 #define EFR32_RFCRC_EN_OFFSET 0x004U
 #define EFR32_RFCRC_CTRL_OFFSET 0x008U
+#define EFR32_RFCRC_CMD_OFFSET 0x010U
 #define EFR32_RFCRC_INIT_OFFSET 0x018U
 #define EFR32_RFCRC_POLY_OFFSET 0x020U
 #define EFR32_RFCRC_BLE_CTRL 0x00000708U
+#define EFR32_RFCRC_CMD_INITIALIZE BIT(0)
 
 #define EFR32_FRC_BASE 0xB8004000UL
 #define EFR32_AGC_BASE 0xB800C000UL
@@ -2840,7 +2842,21 @@ uint32_t radio_is_idle(void)
 	return state == EFR32_RAC_STATE_OFF || state == EFR32_RAC_STATE_SHUTDOWN;
 }
 
-/* [regs-public] RFCRC values match BLE's 24-bit CRC after bit reversal (T5). */
+/*
+ * [regs-public] RFCRC values match BLE's 24-bit CRC after bit reversal (T5).
+ *
+ * A hardware-lockstep diff against stock (docs/radio-tables.md SS7.43)
+ * found RFCRC.DATA -- the live CRC accumulator -- reads 0 on the open
+ * stack right before TXEN, while stock's reads back the just-written
+ * INIT value. CMD.INITIALIZE (write-only, bit 0) is the public command
+ * that loads DATA from INIT; this function configured EN/CTRL/INIT/POLY
+ * but never issued it. Confirmed directly on hardware: issuing it here
+ * makes DATA read INIT immediately afterward, matching stock. Does NOT
+ * explain the ACTIVETXFCD stall (tested on hardware, no change to
+ * RAC.STATUS/FRC.STATUS/BUFC.READOFFSET -- SS7.43), but is a genuine,
+ * independently confirmed divergence from stock's real CRC-engine
+ * initialization, worth fixing on its own merits.
+ */
 void radio_crc_configure(uint32_t polynomial, uint32_t iv)
 {
 	LL_ASSERT((polynomial & ~0x00FFFFFFU) == 0U);
@@ -2849,6 +2865,8 @@ void radio_crc_configure(uint32_t polynomial, uint32_t iv)
 	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_CTRL_OFFSET) = EFR32_RFCRC_BLE_CTRL;
 	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_INIT_OFFSET) = bit_reverse24(iv);
 	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_POLY_OFFSET) = bit_reverse24(polynomial);
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_CMD_OFFSET) =
+		EFR32_RFCRC_CMD_INITIALIZE;
 }
 
 /*
