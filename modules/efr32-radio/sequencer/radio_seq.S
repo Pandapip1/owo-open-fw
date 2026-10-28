@@ -136,6 +136,14 @@
  * drops everything above bit 2 before the right-shift ever runs). */
 .equ EFR32_OBS_BLOCK_AA000054_0X38,   0xaa00008c
 .equ EFR32_OBS_BLOCK_AA000054_0X58,   0xaa0000ac
+/* Bit-width masks for the distance computation below: a 3-bit field
+ * (bits[2:0] of EFR32_OBS_BLOCK_AA000054_0X38), a 13-bit field (bits
+ * [12:0] of EFR32_OBS_BLOCK_AA000054_0X58), and the final 16-bit
+ * truncation -- generic masks, but named rather than left as bare
+ * literals in the arithmetic itself. */
+.equ EFR32_SEQ_DISTANCE_TERM_A_MASK,  0x7
+.equ EFR32_SEQ_DISTANCE_TERM_B_MASK,  0x1fff
+.equ EFR32_SEQ_DISTANCE_RESULT_MASK,  0xffff
 /* Pulses SR0's SET alias again (not SR1, despite this constant's name
  * before this file's official-naming pass -- the operand at this call
  * site is EFR32_RAC_SR0_SET, confirmed by re-reading the code below, not
@@ -373,17 +381,17 @@ efr32_radio_seq_exception:
      * (OBS_BLOCK_AA000054+0x58 & 0x1fff), truncated to 16 bits. */
     ldr r0, =EFR32_OBS_BLOCK_AA000054_0X38
     ldr r1, [r0]
-    ldr r2, =0x7
+    ldr r2, =EFR32_SEQ_DISTANCE_TERM_A_MASK
     ands r1, r2
     adds r1, r1, #6
     movs r2, #1
     lsls r2, r2, r1
     ldr r0, =EFR32_OBS_BLOCK_AA000054_0X58
     ldr r1, [r0]
-    ldr r3, =0x1fff
+    ldr r3, =EFR32_SEQ_DISTANCE_TERM_B_MASK
     ands r1, r3
     subs r3, r2, r1
-    ldr r2, =0xffff
+    ldr r2, =EFR32_SEQ_DISTANCE_RESULT_MASK
     ands r3, r2
     /* Diagnostic only: record the computed distance regardless of branch
      * taken, for a later debug-probe read. Not part of the production
