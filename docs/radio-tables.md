@@ -4236,3 +4236,23 @@ confirmed on hardware: `RFCRC.DATA` now reads `0xAAAAAA` right at
 `TXEN`, matching stock exactly. QEMU 78/17 re-confirmed passing
 (unaffected -- QEMU doesn't model `RFCRC.DATA`'s live accumulator at
 all, so this is purely a real-hardware fidelity fix).
+
+**Continued to `agc` next (36 differing bytes) -- same pattern, no
+second fix found.** Every differing register is one of `STATUS0`/
+`STATUS1`/`RSSI`/`IF` (all read-only, live measurement/interrupt
+registers) or `CTRL0`'s `RSSISHIFT` field (decoded precisely: `0x27`
+on stock vs `0x4E` on open -- a real, non-noise-bit difference, not
+just incidental XOR fuzz). `AGC`'s whole purpose is continuous,
+hardware-driven gain adjustment against real RF/ambient-noise
+conditions -- `RSSISHIFT`/`STATUS*`/`RSSI` are exactly the fields such
+a live loop would naturally drift over time, not static configuration
+`radio_phy_set()` writes once (that part -- the PHY table's own AGC
+entries -- was already confirmed byte-for-byte matching stock when
+fully decomposed earlier in this project). Not confirmed as "purely
+benign drift" with the same rigor as a real fix would need (would
+require multiple time-separated captures to show genuine drift rather
+than a one-off difference), but the pattern across both `rfcrc` and
+`agc` now consistently points to live/measured state, not digital
+frame-coder logic -- the diminishing signal here is itself useful
+information for whoever continues this diff (`bufc`/`modem`/`rac`
+remain unchecked).
