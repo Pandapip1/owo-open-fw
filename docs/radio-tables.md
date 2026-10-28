@@ -4166,7 +4166,17 @@ entire `PROTIMER`/interrupt thread closed: if the PLL never actually
 locked onto the target channel frequency, the radio cannot be
 transmitting real RF at a stable frequency, which is a very plausible
 reason for whatever gates `FRC` from ever pulling a second byte out of
-`BUFC`. Not yet investigated further (what should set `INLOCK`,
-whether this is expected at this specific point in the sequence, or a
-genuine fidelity gap) -- the next concrete step if this is picked up
-again.
+`BUFC`. **Immediately checked against existing data before investigating
+further, and refuted: this is not a divergence at all.**
+`tests/hardware-lockstep/` already has stock (`stage2`) `SYNTH`
+captures at comparable pre-`TXEN` checkpoints
+(`stage2-pre-txen-synth.bin`, `stage2-first-synth.bin`) -- both read
+the identical `0x4` (`INLOCK=0`) at this offset. The open stack's own
+other captures (`stage3-ch37-pre-txen-synth.bin`,
+`stage3-first-synth.bin`) match too. **`INLOCK=0` is normal/expected
+behavior at this specific checkpoint on both stacks, not a fidelity
+gap or a clue** -- whatever the bit actually means, it evidently
+doesn't need to be `1` for a real TX to succeed on stock either. Ruled
+out efficiently, without a new hardware session, by checking already-
+available comparison data before investing further -- exactly the
+discipline this project's own rigor standard asks for.
