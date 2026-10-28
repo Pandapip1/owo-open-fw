@@ -3033,3 +3033,50 @@ side left to catch -- the stuck state is entirely in the RAC/FRC
 autonomous hardware state machine, which this project's existing M33
 register access already inspects exhaustively (§7.4-§7.14). All three
 threads from §7.12 are now closed.
+
+### 7.16 Two new hypotheses from `FRC.CTRL`'s public fields, both tested and ruled out
+
+With §7.12's three threads closed, re-examined `FRC.CTRL` directly: the
+public register model (`FRC_S_register.py`) names its `TXFCDMODE` field
+("TX Frame Coder Mode") -- a field that, by name alone, looks like the
+single most direct candidate for controlling whether the TX frame coder
+can ever become active. The open HAL never writes a named `EFR32_FRC_CTRL_*`
+constant anywhere (`grep` for `FRC_CTRL` in `radio.c` returns nothing),
+which looked at first like exactly the kind of missing-register gap this
+whole investigation has been looking for.
+
+**It is not.** `radio_phy_set(PHY_LEGACY/PHY_1M, ...)` already applies
+`efr32_ble_1m_delta_table`, a public, Zlib-licensed, directly-cited
+configurator table (`ble_efr32xg22_configurator_out.c:474-481`) that
+includes `FRC.CTRL = 0x000407A0` -- decoding to `TXFCDMODE=2`,
+`RXFCDMODE=2`, `BITSPERWORD=7`, `RATESELECT=0`, `TXPREFETCH=0`,
+`SEQHANDSHAKE=0`. Read `FRC.CTRL` directly on real hardware (no TX
+needed, it's static config): **`0x407a0`, exactly matching.** Since this
+value is copied verbatim from stock's own public source, it cannot be
+the divergence -- stock and the open stack necessarily agree here by
+construction. (Flagging the gap anyway: this value, like the rest of
+`efr32_ble_1m_base_table`/`_delta_table`, is a cited-source magic number
+in a raw address/value table, not decomposed into named fields --
+real for every entry in these tables, not just this one. Worth a
+dedicated pass if/when the project wants to resolve that category of
+"open-source completeness" gap; out of scope to do wholesale here.)
+
+**Second hypothesis, same category, also tested: `FRC.CMD.STATEINIT`**
+(`FRC_S_field.py` bit 11, write-only) resets FRC's own frame-state
+machine -- plausible because `FRC.STATUS.FSMSTATE` (bits `[24:20]`) is
+observed stuck at a constant `17` before and after every TX attempt
+(§7.6), and because the open HAL's existing `FRC.CMD` init write only
+sets `CONVINIT` (the *convolutional encoder's* init, bit 9) which is
+irrelevant for an uncoded 1M PHY (`FECCTRL=0`) -- so the existing
+"FRC init" write may not be touching the right state machine at all.
+Tested issuing `FRC.CMD.STATEINIT` immediately before `RAC.CMD.TXEN`
+(already-named constant, no new magic number). QEMU 77/17 still passed.
+Hardware-tested at the standard 30ms checkpoint: **no change** --
+`RAC.STATUS=0x09400000`/`FRC.STATUS=0x01100200`, identical to every
+prior reading. Reverted; not kept, same as §7.14's `CONVINIT` test.
+
+Both negative results are concrete progress, not dead ends: they rule
+out FRC's own static configuration and its two most plausible init/reset
+commands as the cause, narrowing further toward either a genuinely
+undocumented control path, or a precondition from somewhere this project
+has not yet looked at all.
