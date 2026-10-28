@@ -4065,3 +4065,66 @@ command -- i.e. it's enabled but never actually started, not
 investigation: check a register's own exact offset directly before
 describing a whole block as "off," even when a nearby, related
 register at a different offset genuinely is.
+
+### 7.40 The IRQ-handshake sub-hypothesis, finally tested cleanly: ruled out
+
+Built `tests/activetxfcd-probe/probe.S` -- a from-scratch, standalone
+bootable M33 image, with its own real vector table from reset, sharing
+nothing with Zephyr's RAM layout (sidestepping §7.35/§7.36's dead end
+entirely, since there is no `VTOR` redirect on a live image here at
+all). It replicates `radio_setup()`'s clock/EN bring-up,
+`radio_reset()`'s exact sequencer install/release sequence (both read
+directly from `radio.c`), then replays the 184 real captured MMIO
+stores from §7.37/§7.38's two execution traces (`replay-table.inc`,
+generated from the trace JSONs, not hand-transcribed), then adds
+`PROTIMER`'s real enable sequence with a genuine installed `IRQ36`
+vector this time, then issues the real `RAC.CMD.TXEN`. The real open
+M0+ sequencer image is preloaded into SEQRAM via a separate debugger
+`load_image` step, extracted directly from the already-running
+firmware's own SEQRAM contents (confirmed correct: its first word is
+exactly `EFR32_SEQ_STACK_TOP`).
+
+**One real bug caught before it produced a false result:** the first
+build replayed all 200 captured stores verbatim, including two
+addresses in ARM's system-control space (`0xE000ED04` = `SCB.ICSR`
+with `PENDSVSET` set, `0xE000E204` = NVIC's pending-clear) -- real
+writes Zephyr's own scheduler made during the original trace, which
+are meaningless and unsafe to replay on a bare-metal image with no
+real scheduler. The CPU took a genuine `PendSV` exception straight
+into the vector table's generic fault stub the instant that store
+executed. Filtered both addresses out of `replay-table.inc` (184
+entries remain) and rebuilt.
+
+**With that fixed, the image ran correctly and the real `IRQ36`
+genuinely fired and was serviced** -- caught live, mid-handler
+(`current mode: Handler External Interrupt(36)`, `PC` at the handler's
+own entry). It never returned to the main `spin` loop: `PROTIMER.IF`
+bit 0 is sticky (matching §7.34's finding exactly -- a blanket ack
+doesn't fully clear it), so the CPU spent the entire 450ms test window
+continuously re-entering and re-servicing the real interrupt, not
+idling. **`FRC.WCNTCMP0` reads `0xA`, proving the real `TXEN` write
+executed and `FRC` genuinely parsed the real header exactly as on
+production hardware** (this value is a hardware side effect, never a
+value this image's replay table writes). Despite continuous, real,
+serviced `IRQ36` activity for the entire window:
+`READOFFSET` reads `0x2`, `WRITEOFFSET` reads `0xB`, `FRC.STATUS`
+reads `0x01100200`, `RAC.STATUS` reads `0x09400000` -- **byte-for-byte
+identical to the established stuck baseline.**
+
+**This is a clean, definitive negative result, not confounded like
+§7.35's attempt.** Taking and continuously servicing a real `PROTIMER`
+interrupt -- not just having it clocked (§7.32-7.33), not just having
+it pending (§7.34) -- does not unstick `FRC`'s TX datapath. All three
+`PROTIMER` sub-hypotheses this investigation identified are now ruled
+out with real evidence. The real trigger for `ACTIVETXFCD`/the
+`READOFFSET`-stuck-at-the-header symptom (§7.31) remains unidentified;
+`PROTIMER`, in every form tested, is not it. Hardware reconfirmed back
+to the exact baseline afterward.
+
+**What would still be worth trying, not yet attempted:** a real
+(non-trivial) `IRQ36` handler doing what stock's shared `FRC_IRQHandler`
+actually does (read/ack `FRC.IF`/`IEN` and `BUFC`'s pending/enable pair
+first, per §7.9's disassembly findings, not just a blanket `PROTIMER`
+ack) -- this test's handler was deliberately minimal and may not be
+representative of what a real handshake would look like. That is a
+new, different, well-motivated hypothesis, not a retest of this one.
