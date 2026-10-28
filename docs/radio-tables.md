@@ -4040,3 +4040,28 @@ reason. QEMU 78/17 re-confirmed passing. This is exactly the kind of
 divergence the project's own rigor standard exists to catch: a fix
 that passed its own self-constructed test can still be wrong, if the
 test's inputs were assumed rather than verified against real hardware.
+
+### 7.39 Correction: "`PROTIMER` confirmed completely off" (§7.32) was imprecise -- `EN` was never actually checked
+
+While assembling a from-scratch image from the two trace JSONs, reading
+`radio_setup()` in full showed it unconditionally writes
+`PROTIMER_BASE + 0x004 = 1` (the same `EN.EN` one-bit latch every other
+radio block has) on every boot, alongside the other six blocks'
+enables. §7.32's "confirmed completely off" language was checked
+against real hardware, but only at offsets `+0x8` (the `CTRL`-like
+register) and `+0x20` (the counter) -- **`+0x4` (`EN`) itself was never
+actually read in this investigation.** Rechecked directly:
+`PROTIMER_NS_BASE+0x4` reads `0x1` on real hardware, exactly matching
+`radio_setup()`'s own source.
+
+**This does not change any conclusion already reached** -- `probe.S`'s
+own writes already included a (redundant, since it was already `1`)
+`EN=1` before testing `CTRL`/the counter/`IEN`, so every §7.32-7.35
+result stands. It only corrects the characterization: `PROTIMER`'s bus
+clock is enabled from boot like every other radio block; what's never
+configured is its `CTRL` register, timer-state inputs, and start
+command -- i.e. it's enabled but never actually started, not
+"completely off." Worth remembering for anyone building on this
+investigation: check a register's own exact offset directly before
+describing a whole block as "off," even when a nearby, related
+register at a different offset genuinely is.
