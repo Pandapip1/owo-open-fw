@@ -4180,3 +4180,20 @@ doesn't need to be `1` for a real TX to succeed on stock either. Ruled
 out efficiently, without a new hardware session, by checking already-
 available comparison data before investing further -- exactly the
 discipline this project's own rigor standard asks for.
+
+**While checking this, found a larger, not-yet-mined opportunity:**
+`tests/hardware-lockstep/`'s `stage{2,3}-ch37-pre-txen-*.bin` captures
+(deliberately channel-matched, avoiding §7.19's channel/timing-mismatch
+confound) exist for all seven blocks (`agc`/`bufc`/`frc`/`modem`/`rac`/
+`rfcrc`/`synth`), not just the ones this investigation has checked so
+far. A systematic byte-level diff finds real differences in every
+block (36/36/19/25/52/12/24 bytes respectively) -- but decoding 204
+differing bytes against public field names with the same rigor §7.19's
+`FRC` diff got (distinguishing real divergences from RAM-pointer/
+build-specific/benign-counter noise) is substantial work, not
+something to rush through. **Recorded as the next well-scoped task if
+this is picked up again**, rather than attempted hastily here: start
+with `agc`/`rfcrc` (smallest diffs) using the same field-decode
+discipline as §7.19, and watch specifically for anything that isn't
+explained by a RAM address, a channel-dependent config value, or a
+live counter.
