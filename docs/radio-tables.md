@@ -3250,3 +3250,48 @@ not released by any of `FRC.CMD`'s resume/init bits tried so far
 mostly interleaver/convolution-specific, which an uncoded 1M PHY
 (`FECCTRL=0`) should not need -- plausible next candidates only if that
 assumption turns out wrong.
+
+### 7.21 `RAC.STATUS.TXENS` reads 0 while `STATE=9` claims TX; `RAC.CMD.PAENSET` tested, no change -- and stock can't be directly checked at this resolution
+
+Decoding the *entire* `RAC.STATUS` register (not just the `STATE` field
+this whole investigation has read so far) against its public fields
+found something not previously looked at: at the standard checkpoint,
+`TXENS` (bit 30, "TX Enable Status" -- the actual hardware TX-enable
+circuitry's own status, distinct from the logical `STATE` field) reads
+**`0`**, even though `STATE=9` claims TX is active. (`SEQSLEEPING`,
+bit 22, also reads `1` -- consistent with, not contradicting, §7.15's
+already-established finding that the M0+ core finishes its handler and
+sleeps almost immediately.)
+
+**Could not verify this against stock directly.** Stock's own TX
+completes and advances to `RXPD` (state 4) faster than this project's
+`bg22_require_sram_execution`-based catch-and-rehalt technique can
+resolve -- tried with zero added sleep (just the technique's own ~10ms
+minimum overhead) and stock was *already* at `RXPD` every time, three
+runs in a row. For a tiny legacy-advertisement payload at 1 Mbps, the
+entire PHY-level transmission plausibly completes in under a
+millisecond, well below this tool's resolution floor. So whether
+`TXENS=1` momentarily on stock during its own (much shorter) hold in
+`STATE=9` is unconfirmed, not ruled in or out -- this finding stands on
+its own reasoning (a TX-enable *status* bit reading 0 during a state
+nominally called "TX" is intrinsically suspicious), not on a
+stock comparison.
+
+**Tested the direct, named hypothesis anyway: `RAC.CMD.PAENSET`**
+(bit 12, a manual PA-enable override, same write-only command register
+as `TXEN`). Added immediately after `TXEN`. QEMU 77/17 passed.
+Hardware-tested: **no change** -- `TXENS` still reads `0`,
+`RAC.STATUS`/`FRC.STATUS` otherwise identical to every prior reading.
+Reverted; not kept.
+
+This leaves `TXENS=0` as a genuinely open, unresolved observation --
+possibly a real divergence (the hardware TX-enable circuit never
+actually latches on, which would explain everything downstream
+failing to engage), possibly a normal transient this project simply
+cannot catch at the right moment to compare. A trustworthy way to
+observe stock's own `TXENS` value *during* its brief hold in `STATE=9`
+(not just after it has already moved on) would resolve this -- the
+M0+ live-state tooling question closed in §7.15 was about the M0+ CPU
+specifically, not about catching the M33-visible `RAC.STATUS` register
+at finer time resolution, so that specific gap is not actually closed
+by this project's existing tooling.
