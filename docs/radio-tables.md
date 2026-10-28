@@ -2599,3 +2599,25 @@ removing them would only re-introduce a real (if apparently inert)
 fidelity gap. The `ACTIVETXFCD` blocker remains open; this closes two
 more candidate explanations with evidence rather than leaving them as
 untested speculation.
+
+**A plausible reason the NVIC priority half was never going to be
+observable, found while verifying QEMU's own fidelity for this same
+change in parallel (a separate agent task, `vendor/qemu` commit
+`883560fef0`):** QEMU models the M0+ sequencer core's own `NVIC` as
+genuine Armv6-M with only **2 priority bits implemented**, not the full
+8 the register's own byte width allows for — architecturally normal for
+Armv6-M, where implementations commonly support as few as 2 bits, with
+the unimplemented low bits always reading `0`. Under a 2-bit field,
+stock's own priority value `1` and the architectural reset default `0`
+may quantize to the *same* effective priority. This was verified in the
+simulator, not on real silicon, but there is no reason to expect the
+real EFR32BG22's own Cortex-M0+ implements more priority bits than its
+simulator model does — if anything, the simulator should be modeling
+the real part's own implemented-bits count. This doesn't change §7.10's
+hardware result (still refuted either way), but it's a plausible
+*architectural* reason that specific half of the port was never going to
+move anything, independent of whatever is actually gating
+`ACTIVETXFCD`. The other two areas checked in that same verification
+pass (`RAC.STCTRL`'s write mask, and the M0+ core's own private `SysTick`
+actually counting) were both already correctly modeled; no QEMU fix was
+needed for either.
