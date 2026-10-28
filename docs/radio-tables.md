@@ -5063,6 +5063,48 @@ coprocessor ABI/launch contract" gap the original stage-2.5 write-up
 already named as the open suspect; this is now a direct, reproducible,
 instruction-level handle on it rather than an inference from absence.
 
+Followed the literal-pool pointers the crashing call site and its
+nearest neighbors actually use (read directly from the capture's raw
+bytes, not misdisassembled as code): all three resolve into the
+`0xA802xxxx` `RAC` base/SET/CLR-alias triple this project already
+established in `tests/sequencer-probe/README.md` (base, `+0x1000`,
+`+0x2000`), targeting **`RAC` base offset `+0x05C`** -- read once
+(result unused by this snippet), then bits 5 and 4 unconditionally
+cleared and set via the alias pair. **`+0x05C` is not one of `RAC.SR0`
+-`SR3` (`+0x040..+0x04C`, this project's own established range, §7.5)
+and does not appear anywhere in `modules/efr32-radio/hal/radio.c`'s
+`EFR32_RAC_*_OFFSET` table at all** -- the open M33 driver has never
+named, read, or written this sub-register. Given the original valid
+capture was deliberately taken immediately before the proven stock
+firmware's own `RAC.CTRL.CPUWAITDIS` release write, the obvious
+hypothesis was that stock's own pre-release path sets `+0x05C` into
+some expected state the real M0+'s handshake depends on, and the open
+driver's launch path -- never having heard of this offset -- simply
+never does.
+
+**Checked directly, and that specific hypothesis is ruled out, not
+confirmed.** Flashed the real stock `build-stage2` (both cores stock),
+caught the M33 with a hardware breakpoint at the exact same instruction
+(`0x12da0`, independently re-verified in *this* build's own
+disassembly to still be the `RAC.CTRL.CPUWAITDIS` SET-alias write, not
+just trusted from the earlier capture's notes), and read `RAC+0x05C`
+at that boundary: **`0x00000000`** -- both bits already clear, via
+both the non-secure alias and the direct address. Since the crashing
+M0+ helper's own write to this offset is unconditional (it reads the
+old value but never branches on it, then force-clears bit 5 and
+force-sets bit 4 regardless), the pre-release value plays no role in
+what that helper does -- and the open driver's launch path, which also
+never touches this offset, leaves the same architectural-default `0`
+in place before release. **The two configurations hand off an
+identical value here; `RAC+0x05C` is not the gap.** Recorded per
+§7.38's own lesson: a plausible-looking lead is not evidence until
+actually measured, and this one's measurement came back negative. The
+real cause is still open -- the next candidates are the same kind of
+shared-memory fields `docs/hardware-bringup.md` already named and
+flagged as unclassified (the FRCRAM indirect-call hook slots at
+`0x3844..0x3858`, and the "later-populated words" that differ between
+pre-release and working-TX snapshots), not this register.
+
 **This narrows, not widens, §7.57's conclusion: the "blocker is purely
 inside FRC's unobservable internal state machine" verdict holds for
 the all-open stage-3 configuration (confirmed repeatedly, most recently
