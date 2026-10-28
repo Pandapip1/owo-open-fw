@@ -4598,3 +4598,38 @@ that this function was never a plausible `ACTIVETXFCD` lead even
 before confirming it structurally unreachable. `fn_0x7d8`/`fn_0x690`/
 `fn_0x564`/`fn_0x7ea` are left as opaque calls in this lift. Remaining
 unexamined: `fn_0xace`, `fn_0xb74`.
+
+### 7.51 A real, new discovery while chasing `fn_0xace`/`fn_0xb74`'s callers: a sixth vector, IRQ11, correcting §7.7's "all five" claim -- and confirmed, not assumed, to not change anything
+
+Before decompiling `fn_0xace`/`fn_0xb74` themselves, checked every call
+site (`bl 0xace`/`bl 0xb74`) across the whole disassembly rather than
+trusting the one already-known caller (`fn_0x23a0`/IRQ1). **Found a
+second pair of call sites, at local `0x2938`/`0x2942`, inside a
+function starting at local `0x2898` this project had never
+encountered before -- not referenced by name in any existing
+decompiled file or in this document.** That function itself opens by
+calling `fn_0x894` directly (the exact shape every other IRQ8/9/10/13
+vector handler shares), and its own vector-table word is **`0x2899`
+(word 27, i.e. `IRQ 11`)** -- confirmed by dumping all 64 vector words
+directly from the raw sequencer binary, not inferred. **This means
+§7.7's own "Status" paragraph ("all five of this object's vectors
+beyond IRQ8/IRQ9 that this pass turned up") undercounted: there are
+at least six** (`fn_0x19d0`, `fn_0x2362`/`fn_0x2390`, `fn_0x23a0`,
+`fn_0x2644`, and now `fn_0x2898`/IRQ11).
+
+**Checked immediately, with direct evidence, whether this changes
+reachability on the open build -- it does not.** `radio_seq.S`'s own
+`NVIC.ISER0` write is `EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX`, which
+are literally `(1 << 8)` and `(1 << 9)` (`radio_seq.S:67-68,289`) --
+bit 11 is not part of that mask, so IRQ11 is exactly as unreachable on
+the open build as every other non-IRQ8/9 vector already catalogued.
+`fn_0x2898` itself is not decompiled in this pass (a sizable function
+in its own right, confirmed unreachable before investing further, the
+same scoping judgment already applied to `fn_0x388`/`fn_0xace`/
+`fn_0xb74`'s own siblings) -- recorded here specifically because
+finding a previously-uncatalogued *vector* (not just an uncatalogued
+helper function) and then directly checking its reachability, rather
+than assuming the existing "five" count was exhaustive, is exactly the
+kind of check this project's own rigor standard calls for. `fn_0xace`
+and `fn_0xb74` themselves remain undecompiled; both their known callers
+(`fn_0x23a0`/IRQ1 and now `fn_0x2898`/IRQ11) are confirmed unreachable.
