@@ -2812,12 +2812,15 @@ stock exactly, byte-for-byte, for everything this project has ported.
    rationale as §7.3.1's bit-22 pulse.
 3. ~~**A from-scratch review of what, if anything, stock's BLE host/
    controller stack does between `sl_bt_legacy_advertiser_start`
-   returning and the actual `RAIL_StartTx` call**~~ **Partially closed,
-   §7.14.** Mapped the call chain down to `RAIL_StartTx`; found and
-   tested one concrete idea from it (`FRC.CMD.CONVINIT` re-armed per-TX,
-   not just per-session) -- ruled out, no change on hardware. The
-   function-pointer-gated tail of `RAIL_SetTxTransitions`'s own call
-   chain is not yet fully traced; genuinely still open if revisited.
+   returning and the actual `RAIL_StartTx` call**~~ **Closed, §7.14.**
+   Mapped the full call chain down to `RAIL_StartTx`; found and tested
+   one concrete idea from it (`FRC.CMD.CONVINIT` re-armed per-TX, not
+   just per-session) -- ruled out, no change on hardware. Finished
+   tracing the one remaining unexplored branch (a function-pointer-gated
+   state-machine wait) and found it touches only `RAC.SR0`/a RAM word,
+   never `FRC` -- which also means the idea's original motivation (an
+   unattributed `FRC.CMD` call site from §4.2) does not hold up as
+   described; corrected in §7.14 rather than left standing.
 
 ### 7.13 Thread 2 pursued: `fn_0xd38`'s full body re-verified, and a real (but behavior-preserving) production bug fixed
 
@@ -2907,7 +2910,7 @@ understood well enough to know it's safe to fire unconditionally. Thread
 nothing new found that unblocks `ACTIVETXFCD`." Threads 1 and 3 remain
 open.
 
-### 7.14 Thread 3 pursued: stock's BLE link layer re-issues `FRC.CMD.CONVINIT` before every TX; porting that, tested, no change
+### 7.14 Thread 3 closed: link layer traced to `RAIL_StartTx`; the per-TX `FRC.CMD.CONVINIT` idea it suggested, tested and ruled out; a mis-attribution corrected
 
 Took up open thread 3 from §7.12: tracing stock's BLE host/controller
 stack (stage 1, §7.11) between `sl_bt_legacy_advertiser_start` returning
@@ -2952,19 +2955,31 @@ preserving for its own sake.
 **What this does and does not establish.** It rules out "the frame coder's
 convolution path simply needs re-arming once per TX attempt" as the
 `ACTIVETXFCD` blocker -- a concrete, testable idea, now eliminated rather
-than left as a guess. It does not fully resolve what `RAIL_SetTxTransitions`'s
-call chain does end-to-end: tracing it in stage 1's LTO'd, hash-named RAIL
-internals (`RAILINT_992a3700fea39ab020ab6087e28c16df` ->
-`RAILINT_c232eb9695d8ec51969199511f1ffdbc` ->
-`RAILINT_4316ca4fc8f26ef86197e5e28c021e83`) found a `CORE_EnterCritical`-
-guarded call through a function pointer (`0x29878`) whose success gates a
-further write of `4` to `RAC.SR0`'s CLR alias (`0xB8022040`, clearing bit 2
--- the same bit this project's own `EFR32_RAC_SR0_WAIT_BIT` already names)
-and an update to a RAM-resident state word at `0xB0003EF0`; the literal
-`FRC.CMD` write itself was not found inside that specific traced path (it
-may be in the untraced function-pointer target, or stage 1's RAIL build may
-structure this differently from the stage-2 build §4.2's disassembly came
-from). Thread 3 is not fully closed -- the link-layer call chain down to
-`RAIL_StartTx` is now mapped structurally, and one concrete idea from it
-is tested and ruled out, but the end-to-end trace through the function
-pointer is not finished.
+than left as a guess.
+
+**Correction, found by finishing the trace rather than leaving it as "not
+yet traced": the attribution of §4.2's third `FRC.CMD` call site to
+`RAIL_SetTxTransitions` does not hold up, at least not for stage 1's RAIL
+build.** The function pointer at `0x29878` (reached from
+`RAILINT_4316ca4fc8f26ef86197e5e28c021e83`'s `CORE_EnterCritical`-guarded
+call) is not a hidden `FRC.CMD` write -- it is a state-machine gate: while
+`RAC.STATUS.STATE == 11`, busy-wait on `RAC.SR0` bit 16 clearing (re-reading
+`STATUS` each iteration); for any other state, return a simple two-value
+classification (state is `9`/TX or `12`, vs. not) with no register writes
+at all. The call chain's only actual side effects, fully traced now, are
+the already-documented `RAC.SR0`-CLR-alias write (clearing bit 2, the same
+bit this project's own `EFR32_RAC_SR0_WAIT_BIT` already names) and a
+RAM-resident state-word update at `0xB0003EF0` -- nothing touches `FRC` at
+all, in either the gated success path or the busy-wait path. So either
+§4.2's original stage-2 disassembly attributed that third call site to a
+*different* RAIL helper that merely happens to run near a state-transition
+change (stage 2 and stage 1 are different RAIL library builds/versions,
+and §4.2 never named the helper precisely enough to re-locate it in stage
+1), or the attribution was simply a guess that didn't hold up to a full
+trace. Recorded here rather than left standing uncorrected, per this
+project's own rule to fully understand a disproven hypothesis before
+moving on. Thread 3 is now closed as "link-layer call chain to
+`RAIL_StartTx` fully mapped; the one concrete idea it suggested is tested
+and ruled out; the specific attribution that motivated the idea does not
+hold up either, corrected rather than left stated." Thread 1 (M0+
+live-state tooling) is the one remaining open thread from §7.12.
