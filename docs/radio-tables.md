@@ -4128,3 +4128,18 @@ first, per §7.9's disassembly findings, not just a blanket `PROTIMER`
 ack) -- this test's handler was deliberately minimal and may not be
 representative of what a real handshake would look like. That is a
 new, different, well-motivated hypothesis, not a retest of this one.
+
+**Checked cheaply, without a new hardware test, and it's already
+closed too.** At the settled stuck baseline: `FRC.IF=0x40020c04`,
+`FRC.IEN=0x11` (`TXDONE`/`RXDONE`, ordinary, unrelated to this stall);
+`BUFC.IF=0x4`, `BUFC.IEN=0x0`. A stock-faithful handler computes
+exactly `IF & IEN` before acking anything -- and that intersection is
+provably `0` for both blocks (`FRC`'s pending bits, 2/10/11/17/30,
+share nothing with its enabled bits 0/4; `BUFC` has nothing enabled at
+all). **A more faithful handler could not behave any differently from
+the blanket-ack one already tested, because there is nothing enabled
+for it to find.** This means the real blocker is not something `FRC`
+or `BUFC` are trying to signal via an interrupt at all, from any angle
+tested in this whole `PROTIMER`/IRQ thread -- it's a silent internal
+stall in `FRC`'s own datapath (`FSMSTATE=17`), with nothing visible to
+any of the interrupt-enable/pending machinery checked so far.
