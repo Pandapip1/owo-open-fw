@@ -1094,17 +1094,62 @@ static const uint32_t efr32_ble_1m_base_table[] = {
 				    * CALCCRC=1, SKIPWHITE=1; FCD1.BUFFER=0,
 				    * FCD2/3.BUFFER=1 (SKIPCRC/ADDTRAILTXDATA/
 				    * EXCLUDESUBFRAMEWCNT=0 on all three) */
-	0x1001C020U, 0x0007F800U, 0x3001C020U, 0x000802F5U, /* AGC.CTRL0 */
-	0x1001C024U, 0x000000FFU, 0x3001C024U, 0x00001300U, /* AGC.CTRL1 */
+	/*
+	 * AGC/RFCRC values below are likewise decoded against their public
+	 * field models (AGC_S_field.py/RFCRC_S_field.py). The two AND/OR
+	 * pairs (table opcodes 1=AND-mask, 3=OR-value, radio.c's own
+	 * EFR32_RADIO_TABLE_OP_* above) are decoded as what they actually
+	 * are -- a preserved-field mask, then a written value -- not as if
+	 * the raw words were final register contents.
+	 */
+	0x1001C020U, 0x0007F800U, /* AGC.CTRL0 AND-mask: preserves RSSISHIFT
+				     * only, clears every other field first */
+	0x3001C020U, 0x000802F5U, /* AGC.CTRL0 OR-value: PWRTARGET=245, MODE=2,
+				     * DISCFLOOPADJ=1 (all other fields 0) */
+	0x1001C024U, 0x000000FFU, /* AGC.CTRL1 AND-mask: preserves CCATHRSH
+				     * only, clears every other field first */
+	0x3001C024U, 0x00001300U, /* AGC.CTRL1 OR-value: RSSIPERIOD=3,
+				     * PWRPERIOD=1 (all other fields 0) */
 	0x0007C028U, 0x83B380ECU, 0x51407543U, 0x48000FA0U, 0x00004030U,
-		0x00000000U, 0x00000000U, 0x0000022EU, /* AGC.CTRL2..MANGAIN */
+		0x00000000U, 0x00000000U, 0x0000022EU, /* AGC.CTRL2: SAFEMODETHD=3,
+				     * REHICNTTHD=7, RELOTHD=4, RELBYCHPWR=3,
+				     * RELTARGETPWR=236, DISRFPKD=1.
+				     * AGC.CTRL3: IFPKDDEB/RFPKDDEB=1,
+				     * IFPKDDEBTHD/RFPKDDEBTHD=1,
+				     * IFPKDDEBPRD/RFPKDDEBPRD=40,
+				     * IFPKDDEBRST/RFPKDDEBRST=10.
+				     * AGC.CTRL4: PERIODRFPKD=4000, RFPKDPRDGEAR=4,
+				     * FRZPKDEN=1. AGC.CTRL5: PNUPDISTHD=48,
+				     * PNUPRELTHD=4. AGC.CTRL6: all fields 0.
+				     * AGC.RSSISTEPTHR: all fields 0.
+				     * AGC.MANGAIN: MANGAINIFPGA=7, MANGAINLNA=1,
+				     * MANGAINPN=1 (MANGAINEN=0, so inactive) */
 	0x0004C050U, 0x04301151U, 0xE6092D0EU, 0x08070654U, 0x0002B6D1U,
+				     /* Previously unnamed. AGC.GAINRANGE:
+				      * LNAINDEXBORDER=1, PGAINDEXBORDER=5,
+				      * GAININCSTEP=1, PNGAINSTEP=1, HIPWRTHD=3,
+				      * BOOSTLNA=1. AGC.AGCPERIOD: PERIODHI=14,
+				      * PERIODLO=45, MAXHICNTTHD=9,
+				      * SETTLETIMEIF=6, SETTLETIMERF=14.
+				      * AGC.HICNTREGION: HICNTREGION0..4=4..8.
+				      * AGC.STEPDWN: STEPDWN0..5=1,2,3,3,3,5 */
 	0x000AC064U, 0x1C003004U, 0x09183040U, 0x2079640DU, 0x01FBFCEBU,
 		0x03E8F67FU, 0x15724BBDU, 0x0518A311U, 0x76543210U,
-		0x00000A98U, 0x00000000U, /* AGC.GAINRANGE..LBT */
-	0x01010008U, 0x00000708U, /* RFCRC.CTRL */
-	0x01010018U, 0x00AAAAAAU, /* RFCRC.INIT */
-	0x01010020U, 0x00DA6000U, /* RFCRC.POLY */
+		0x00000A98U, 0x00000000U, /* AGC.GAINSTEPLIM: CFLOOPSTEPMAX=4,
+				     * HYST=3, PNINDEXMAX=14. AGC.PNRFATT0..3 and
+				     * LNAMIXCODE0..1: a monotonic LNA/mixer
+				     * attenuation-code and slice-code table
+				     * (LNAMIXRFATT1..17, LNAMIXSLICE1..10),
+				     * values listed in this register's own
+				     * name, not re-copied into this comment.
+				     * AGC.PGACODE0..1: PGAGAIN1..11=0..10
+				     * (a plain ascending index). AGC.LBT: all
+				     * fields 0 (LBT/CCA timing unused here) */
+	0x01010008U, 0x00000708U, /* RFCRC.CTRL: CRCWIDTH=2, BITSPERWORD=7 */
+	0x01010018U, 0x00AAAAAAU, /* RFCRC.INIT=0xAAAAAA (BLE's standard CRC
+				     * preset, not a per-field bitmask) */
+	0x01010020U, 0x00DA6000U, /* RFCRC.POLY=0xDA6000 (BLE's standard CRC
+				     * polynomial, not a per-field bitmask) */
 	0x0101401CU, 0x00000010U, /* MODEM.MIXCTRL */
 	0x0103402CU, 0x00008000U, 0x03000000U, 0x00000000U, /* MODEM.CTRL3..5 */
 	0x01024068U, 0x71764129U, 0x00000000U, /* MODEM.SYNC0..1 */
