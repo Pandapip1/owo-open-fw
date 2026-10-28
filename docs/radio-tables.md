@@ -2693,12 +2693,30 @@ comment warning against retrying it blindly); confirmed the revert
 restores the known baseline (`RAC.STATUS=0x09400000`,
 `FRC.STATUS=0x01100200`, byte-for-byte the same as every prior capture).
 
-**Why this is still a valuable result, not a wasted detour:** it rules
-out one more candidate, with hardware evidence instead of a static
-guess, and it's informative in its own right — porting a real, confirmed
-piece of stock's own sequence made things actively *worse*, which means
-something about *this* bit's effect depends on context this project
-hasn't replicated (ordering relative to some other state, or a
-precondition `RAIL_StartTx`'s own caller already established that this
-driver's call site doesn't). That's a sharper, hardware-grounded
-question for whoever picks this up next than "untested, might help."
+**Follow-up, checked directly rather than left as "something about this
+bit depends on context": the regression was never about bit 1's*value*
+at all.** Read `RAC.SR0` live on real hardware at the exact `TXEN`
+checkpoint on both images: stock reads `0x00001000` (bit 1 already
+clear) and the open stack, *on its own, unmodified, known-working
+build*, already reads `0x00000000` there too (bit 1 already clear).
+Clearing an already-clear bit cannot be what broke anything — the two
+builds agree on this bit's value with or without the port. What actually
+changed is that the port added instructions immediately before the
+existing `SR3` clear, shifting this function's exact cycle timing
+relative to TXEN. That is the same class of fragility §7.5.4 already
+documented for the splice-test vehicle (a single appended, never-called
+byte breaking a hang-free boot) — this is now a second, independent
+case of the open stack's own TX-start sequence being sensitive to
+*timing*, not to any specific register value, this close to `TXEN`.
+
+**This reframes the finding's significance upward, not downward.** If
+the window around `TXEN` is this sensitive to a few extra instructions
+regardless of what they write, that is itself a plausible contributing
+factor to `ACTIVETXFCD` never engaging — not "this one bit doesn't
+matter," but "this driver's TX-start path may be operating close enough
+to some real timing requirement that small, functionally-inert changes
+can tip it over," the same shape of problem already seen once before in
+this project. Worth remembering before adding *any* further
+instructions near this exact call site without re-measuring the full
+before/after `RAC.STATUS`/`FRC.STATUS` checkpoint, not just trusting
+that a value-level analysis says a change should be inert.
