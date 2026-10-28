@@ -1455,12 +1455,10 @@ static const uint32_t efr32_ble_2m_delta_table[] = {
 static const uint32_t efr32_ble_coded_s8_delta_table[] = {
 	/* The omitted first record is the non-portable SEQ.PHYINFO pointer.
 	 * Unlike the 1M/2M tables above, this table and the S2 one below
-	 * previously had no per-register naming at all; naming (and, for the
-	 * FRC entries specifically, full field decode against
-	 * build/reference-models/FRC_S_field.py) added here. The MODEM/SYNTH/
-	 * RAC calibration words further down remain named-register-only --
-	 * a real, scoped gap, not yet decoded field-by-field (see project
-	 * memory: radio config tables undecomposed). */
+	 * previously had no per-register naming at all; every entry below,
+	 * including the MODEM/SYNTH/RAC calibration words, is now named and
+	 * field-decoded against build/reference-models/*_S_field.py, the
+	 * same way as the 1M/2M tables. */
 	0x00014010U, 0x00004100U, /* FRC.MAXLENGTH: MAXLENGTH=256, INILENGTH=4 */
 	0x0001403CU, 0x00000010U, /* FRC.FECCTRL: CONVMODE=1 (coded PHY uses
 				    * the convolutional encoder; all other
@@ -1475,26 +1473,107 @@ static const uint32_t efr32_ble_coded_s8_delta_table[] = {
 	0x00014104U, 0x0001C003U, /* FRC.FCD0: WORDS=3, SKIPWHITE=1,
 				    * ADDTRAILTXDATA=1, EXCLUDESUBFRAMEWCNT=1
 				    * (BUFFER/INCLUDECRC/CALCCRC/SKIPCRC=0) */
-	0x01034020U, 0x46000030U, 0x0001C81FU, 0x10002000U,
-	0x01014038U, 0x00000000U,
+	/* MODEM/SYNTH/RAC values below now also decoded against *_S_field.py,
+	 * the same way as the 1M/2M tables; fields not named are 0. */
+	0x01034020U, 0x46000030U, 0x0001C81FU, 0x10002000U, /* MODEM.CTRL0:
+				     * CODING=3, SHAPING=3, FRAMEDETDEL=1.
+				     * MODEM.CTRL1: SYNCBITS=31, SYNCDATA=1,
+				     * COMPMODE=3, RESYNCPER=1. MODEM.CTRL2:
+				     * DATAFILTER=2, RATESELMODE=2 */
+	0x01014038U, 0x00000000U, /* MODEM.CTRL6: all fields 0 */
 	0x01044058U, 0x00050018U, 0x00000840U, 0x00000009U, 0x000A0092U,
+				     /* MODEM.TXBR: TXBRNUM=24, TXBRDEN=5 (LE
+				      * Coded's own, much lower, symbol rate).
+				      * MODEM.RXBR: RXBRDEN=2, RXBRINT=2.
+				      * MODEM.CF: DEC0=1, DEC1=1. MODEM.PRE:
+				      * BASE=2, BASEBITS=1, PREERRORS=1,
+				      * TXBASES=10 */
 	0x010F4080U, 0x022C008CU, 0x00000000U, 0x00120012U, 0x1B8C805BU,
 		0x00000000U, 0x0E050200U, 0x53432F1CU, 0x61686962U, 0x04324355U,
 		0x0E0E1016U, 0x080A0C0DU, 0x04050607U, 0x02020303U, 0x01010102U,
-		0x00010101U,
-	0x010140ECU, 0x8CB1B080U,
-	0x010340FCU, 0x000A209CU, 0x80206101U, 0x123556B7U,
-	0x0103410CU, 0x001255B8U, 0x29041BA0U, 0x40408808U,
-	0x01014128U, 0x00000000U,
+		0x00010101U, /* MODEM.TIMING: TIMTHRESH=140, FDM0THRESH=3,
+				      * OFFSUBNUM=1, OFFSUBDEN=1. MODEM.DSSS0: 0.
+				      * MODEM.MODINDEX: MODINDEXM=18,
+				      * FREQGAINE=2, FREQGAINM=2. MODEM.AFC:
+				      * AFCSCALEM=27, AFCSCALEE=2, AFCRXCLR=1,
+				      * AFCDEL=12, AFCAVGPER=4, AFCLIMRESET=1,
+				      * AFCONESHOT=1, AFCDSAFREQOFFEST=1,
+				      * AFCDELDET=1 (LE Coded is the only PHY
+				      * here with a nonzero MODEM.AFC -- 1M/2M
+				      * leave automatic frequency correction
+				      * off). MODEM.AFCADJLIM: 0.
+				      * MODEM.SHAPING0..9: coefficients
+				      * (COEFF1..38) identical to the 1M PHY's
+				      * own pulse-shaping table */
+	0x010140ECU, 0x8CB1B080U, /* MODEM.SRCCHF: SRCRATIO1=128,
+				     * SRCRATIO2=19227, SRCENABLE2=1, INTOSR=1 */
+	0x010340FCU, 0x000A209CU, 0x80206101U, 0x123556B7U, /* MODEM.DSACTRL:
+				     * ARRTHD=7, ARRTOLERTHD0=2, ARRTOLERTHD1=4,
+				     * FREQAVGSYM=1, DSARSTON=1.
+				     * MODEM.VITERBIDEMOD: VTDEMODEN=1,
+				     * VITERBIKSI1=64, VITERBIKSI2=48,
+				     * VITERBIKSI3=32, DISDEMODOF=1 (no
+				     * SYNTHAFC here, unlike 1M/2M).
+				     * MODEM.VTCORRCFG0.EXPECTPATT=0x123556B7
+				     * (LE Coded's own correlation pattern,
+				     * differs from 1M/2M's 0x4A413747) */
+	0x0103410CU, 0x001255B8U, 0x29041BA0U, 0x40408808U, /* MODEM.DIGMIXCTRL:
+				     * DIGMIXFREQ=153016, DIGMIXMODE=1 (no
+				     * DIGMIXFB here, unlike 1M/2M).
+				     * MODEM.VTCORRCFG1: CORRSHFTLEN=32,
+				     * VTFRQLIM=110, EXPSYNCLEN=8, BUFFHEAD=2,
+				     * EXPECTHT=5. MODEM.VTTRACK:
+				     * TIMTRACKTHD=2, TIMEACQUTHD=32,
+				     * TIMEOUTMODE=1, HIPWRTHD=1,
+				     * SYNCTIMEOUTSEL=1 (no FREQTRACKMODE here,
+				     * unlike 1M/2M) */
+	0x01014128U, 0x00000000U, /* MODEM.CGCLKSTOP: all fields 0 */
 	0x01074138U, 0x3BE8D44CU, 0x306F1904U, 0x1A140E08U, 0x322C2620U,
-		0x32103E38U, 0x0A987654U, 0x00005F1DU,
-	0x01014170U, 0x00000000U, 0x01014234U, 0x0E000800U,
-	0x01014248U, 0x001F81F4U, 0x01014278U, 0x00000000U,
-	0x01018038U, 0x00104911U,
-	0x0103809CU, 0x000240EBU, 0x00033870U, 0x000000D0U,
-	0x110180A8U, 0x000001F0U, 0x310180A8U, 0x01FD5A05U,
-	0x110180ACU, 0x000001F0U, 0x310180ACU, 0x00FD3E05U,
-	0x020100E4U, 0x11512C6CU, 0x02010154U, 0x00003FC4U,
+		0x32103E38U, 0x0A987654U, 0x00005F1DU, /* MODEM.LONGRANGE:
+				     * LRCORRTHD=1100, LRCORRSCHWIN=10,
+				     * LRBLE=1, LRTIMCORRTHD=1000, LRBLEDSA=1,
+				     * LRDEC=3 (S8-specific; S2 below has the
+				     * same first two LONGRANGE/LONGRANGE1
+				     * words but different LRCHPWRTH thresholds
+				     * from LONGRANGE2 onward). MODEM.LONGRANGE1:
+				     * LRSS=4, LRTIMEOUTTHD=400, CHPWRACCUDEL=3,
+				     * HYSVAL=3, AVGWIN=3, LOGICBASEDPUGATE=1,
+				     * LOGICBASEDLRDEMODGATE=1.
+				     * MODEM.LONGRANGE2..6 (S8): LRCHPWRTH1..10
+				     * step from 8 to 62 in steps of 6,
+				     * LRCHPWRSH2..11 step from 1 to 10,
+				     * LRCHPWRSPIKETH=29, LRSPIKETHD=95 */
+	0x01014170U, 0x00000000U, 0x01014234U, 0x0E000800U, /* MODEM.VTBLETIMING:
+				     * all fields 0. MODEM.BLEIQDSAEXT1:
+				     * BLEIQDSATHCOMB=1, MAXCORRCNTIQDSA=7 */
+	0x01014248U, 0x001F81F4U, 0x01014278U, 0x00000000U, /* MODEM.REALTIMCFE:
+				     * MINCOSTTHD=500, TRACKINGWIN=7,
+				     * SYNCACQWIN=7 (no RTCFEEN here, unlike
+				     * 1M/2M). MODEM.COCURRMODE: all fields 0 */
+	0x01018038U, 0x00104911U, /* SYNTH.IFFREQ: IFFREQ=18705, LOSIDE=1
+				     * (identical to 2M) */
+	0x0103809CU, 0x000240EBU, 0x00033870U, 0x000000D0U, /* SYNTH.LPFCTRL1CAL:
+				     * OP1BWCAL=11, OP1COMPCAL=14, RZVALCAL=9
+				     * (LE Coded is the only PHY here with a
+				     * nonzero LPFCTRL1CAL). SYNTH.LPFCTRL1RX:
+				     * OP1COMPRX=7, RPVALRX=7, RZVALRX=12
+				     * (close to but not identical to 1M/2M's
+				     * RZVALRX=13). SYNTH.LPFCTRL1TX:
+				     * OP1COMPTX=13 (identical to 1M) */
+	0x110180A8U, 0x000001F0U, /* SYNTH.LPFCTRL2RX AND-mask: preserves
+				     * CALCRX only, clears the rest first */
+	0x310180A8U, 0x01FD5A05U, /* SYNTH.LPFCTRL2RX OR-value: LPFSWENRX=1,
+				     * LPFINCAPRX=2, CASELRX=1, CAVALRX=22,
+				     * CZSELRX=1, CZVALRX=254 (wider than 1M/2M's
+				     * CAVALRX=16/CZVALRX=229, matching LE
+				     * Coded's narrower effective bandwidth) */
+	0x110180ACU, 0x000001F0U, /* SYNTH.LPFCTRL2TX AND-mask: preserves
+				     * CALCTX only, clears the rest first */
+	0x310180ACU, 0x00FD3E05U, /* SYNTH.LPFCTRL2TX OR-value: identical to
+				     * the 1M PHY's own LPFCTRL2TX OR-value */
+	0x020100E4U, 0x11512C6CU, 0x02010154U, 0x00003FC4U, /* RAC.IFADCTRIM0,
+				     * RAC.SYTRIM1: identical to the 2M PHY's
+				     * own values */
 	EFR32_RADIO_TABLE_END,
 };
 
@@ -1515,6 +1594,10 @@ static const uint32_t efr32_ble_coded_s2_delta_table[] = {
 	0x00014104U, 0x0001C003U, /* FRC.FCD0: WORDS=3, SKIPWHITE=1,
 				    * ADDTRAILTXDATA=1, EXCLUDESUBFRAMEWCNT=1
 				    * (BUFFER/INCLUDECRC/CALCCRC/SKIPCRC=0) */
+	/* MODEM/SYNTH/RAC entries from here down are identical to the S8
+	 * table's own values and decode above, except MODEM.LONGRANGE2..6,
+	 * which carry S2's own LRCHPWRTH thresholds (and one extra field,
+	 * LRCHPWRTH11/LRCHPWRSH12, that S8's narrower table omits). */
 	0x01034020U, 0x46000030U, 0x0001C81FU, 0x10002000U,
 	0x01014038U, 0x00000000U,
 	0x01044058U, 0x00050018U, 0x00000840U, 0x00000009U, 0x000A0092U,
@@ -1527,7 +1610,14 @@ static const uint32_t efr32_ble_coded_s2_delta_table[] = {
 	0x0103410CU, 0x001255B8U, 0x29041BA0U, 0x40408808U,
 	0x01014128U, 0x00000000U,
 	0x01074138U, 0x3BE8D44CU, 0x306F1904U, 0x1C16100AU, 0x342E2822U,
-		0x3210403AU, 0x0A987654U, 0xA4805F1DU,
+		0x3210403AU, 0x0A987654U, 0xA4805F1DU, /* MODEM.LONGRANGE2..6
+				     * (S2): LRCHPWRTH1..10 step from 10 to 64
+				     * in steps of 6, LRCHPWRSH2..11 step from
+				     * 1 to 10, LRCHPWRSPIKETH=29,
+				     * LRSPIKETHD=95, plus LRCHPWRTH11=72 and
+				     * LRCHPWRSH12=10 in the top bits of
+				     * LONGRANGE6 (S8's own LONGRANGE6 leaves
+				     * those two fields at 0) */
 	0x01014170U, 0x00000000U, 0x01014234U, 0x0E000800U,
 	0x01014248U, 0x001F81F4U, 0x01014278U, 0x00000000U,
 	0x01018038U, 0x00104911U,
