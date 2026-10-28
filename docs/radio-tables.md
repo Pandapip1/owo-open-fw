@@ -4813,3 +4813,92 @@ affect several of this session's own quick stock-vs-modified
 comparisons in §7.53 before being caught, and should be checked for in
 any future ad hoc hardware check that skips the full reset dance for
 convenience.
+
+### 7.55 A major, previously-untested QEMU fidelity gap: the open stack's own TX attempt never reaches `RAC.STATUS=TX` in simulation at all
+
+Every existing QEMU regression for this radio (`efr32bg22-test`,
+`efr32bg22-rf-test`) exercises register behavior through direct qtest
+MMIO pokes, or (`radio-sequencer-executes-open-code`) a synthetic
+probe that deliberately never acknowledges the TXWARM interrupt. None
+of them boot the *real* open stack -- both emulated cores, real
+`radio.c`/`radio_seq.S`, a real advertising attempt -- end to end and
+watch what `RAC.STATUS` actually settles to. Did that directly, using
+`tests/radio-port/run-qemu-smoke.sh`'s own working invocation pattern
+(`-icount shift=5 -trace enable=efr32bg22_rac_command`, which is what
+makes this board model's two vCPUs deterministic and schedulable at
+all) against the current `build-stage3/zephyr/zephyr.bin`.
+
+**Result: the simulated `RAC.STATUS` never leaves `TXWARM` (state 8)
+at all.** The guest's own LLL retry logic keeps re-issuing `TXDIS`/
+`RXDIS` then `RAC.CMD.TXEN` roughly every 100ms of virtual time --
+confirmed directly from the decoded `efr32bg22_rac_command` trace,
+`RAC.CMD=0x00000001 state=8` repeating 58 times over a 5-second run,
+never once advancing to `state=9` (`TX`). This is a genuinely
+different failure from anything on real hardware: real silicon
+reaches `TX` immediately and holds there with `ACTIVETXFCD` never
+set (the entire subject of this whole document); **QEMU's own
+simulation cannot even reach `TX` in the first place.** `BUFC`
+`WRITEOFFSET` does reach `0xb` (the real 11-byte packet gets staged
+correctly), so this is specifically a `RAC` state-machine/interrupt
+problem, not a BUFC/FRC one.
+
+**Traced the mechanism as far as static reading supports.**
+`efr32_rac_set_state()` (`hw/arm/efr32bg22.c`) early-returns if the
+new state equals the current one (`if (s->rac_state == state) return;`,
+before line ~1012) -- so entering `TXWARM` only sets `RAC.SEQIF` bit
+24 and raises the real, separately-modeled M0+ sequencer vCPU's own
+`IRQ8` line (`qemu_set_irq(s->seq_irq_txwarm, ...)`, driven live off
+`SEQIF & (1<<24)`, a genuine *level*, not an edge) when the state
+actually changes -- which each retry's own `TXDIS`/`RXDIS` (forcing
+`OFF`) then `TXEN` (`OFF`→`TXWARM`) should satisfy fresh every single
+time. The TXWARM→TX transition itself (`hw/arm/efr32bg22.c`, the
+`RAC.IF`/`IEN`/`SEQIF`/`SEQIEN`-write-triggered check) fires only as
+a side effect of a write to one of those four registers landing while
+`rac_state==TXWARM` and bit 24 already reads clear -- and the real
+sequencer's own handler (`radio_seq.S`'s
+`EFR32_RAC_SEQIF_TXWARM_ACK_MASK = (1<<24)`, confirmed to be the
+*correct* bit QEMU also checks) does perform exactly that
+clear-and-check write on every `IRQ8` entry. The trace does show the
+sequencer vCPU performing SEQIF-clear writes repeatedly (~553 cycles
+over the run, 2213 raw writes to the `SEQIF` CLR alias) -- far more
+cycles than the 58 `TXEN` retries, meaning the sequencer vCPU *is*
+genuinely executing and *is* reacting to something, just evidently
+not landing its ack at the one instant each `TXWARM` entry's check
+window is open.
+
+**The one variable tried that changes this picture: QEMU's own vCPU
+scheduling mode.** `-icount` forces single-threaded TCG (deterministic
+execution requires it), meaning the M33 and M0+ vCPUs are two
+round-robin time-sliced guests on *one* host thread -- a real
+difference from silicon, where M0+ is a genuinely independent,
+always-live physical core. Retried the identical test with
+`-accel tcg,thread=multi` (true concurrent vCPU threads, no `-icount`)
+expecting this to let the sequencer's ack land in time -- **it did
+not confirm that cleanly**: under `thread=multi` the run stalled even
+earlier (`BUFC.WRITEOFFSET` never even reached `0xb` in over 25 real
+seconds, versus ~5 seconds under `-icount`), which could mean this
+device model is not actually safe under true concurrent vCPU access
+(a different, also-real problem) rather than disproving the
+scheduling-fairness theory outright. **Not conclusively root-caused.**
+The honest state of this finding: a solid, reproducible divergence
+(QEMU cannot currently simulate the open stack's radio TX path
+reaching `RAC.STATUS=TX` at all, under any vCPU scheduling mode tried
+so far), with several concrete, plausible, but not yet dispositive
+contributing mechanisms identified in the actual device-model code
+rather than guessed at.
+
+**Why this matters, and why it was never caught before:** this is the
+first time in the whole `ACTIVETXFCD` investigation that the open
+stack's real TX path has been run under QEMU at all with both cores
+live and watched end to end, rather than tested via isolated qtest
+register pokes. It means QEMU currently cannot be used to reproduce
+or investigate *any* real TX-path behavior for the open stack --
+including `ACTIVETXFCD` itself -- since the simulation diverges from
+real hardware even earlier than the bug this whole document is about.
+Not yet fixed; recorded per this project's own "every divergence must
+be recorded" rule. The next concrete step, if picked up again: add a
+dedicated qtest that boots the real open image (not a synthetic probe)
+through to `TXEN` and asserts `RAC.STATUS` reaches `TX`, so this
+divergence has a standing regression the moment it's understood well
+enough to fix, and so any fix attempt has an immediate, automated
+pass/fail signal instead of needing a manual trace read each time.
