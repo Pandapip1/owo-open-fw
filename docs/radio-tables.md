@@ -2810,13 +2810,14 @@ stock exactly, byte-for-byte, for everything this project has ported.
    function's remaining logic (a polling loop, a calibration block, a
    7-byte record write) is understood but deliberately not ported, same
    rationale as §7.3.1's bit-22 pulse.
-3. **A from-scratch review of what, if anything, stock's BLE host/
+3. ~~**A from-scratch review of what, if anything, stock's BLE host/
    controller stack does between `sl_bt_legacy_advertiser_start`
-   returning and the actual `RAIL_StartTx` call this session traced** —
-   stage 1 (§7.11) now exists as a rebuildable, lockstep-able artifact
-   specifically to make this tractable; only `RAIL_StartTx` itself and
-   one of its immediate callees were examined before this session's
-   effort shifted to the (ultimately retracted) timing-margin thread.
+   returning and the actual `RAIL_StartTx` call**~~ **Partially closed,
+   §7.14.** Mapped the call chain down to `RAIL_StartTx`; found and
+   tested one concrete idea from it (`FRC.CMD.CONVINIT` re-armed per-TX,
+   not just per-session) -- ruled out, no change on hardware. The
+   function-pointer-gated tail of `RAIL_SetTxTransitions`'s own call
+   chain is not yet fully traced; genuinely still open if revisited.
 
 ### 7.13 Thread 2 pursued: `fn_0xd38`'s full body re-verified, and a real (but behavior-preserving) production bug fixed
 
@@ -2905,3 +2906,65 @@ understood well enough to know it's safe to fire unconditionally. Thread
 2 from §7.12 is now closed as "fully re-verified, one real bug fixed,
 nothing new found that unblocks `ACTIVETXFCD`." Threads 1 and 3 remain
 open.
+
+### 7.14 Thread 3 pursued: stock's BLE link layer re-issues `FRC.CMD.CONVINIT` before every TX; porting that, tested, no change
+
+Took up open thread 3 from §7.12: tracing stock's BLE host/controller
+stack (stage 1, §7.11) between `sl_bt_legacy_advertiser_start` returning
+and `RAIL_StartTx`, via the call chain `sl_bt_legacy_advertiser_start` ->
+`sli_bt_cmd_legacy_advertiser_start` -> `advertiser_start` -> ... ->
+`hci_le_set_extended_advertising_enable` -> `ll_hciCall`, eventually
+reaching the link-layer radio launch helpers `ll_radioTxStart`/
+`ll_radioFirstTxSchedule`. Both call `ll_radioSetTxTransitions()`
+immediately before `RAIL_StartTx`/`RAIL_StartScheduledTx` -- and
+`ll_radioSetTxTransitions` is a thin wrapper around the **public** RAIL
+API `RAIL_SetTxTransitions()`.
+
+This connects directly to an existing, previously unexploited note in
+§4.2: stock's static disassembly found three direct stores of
+`FRC.CMD = 0x201` (`RXABORT | CONVINIT`), two from the named RAIL
+initialization helper this project's own `radio_setup()` already
+reproduces, and a third "in a larger RAIL state-transition helper" --
+left unidentified at the time. `RAIL_SetTxTransitions` **is** that
+helper: stock calls it (and, through its call chain, re-issues
+`FRC.CMD.CONVINIT`) immediately before **every** TX attempt, immediate
+or scheduled -- not once per session, the way `radio_setup()` currently
+does it. (Stock's own wrapper caches the last-requested transition
+target and skips the real `RAIL_SetTxTransitions()`/register-write call
+when the request hasn't changed since the previous TX, so even stock
+does not literally rewrite `FRC.CMD` on *every single* call when
+advertising repeats the same transition target -- but it is reachable
+from the TX path itself, not just from one-time init, which `radio_setup()`-only
+timing cannot reproduce if anything between setup and the first `TXEN`
+needs it freshly re-armed.)
+
+**Tested the direct hypothesis on real hardware: re-issuing
+`FRC.CMD = EFR32_FRC_CMD_RXABORT | EFR32_FRC_CMD_CONVINIT` (both already-named
+constants, no new magic numbers) in `radio_tx_enable()` immediately before
+`RAC.CMD = TXEN`.** QEMU 77/17 still passed. At the standard `TXEN`+30ms
+checkpoint (breakpoint properly removed before `resume`, §7.11): **no
+change** -- `RAC.STATUS=0x09400000`/`FRC.STATUS=0x01100200`, byte-for-byte
+identical to every prior reading. Reverted; not kept in the tree, since
+unlike the already-ported SR0/SR1 gate mechanics this was a hypothesis
+test with a clean negative result, not a confirmed stock behavior worth
+preserving for its own sake.
+
+**What this does and does not establish.** It rules out "the frame coder's
+convolution path simply needs re-arming once per TX attempt" as the
+`ACTIVETXFCD` blocker -- a concrete, testable idea, now eliminated rather
+than left as a guess. It does not fully resolve what `RAIL_SetTxTransitions`'s
+call chain does end-to-end: tracing it in stage 1's LTO'd, hash-named RAIL
+internals (`RAILINT_992a3700fea39ab020ab6087e28c16df` ->
+`RAILINT_c232eb9695d8ec51969199511f1ffdbc` ->
+`RAILINT_4316ca4fc8f26ef86197e5e28c021e83`) found a `CORE_EnterCritical`-
+guarded call through a function pointer (`0x29878`) whose success gates a
+further write of `4` to `RAC.SR0`'s CLR alias (`0xB8022040`, clearing bit 2
+-- the same bit this project's own `EFR32_RAC_SR0_WAIT_BIT` already names)
+and an update to a RAM-resident state word at `0xB0003EF0`; the literal
+`FRC.CMD` write itself was not found inside that specific traced path (it
+may be in the untraced function-pointer target, or stage 1's RAIL build may
+structure this differently from the stage-2 build §4.2's disassembly came
+from). Thread 3 is not fully closed -- the link-layer call chain down to
+`RAIL_StartTx` is now mapped structurally, and one concrete idea from it
+is tested and ruled out, but the end-to-end trace through the function
+pointer is not finished.
