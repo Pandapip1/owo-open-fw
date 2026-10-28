@@ -143,6 +143,59 @@
  * are bounded instead of risking a permanent M0+ lockup on real silicon. */
 .equ EFR32_RAC_TXWARM_WAIT_BOUND,     0x00010000
 
+/*
+ * Stock's own reset handler (docs/radio-tables.md SS7.9) sets NVIC
+ * priority 1 for a block of IRQs including 8 and 9 (byte-addressable
+ * NVIC.IPR, architected Armv6-M, not a vendor register -- IPR_BYTE[n] is
+ * IRQn's own priority, at NVIC.IPR_BASE+n) before enabling them. Ported
+ * only for the two IRQs this core actually enables below; stock's other
+ * ~17 entries configure IRQs/exceptions this core never unmasks via
+ * NVIC.ISER0, so their priority is moot for this bounded implementation
+ * and is not reproduced.
+ */
+.equ EFR32_NVIC_IPR_BASE,             0xe000e400
+.equ EFR32_NVIC_IPR_IRQ8,             (EFR32_NVIC_IPR_BASE + 8)
+.equ EFR32_NVIC_IPR_IRQ9,             (EFR32_NVIC_IPR_BASE + 9)
+.equ EFR32_NVIC_PRIORITY_TXWARM_TX,   1
+
+/*
+ * Stock's own reset handler also writes RAC.STCTRL and sets up this
+ * core's private SysTick immediately after the priority setup above,
+ * gated behind a busy-wait on RAC.SR3 bit 17 (docs/radio-tables.md
+ * SS7.9). That exact gate is deliberately NOT reproduced: RAC.SR3 reads
+ * 0 throughout this core's own boot on the open stack (SS7.5.2), so a
+ * faithful copy of stock's wait would hang this core forever, the same
+ * bounded-instead-of-unbounded precedent as EFR32_RAC_TXWARM_WAIT_BOUND
+ * above. The two writes themselves are unconditional otherwise.
+ */
+.equ EFR32_RAC_STCTRL,                0xa8020050
+/* RAC.STCTRL's own two documented fields (RAC_S_field.py: STCAL
+ * bits[23:0], STSKEW bit 24); STCAL's numeric content is an opaque
+ * empirical value this project has no theory for (same status as
+ * PATRIM/IFADCTRIM trim words elsewhere in this block) -- but it is the
+ * exact value independently confirmed by a live hardware read of this
+ * register on stock (docs/radio-tables.md SS7.8), decomposed by field
+ * rather than left as one opaque hex blob. */
+.equ EFR32_RAC_STCTRL_STCAL,          0x00061a7f
+.equ EFR32_RAC_STCTRL_STSKEW,         (1 << 24)
+.equ EFR32_RAC_STCTRL_VALUE,          (EFR32_RAC_STCTRL_STCAL | EFR32_RAC_STCTRL_STSKEW)
+
+/* Standard Armv6-M/Armv8-M SysTick (architected, not vendor-specific):
+ * CSR at the base, RELOAD at +4, CALIB at +0xC. This core's own private
+ * instance, not the M33's. */
+.equ EFR32_SYSTICK_CSR,               0xe000e010
+.equ EFR32_SYSTICK_RELOAD,            0xe000e014
+.equ EFR32_SYSTICK_CALIB,             0xe000e01c
+.equ EFR32_SYSTICK_CALIB_TENMS_MASK,  0x00ffffff
+/* CALIB.TENMS's reload count for a 10ms period, scaled to stock's own
+ * deliberate choice of a 250ms SysTick period -- not an architected
+ * constant; see docs/radio-tables.md SS7.9. */
+.equ EFR32_SYSTICK_PERIOD_MULTIPLIER, 25
+.equ EFR32_SYSTICK_CSR_ENABLE_AND_CLKSOURCE, 5 /* ENABLE(0)|CLKSOURCE(2):
+                                                 * processor clock, no
+                                                 * interrupt (TICKINT
+                                                 * clear). */
+
 .section .vectors, "a", %progbits
 .word EFR32_SEQ_STACK_TOP
 .word efr32_radio_seq_reset + 1
@@ -170,6 +223,36 @@ efr32_radio_seq_reset:
     ldr r1, =EFR32_RAC_SEQIF_STATE_EVENTS
     str r1, [r0]
     ldr r0, =EFR32_RAC_SEQIEN_SET
+    str r1, [r0]
+
+    /* Stock sets NVIC priority 1 for IRQ8/IRQ9 before enabling them
+     * (docs/radio-tables.md SS7.9); reproduced here, for only these two
+     * IRQs, via single-byte stores so neighboring IRQs' priority bytes
+     * in the same 32-bit NVIC.IPR word are left untouched. */
+    ldr r0, =EFR32_NVIC_IPR_IRQ8
+    movs r1, #EFR32_NVIC_PRIORITY_TXWARM_TX
+    strb r1, [r0]
+    ldr r0, =EFR32_NVIC_IPR_IRQ9
+    strb r1, [r0]
+
+    /* Stock's own RAC.STCTRL write and private-SysTick setup
+     * (docs/radio-tables.md SS7.9); the SR3-bit-17 busy-wait stock gates
+     * this behind is deliberately not reproduced -- see this file's own
+     * comment above EFR32_RAC_STCTRL. */
+    ldr r0, =EFR32_RAC_STCTRL
+    ldr r1, =EFR32_RAC_STCTRL_VALUE
+    str r1, [r0]
+
+    ldr r0, =EFR32_SYSTICK_CALIB
+    ldr r1, [r0]
+    ldr r2, =EFR32_SYSTICK_CALIB_TENMS_MASK
+    ands r1, r2
+    ldr r2, =EFR32_SYSTICK_PERIOD_MULTIPLIER
+    muls r1, r2
+    ldr r0, =EFR32_SYSTICK_RELOAD
+    str r1, [r0]
+    ldr r0, =EFR32_SYSTICK_CSR
+    movs r1, #EFR32_SYSTICK_CSR_ENABLE_AND_CLKSOURCE
     str r1, [r0]
 
     /* Live AP3 traces identify external IRQ8 and IRQ9 as the TXWARM and TX

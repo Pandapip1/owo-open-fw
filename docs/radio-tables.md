@@ -2543,3 +2543,59 @@ conclusion that `SR3` is not on the open stack's own execution path
 today; it does make "how does this bit actually become 1 on real
 silicon" a substantially better-posed question than it was before this
 section, for anyone who picks the `SR3`-origin thread back up.
+
+### 7.10 Ported §7.9's findings into `radio_seq.S` and tested on real hardware: no change
+
+Per standing direction not to leave a promising-looking finding
+undeployed just because its root cause isn't fully understood: ported
+§7.9's two findings into `radio_seq.S`'s reset handler, before the
+`NVIC.ISER0` enable, matching stock's own ordering. **NVIC priority 1
+for IRQ8 and IRQ9** via single-byte `strb` stores to `NVIC.IPR_BYTE[8]`/
+`[9]` (`0xE000E408`/`0xE000E409`, architected, byte-addressable, leaving
+neighboring IRQs' priority bytes in the same 32-bit word untouched —
+only these two IRQs are reproduced; stock's other ~17 priority-loop
+entries configure IRQs this core never unmasks, so they're moot here and
+not ported). **`RAC.STCTRL`'s write and this core's own `SysTick`
+setup**, unconditionally — deliberately *without* stock's own `RAC.SR3`
+bit-17 busy-wait gate, which would hang this core forever given `SR3`
+reads `0` throughout the open stack's own boot (§7.5.2), the same
+bounded-instead-of-unbounded precedent already used elsewhere in this
+file. Every new constant named and, where the value itself is opaque
+(`STCTRL.STCAL`), decomposed by field with that fact stated plainly
+rather than hidden — not a magic number, just an honestly-labeled
+unexplained one.
+
+Verified before testing: the file reassembles cleanly, and the rebuilt
+`radio-sequencer.bin` (from the real `tests/radio-port` hardware
+bring-up build, incremental `ninja` rebuild) contains the exact expected
+literal values (`0x01061A7F`, `0xE000E408`, `0xE000E409`) — confirmed by
+direct byte search, not assumed. All three QEMU suites re-run unchanged
+(74/17/14; the sequencer-executing qtest injects its own synthetic
+SEQRAM snippet and doesn't exercise this file's real compiled content at
+all, so this is an expected no-op there, not a meaningful pass).
+
+**Flashed to real hardware and tested directly.** Caught the same
+`TXEN`+1 breakpoint (`0x16606`, address held steady across the rebuild),
+resumed, slept 30 ms, re-halted. `RAC.STCTRL` reads back `0x01061A7F` —
+confirming that write executed correctly on real silicon, not just in
+the binary. `RAC.STATUS` still reads `0x09400000` (`STATE=9`, `TX`,
+holding steady, nothing broken by the new code). **`FRC.STATUS` still
+reads `0x01100200` — `ACTIVETXFCD` still clear, byte-for-byte identical
+to every capture before this change.** (The `NVIC.IPR` bytes are not
+independently checkable this way: they are each Cortex-M core's own
+*private* peripheral, not bus-addressable from the other core, so
+reading `0xE000E408`-style addresses through the M33's own debug
+connection reads the M33's own NVIC, not the sequencer's — a real
+limitation of this debug setup, not evidence either way about whether
+that specific write took effect.)
+
+**Net result: refuted by direct measurement, the same standard every
+other hypothesis in this document has been held to.** Neither the NVIC
+priority change nor the `STCTRL`/`SysTick` setup has any observable
+effect on `ACTIVETXFCD` in this scenario. Both are kept in `radio_seq.S`
+regardless — they are still a faithful, now-properly-named reproduction
+of real stock behavior this project had not replicated before, and
+removing them would only re-introduce a real (if apparently inert)
+fidelity gap. The `ACTIVETXFCD` blocker remains open; this closes two
+more candidate explanations with evidence rather than leaving them as
+untested speculation.
