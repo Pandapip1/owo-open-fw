@@ -3697,3 +3697,54 @@ start" -- which is a sharper, more falsifiable question for whatever
 comes next (including evaluating a real `PROTIMER` integration attempt
 against this exact, now very concrete, success criterion: does
 `READOFFSET` ever pass `2`).
+
+### 7.32 `PROTIMER` is confirmed, with real captured data, to be completely disabled on the open stack -- and a cheap live test of enabling it crashed
+
+Found `tests/hardware-lockstep/` (a differential hardware/QEMU debugger
+with `compare.py`, plus already-captured register-bank snapshots for
+both stacks, built earlier in this same project but not yet mined for
+this specific question). Diffed its pre-existing
+`stage{2,3}-pre-txen-protimer.bin` captures directly (`cmp`/`od`, no
+new hardware session needed for this part): stock's capture shows a
+visibly *running* counter (changing, non-zero words at the offsets a
+free-running counter would occupy) and a nonzero word at `+0x8`
+(`0x00011102`); the open stack's capture is all-zero at every one of
+those same offsets. **This is real, captured, measured proof --
+not inference from "13 places marked unimplemented" -- that
+`PROTIMER` is completely unclocked/disabled on the open stack, and
+already fully running on stock before `TXEN` is ever issued**, i.e.
+independent of any specific TX event, consistent with §7.25's
+`cntr.c`-not-`PROTIMER` finding but now backed by a direct hardware
+comparison rather than static code reading.
+
+Live-reread this on fresh hardware to confirm it still holds (it does:
+`PROTIMER_NS_BASE+0x8` reads `0x0`, `+0x20` -- the same offset
+`vendor/qemu`'s own model already guesses is the counter, and matches
+where stock's capture showed a changing value -- also reads `0x0`,
+confirming the counter is frozen). **Tried the cheapest possible test
+of this: live-poked `PROTIMER_NS_BASE+0x8` to stock's exact captured
+value (`0x00011102`) via the debugger** (not a compiled change -- same
+fast-iteration technique as §7.31). The write landed (read back
+exactly as written), but **it caused a real crash during the
+following `resume` window** (halted generically afterward, `addr2line`
+resolving the PC to `uart_silabs_usart.c:158` -- plausibly Zephyr's own
+fatal-handler crash dump trying to print over UART, not necessarily
+the real original fault site; not root-caused with the same rigor as
+§7.27 since this was a side probe, not a blocking investigation). The
+counter at `+0x20` still read `0` afterward (the poke did not start it
+running), and `READOFFSET`/`FRC.STATUS`/`RAC.STATUS` were all
+unchanged -- no effect on the actual stall either way. Recovered via a
+full reflash; hardware reconfirmed back to the exact same baseline.
+
+**Do not live-poke `PROTIMER`'s registers again outside a reviewed,
+compiled change with proper IRQ handling in place.** The crash is
+itself informative: enabling `PROTIMER` isn't a harmless no-op even if
+nothing currently uses it -- it most plausibly starts firing an
+interrupt this firmware's vector table has nothing registered for,
+which is exactly the kind of prerequisite real `PROTIMER` integration
+(§7.25) would need to handle properly as part of that larger effort,
+not bypass with a bare register poke. This doesn't move `ACTIVETXFCD`
+forward directly, but it upgrades "`PROTIMER` integration is unproven
+but promising" to "`PROTIMER` is confirmed completely off, confirmed
+non-trivial to even just turn on safely" -- real scoping information
+for whoever attempts that integration next.
