@@ -4414,3 +4414,59 @@ register side effect is modeled. Added `test_rfcrc_cmd_initialize`
 (17/17) unaffected and still passing. Commit `1b7fa04e36` in the
 `vendor/qemu` submodule (`Pandapip1/qemu.git` fork), bumped in the
 superproject at `b1dc525`.
+
+### 7.47 `fn_0xd38`'s calibration-loop gate, checked live on real hardware for the first time -- clear on both builds, not conclusive either way
+
+§7.13's re-verification of `fn_0xd38` found a whole polling loop and
+calibration block (local `0xe5a..0xea8`) that was deliberately left
+unported, gated on `OBS_BLOCK_AA00011C` bit 8 -- a register this
+project had only ever read from the static disassembly, never measured
+live. `OBS_BLOCK_AA000054` (the base this same half of the function
+uses throughout) was already identified as `BUFC`'s secure alias area
+(`0xAA000000`, per the top-level register table); `AA00011C` is
+therefore `BUFC`'s secure alias at sub-offset `0x11C` -- but, same
+pitfall as §7.8's own `FRC` dump, **reading the secure alias
+(`0xaa00011c`) through this debugger with Secure debug disabled reads
+back a hard `0`, not the real value.** Had to read the non-secure
+alias (`0xba00011c`) instead to get anything real. (Also re-confirmed,
+the hard way, that `0xa8020000`/`0xa8004000` -- RAC/FRC's own secure
+bases -- have the exact same problem; only ever trust the `0xb8xxxxxx`/
+`0xba000000`-family non-secure reads from this debugger.)
+
+**Measured on real hardware, both builds, at their own established
+`TXEN`+settle checkpoints** (stock: breakpoint at `0xe3a0`, same
+address this project has used since §7.6; open: `0x165fe`, this
+build's current equivalent of the previously-recorded `0x16606` --
+address shifted slightly between builds, re-derived fresh from this
+exact binary's own disassembly rather than reused from an older note):
+
+* Stock, 450 ms after its own `TXEN`: `RAC.STATUS=0x00400000`
+  (`STATE=4`, `RXPD` -- stock has already finished this TX and moved on
+  long before 450 ms, consistent with §7.6's "well under 100 ms"
+  finding; this is not a "stuck TX" reading, and wasn't expected to
+  be). `BUFC+0x11C` (non-secure) reads `0x06000000` -- bit 8 clear.
+* Open, 450 ms after its own `TXEN`: `RAC.STATUS=0x09400000` (the
+  usual stuck-`TX` baseline, confirming this was a valid capture).
+  `BUFC+0x11C` (non-secure) reads `0x00000004` -- bit 8 also clear.
+
+**Bit 8 is clear on both builds at these checkpoints -- consistent
+with, but not proof of, `fn_0xd38`'s calibration loop never firing in
+this scenario on either build.** This is *not* a clean, timing-
+eliminated result the way §7.6's `ACTIVETXFCD` comparison was: §7.30
+already established that this chip's transition speed outruns any
+halt-based observation, so neither reading can rule out the bit having
+been set-then-cleared, or never-set, during the actual microsecond-
+scale `TXEN` servicing window itself -- only that it is not latched
+set by the time either build settles. Both values also differ in
+which *other* bits are set (`0x06000000` vs `0x00000004`), which is
+expected and uninteresting: these reads aren't timing-matched (stock
+is long past TX; open is still mid-stall), so this isn't a valid A/B
+diff, just two separately-recorded facts. **This closes the loop on
+§7.13's open thread as far as live measurement can take it**: the
+calibration block was already confirmed structurally unreachable on
+the open build (never ported into `radio_seq.S` at all, regardless of
+any register value), and this is the first real evidence -- weak, but
+real, and in the expected direction -- that stock itself likely
+doesn't exercise it in a plain single-TX scenario either. Not escalated
+further without a genuinely new technique for observing sub-instruction
+hardware state, which this project does not have.
