@@ -337,6 +337,7 @@ K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 #endif
 
 /* Hardware RX-window generation; see efr32_hw_turnaround_reset(). */
+static bool efr32_rac_in_rxsearch(void);
 static atomic_t efr32_hw_hcto_generation;
 
 /*
@@ -364,8 +365,14 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 	}
 #else
 	ARG_UNUSED(deadline);
+	/*
+	 * HCTO bounds the search for a frame's header, not a frame already
+	 * being received: once the RAC has left RXSEARCH (RXFRAME, or the
+	 * RX2TX/TX of a response) the frame's own completion owns cleanup.
+	 * Aborting it here cancelled every in-progress SCAN_REQ (SS7.65).
+	 */
 	if (generation == (uint32_t)atomic_get(&efr32_hw_hcto_generation) &&
-	    !radio_is_done()) {
+	    !radio_is_done() && efr32_rac_in_rxsearch()) {
 		radio_disable();
 	}
 #endif
@@ -783,6 +790,15 @@ static inline void efr32_radio_trace_previous_seq_launch(void) { }
 static inline volatile uint32_t *radio_reg32(uintptr_t address)
 {
 	return (volatile uint32_t *)address;
+}
+
+#define EFR32_RAC_STATE_RXSEARCH_VALUE 2U
+
+static bool efr32_rac_in_rxsearch(void)
+{
+	return ((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+		 EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
+	       EFR32_RAC_STATE_RXSEARCH_VALUE;
 }
 
 static void efr32_radio_sequencer_install(void)
@@ -1967,6 +1983,19 @@ static bool efr32_hw_rx_turnaround_claimed;
 static bool efr32_hw_tx_after_rx_requested;
 #define EFR32_HW_UNSERVED_RESPONSE_BOUND_US 1000U
 /*
+ * Hardware RX->TX (SS7.65).  [I] Stock raises a TX request while a frame is
+ * still arriving (RAC.STATUS.TXENS during RXFRAME), so the RAC goes RX2TX at
+ * frame end.  Here the M33 marks the RX window PENDING; the open sequencer
+ * issues TXEN from its RXFRAME handler only then, and its RX2TX handler waits
+ * for the LLL's decision: RESPOND once the response PDU is in BUFC, CANCEL
+ * when the LLL disables instead.
+ */
+#define EFR32_SEQ_RX2TX_DECISION_ADDRESS 0xB0004FA4UL
+#define EFR32_SEQ_RX2TX_PENDING 3U
+#define EFR32_SEQ_RX2TX_RESPOND 1U
+#define EFR32_SEQ_RX2TX_CANCEL 2U
+static bool efr32_hw_rx2tx_armed;
+/*
  * Bounds a silent RX window: the BURTC alarm the QEMU TIFS path uses is real
  * hardware, and its expiry callback disables the radio unless a completion
  * already owns cleanup -- the same no-response rule as the QEMU job.  Each
@@ -1984,6 +2013,10 @@ static void efr32_hw_turnaround_reset(void)
 	efr32_hw_rx_turnaround_claimed = false;
 	efr32_hw_tx_after_rx_requested = false;
 	efr32_hw_rx_fifo_reset();
+	if (efr32_hw_rx2tx_armed) {
+		efr32_hw_rx2tx_armed = false;
+		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_CANCEL;
+	}
 #if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	atomic_inc(&efr32_hw_hcto_generation);
 	cntr_qemu_tifs_cmp_cancel();
@@ -2741,6 +2774,19 @@ void radio_pkt_tx_set(void *tx_packet)
 	efr32_packet_stage.tx_source = tx_packet;
 	efr32_packet_stage.tx_bytes = bytes;
 	efr32_packet_stage.tx_fifo_configured = true;
+
+	if (efr32_hw_rx2tx_armed &&
+	    efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE) {
+		/* A response to the frame just received: the RAC is already in
+		 * RX2TX.  Publish it, label the completion, retire the unserved-
+		 * response guard, then release the sequencer's IRQ7. */
+		efr32_hw_rx2tx_armed = false;
+		atomic_inc(&efr32_hw_hcto_generation);
+		efr32_tx_fifo_publish();
+		efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
+		__DSB();
+		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_RESPOND;
+	}
 }
 
 /* [software] software (no register access needed); not implemented yet */
@@ -3326,6 +3372,11 @@ void radio_tmr_hcto_configure(uint32_t hcto)
 		/* The RAC is already turning around; label the next completion. */
 		efr32_hw_rx_turnaround_claimed = false;
 		efr32_packet_stage_arm(EFR32_RADIO_PACKET_RX);
+		if (efr32_hw_tx_after_rx_requested) {
+			*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) =
+				EFR32_SEQ_RX2TX_PENDING;
+			efr32_hw_rx2tx_armed = true;
+		}
 		/* As in the QEMU path, HCTO bounds the window from this point. */
 		cntr_qemu_tifs_arm_after_us(hcto,
 			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);

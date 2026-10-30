@@ -5530,6 +5530,55 @@ it waiting for a TX completion forever and advertising stopped. Until
 RX->TX exists, an RX completion with RX->TX requested ends the event after
 1 ms through the same alarm/`radio_disable()` path. Free-running with the
 host actively scanning: advertising continues (seen at -37 dBm over 30 s),
-no console errors. Stock's mechanism, from this session's watchpoints:
-RAIL writes `RAC.CMD.TXAFTERFRAME`, the RAC goes RXFRAME -> RX2TX (7) -> TX,
-and stock's M0+ services IRQ7 -- the next port.
+no console errors. (A claim originally written here, that stock RAIL writes
+`RAC.CMD.TXAFTERFRAME`, was a misread of a register left over after a
+watchpoint halt; the store at that site writes RXDIS. Withdrawn -- see
+§7.65.)
+
+### 7.65 RX->TX turnaround works mechanically; scan responses are blocked by bit errors on received SCAN_REQs
+
+**Stock handlers [F].** IRQ4 (`STATERXPD`, captured by an AP3 watchpoint
+inside it) is the RF front-end power-down -- stock `fn_0xc02`, now named:
+`RAC.RX` CLR of the IF-ADC LDOs/RF peak detector/LNA-mixer current/PGA
+LDO/PFD bits, `PGACTRL` CLR of the PGA enables, `SYLOEN` CLR of the RX LO
+dividers, `RFPATHEN=0`, `IFADCDBG` CLR, `LNAMIXEN` CLR,
+`RAC.CMD.LNAENCLEAR` -- then the synthesizer power-down shared with TXPD,
+then the ack. IRQ7 (`STATERX2TX`) was captured three ways: a "decline"
+branch (`SWRXEN` CLR, `RAC.CMD.TXDIS`, ack) and a responding branch whose
+TX retune is §7.61's TXWARM configuration block plus synth-lock with the
+supplies left on -- but every responding trace aborts after the first
+calibration trial on `RAC.CTRL.FORCEDISABLE`: under single-stepping RAIL's
+~150 us response deadline always expires and RAIL cancels, so a complete
+responding IRQ7 cannot be traced. Stock's `RAC.STATUS` during RXFRAME is
+`0x63400000`: `TXENS` set, `RXENS` clear.
+
+**Ported.** `radio_seq.S`: RXPD = front-end power-down + synthesizer
+power-down; RXFRAME (IRQ3), when the M33 marked the window "pending" in a
+new shared word (`0x4FA4`, 0 = idle, 1 respond, 2 cancel, 3 pending),
+withdraws `SWRXEN` and issues `TXEN`; RX2TX (IRQ7) waits up to ~120 us for
+the M33's decision -- respond: front-end down, TX configuration,
+synth-lock, PA; cancel or timeout: `TXDIS`. `radio.c`: the RX window is
+marked pending when the LLL armed RX->TX; `radio_pkt_tx_set()` for an
+armed window publishes the response to BUFC, labels the TX completion,
+retires the 1 ms guard and writes "respond"; `radio_disable()` writes
+"cancel". The hardware HCTO now only ends a window still in RXSEARCH: it is
+a header timeout, and aborting frames in progress had cancelled every
+SCAN_REQ. Diagnostic per-IRQ entry counters live at `0x4F80` (bytes,
+IRQ0-23; 24 RXFRAME-TXEN; 25-27 respond/cancel/timeout).
+
+Measured along the way [F]: with `SWRXEN` still asserted, the RXFRAME TXEN
+latched (`TXENS`) but the RAC returned to RX at frame end; withdrawing it
+first gives stock's `0x63400000` and RX2TX on every received frame.
+
+**Result [F]:** per 5 s, TXWARM = TX (no stray transmissions), RX2TX = RXFRAME;
+outcomes ~half "cancel" (the LLL declined other devices' frames) and half
+"timeout", 0 "respond" -- unchanged with a 600 us wait, so not latency.
+The RX FIFO shows why: the host's SCAN_REQs do arrive (header `0xC3`,
+length 12), but their AdvA reads `FA:9E:57:19:BD:33` against the board's
+`FA:99:D7:19:BD:3F` -- the same address with several flipped bits -- so
+they fail CRC and are correctly ignored. Neighbours' advertisements
+decoded cleanly, while this scanner is close (about -35 dBm): errors on a
+strong signal point at gain control/saturation. Open RX-configuration
+differences from stock's RXSEARCH capture (§7.64): `AGC.CTRL0`
+`0x000A72F5` vs `0x00093AF5`, `MODEM.IRCALCOEFWR1` 0 vs `0x80C080D1`,
+`MODEM.BLEIQDSA` 0 vs `0x13C4`, `FRC.RXCTRL`, the retime controls. Next.

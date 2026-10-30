@@ -26,6 +26,11 @@
  * much headroom left. Lets a post-hoc debug-probe read distinguish "timed
  * out" from "succeeded quickly" without needing to catch the M0+ core
  * itself mid-loop. */
+.equ EFR32_SEQ_TRACE_IRQ_COUNTS,     0x00004f80 /* 24 bytes, IRQ0..23 */
+.equ EFR32_SEQ_TRACE_RXFRAME_TXEN,    0x00004f98 /* diagnostic only */
+.equ EFR32_SEQ_TRACE_RXFRAME_STATUS,  0x00004f9c /* diagnostic only */
+.equ EFR32_RAC_STATUS,                0xa802000c
+.equ EFR32_RAC_RXENSRCEN_SWRXEN_BIT, (1 << 1)
 .equ EFR32_SEQ_TRACE_WAIT_BIT_REMAINING,  0x00004fa8
 .equ EFR32_SEQ_TRACE_SEQIF_ACK_REMAINING, 0x00004fac
 /* Diagnostic only (not part of the bounded production trace words above):
@@ -73,6 +78,8 @@
  * RX2TX 7, TX2RX 11. */
 .equ EFR32_RAC_IRQ_RX_STATES, ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 7) | (1 << 11))
 .equ EFR32_EXCEPTION_RXPD,            (16 + 4)
+.equ EFR32_EXCEPTION_RX2TX,           (16 + 7)
+.equ EFR32_EXCEPTION_RXFRAME,         (16 + 3)
 .equ EFR32_EXCEPTION_TX2RX,           (16 + 11)
 .equ EFR32_EXCEPTION_TXWARM,          (16 + 8)
 .equ EFR32_EXCEPTION_TX,              (16 + 9)
@@ -312,6 +319,14 @@ efr32_radio_seq_reset:
 efr32_radio_seq_exception:
     /* Acknowledge only enabled state-transition events.  The M0+ does not
      * turn them into a new radio command; policy remains on the M33. */
+    /* Diagnostic only: a wrapping per-IRQ entry count, one byte per external
+     * IRQ, readable by a debugger from the M33 without halting this core. */
+    mrs r3, ipsr
+    subs r3, #16
+    ldr r0, =EFR32_SEQ_TRACE_IRQ_COUNTS
+    ldrb r1, [r0, r3]
+    adds r1, #1
+    strb r1, [r0, r3]
     mrs r3, ipsr
     cmp r3, #EFR32_EXCEPTION_TXWARM
     beq 1f
@@ -326,10 +341,58 @@ efr32_radio_seq_exception:
     mov lr, r0
     b 2f
 16: cmp r3, #EFR32_EXCEPTION_RXPD
-    beq 17f
-    cmp r3, #EFR32_EXCEPTION_TXPD
+    bne 18f
+    /* RX power-down (SS7.65): receive chain, then synthesizer. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_rx_frontend_stop
+    bl efr32_seq_synth_power_down
+    pop {r0}
+    mov lr, r0
+    b 2f
+18: cmp r3, #EFR32_EXCEPTION_RXFRAME
+    bne 20f
+    /* A frame is arriving.  If the M33 armed a possible response for this
+     * window, request TX now so the RAC turns around at frame end (SS7.65);
+     * otherwise leave the window to end normally. */
+    ldr r0, =EFR32_SEQ_RX2TX_DECISION
+    ldr r0, [r0]
+    cmp r0, #EFR32_SEQ_RX2TX_PENDING
+    beq 21f
+    b 2f
+21: /* Stock's RXFRAME status carries TXENS without RXENS: with SWRXEN
+     * still asserted the RAC returned to RX at frame end instead of RX2TX
+     * (measured, SS7.65), so withdraw the RX request first. */
+    ldr r0, =EFR32_RAC_RXENSRCEN_CLR
+    movs r1, #EFR32_RAC_RXENSRCEN_SWRXEN_BIT
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_CMD
+    movs r1, #EFR32_RAC_CMD_TXEN_BIT
+    str r1, [r0]
+    /* Diagnostic only: count TXENs issued here, then sample RAC.STATUS
+     * straight after the command. */
+    ldr r0, =EFR32_SEQ_TRACE_RXFRAME_TXEN
+    ldrb r1, [r0]
+    adds r1, #1
+    strb r1, [r0]
+    ldr r1, =EFR32_RAC_STATUS
+    ldr r1, [r1]
+    ldr r0, =EFR32_SEQ_TRACE_RXFRAME_STATUS
+    str r1, [r0]
+    b 2f
+20: cmp r3, #EFR32_EXCEPTION_RX2TX
+    bne 19f
+    /* RX->TX turnaround (SS7.65): receiver off, synthesizer back to TX,
+     * PA up; the common tail acknowledges STATERX2TX. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_tx_turnaround
+    pop {r0}
+    mov lr, r0
+    b 2f
+19: cmp r3, #EFR32_EXCEPTION_TXPD
     bne 15f
-17:
+
     /* TX power-down: stop the synthesizer as stock's IRQ10 does, then let
      * the common tail acknowledge STATETXPD so the RAC can reach OFF. */
     mov r0, lr
@@ -742,44 +805,7 @@ efr32_seq_synth_start:
     ldr r0, =(EFR32_RAC_SYCAL + EFR32_ALIAS_CLR)
     ldr r1, =(EFR32_RAC_SYCAL_SYVCOMORECURRENT | EFR32_RAC_SYCAL_SYVCOSLOWNOISEFILTER)
     str r1, [r0]
-    ldr r0, =EFR32_SYNTH_VCORANGE
-    ldr r1, =EFR32_SYNTH_VCORANGE_TX
-    str r1, [r0]
-    ldr r0, =EFR32_SYNTH_CMD
-    movs r1, #(EFR32_SYNTH_CMD_SYNTHSTOP | EFR32_SYNTH_CMD_DISABLEIF)
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
-    ldr r1, =EFR32_RAC_SYNTHENCTRL_LPFBWSEL
-    str r1, [r0]
-    ldr r0, =EFR32_RAC_SYMMDCTRL
-    ldr r1, =EFR32_RAC_SYMMDCTRL_TX
-    str r1, [r0]
-    ldr r0, =EFR32_RAC_RX
-    movs r1, #EFR32_RAC_RX_SYCHPBIASTRIMBUF
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_CLR)
-    movs r1, #EFR32_RAC_SYEN_SYCHPLPEN
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_CHPCTRL + EFR32_ALIAS_SET)
-    ldr r1, =EFR32_RAC_CHPCTRL_CHPOUTPUTTRISTATEMODE
-    str r1, [r0]
-    ldr r0, =EFR32_RAC_SYTRIM0
-    ldr r1, =EFR32_RAC_SYTRIM0_TX
-    str r1, [r0]
-    ldr r0, =EFR32_RAC_VCOCTRL
-    movs r1, #EFR32_RAC_VCOCTRL_TX
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
-    movs r1, #EFR32_RAC_RETIME_ENRETIME
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
-    str r1, [r0]
-    ldr r0, =EFR32_RAC_SYTRIM1
-    ldr r1, =EFR32_RAC_SYTRIM1_STARTUP
-    str r1, [r0]
-    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
-    ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
-    str r1, [r0]
+    bl efr32_seq_synth_config_tx
     ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
     ldr r1, =EFR32_RAC_SYEN_STAGE1
     str r1, [r0]
@@ -901,6 +927,16 @@ efr32_seq_synth_lock:
 efr32_seq_synth_stop:
     push {r4, lr}
     bl efr32_seq_pa_stop
+    bl efr32_seq_synth_power_down
+    pop {r4, pc}
+
+.ltorg
+
+/* Stock's synthesizer power-down (TXPD and RXPD share it, SS7.62/SS7.65).
+ * Clobbers r0-r3. */
+.thumb_func
+efr32_seq_synth_power_down:
+    push {r4, lr}
     ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
     movs r1, #EFR32_RAC_RETIME_ENRETIME
     str r1, [r0]
@@ -1449,4 +1485,163 @@ efr32_seq_pga_dc_interp:
     lsrs r3, r3, #1
     bne 1b
     pop {r4, pc}
+.ltorg
+
+/* TX synthesizer configuration, shared by the cold TXWARM start and the
+ * RX->TX retune (stock uses the same block for both, SS7.61/SS7.65).
+ * Clobbers r0-r1. */
+.thumb_func
+efr32_seq_synth_config_tx:
+    ldr r0, =EFR32_SYNTH_VCORANGE
+    ldr r1, =EFR32_SYNTH_VCORANGE_TX
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #(EFR32_SYNTH_CMD_SYNTHSTOP | EFR32_SYNTH_CMD_DISABLEIF)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_LPFBWSEL
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYMMDCTRL
+    ldr r1, =EFR32_RAC_SYMMDCTRL_TX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_RX
+    movs r1, #EFR32_RAC_RX_SYCHPBIASTRIMBUF
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYEN_SYCHPLPEN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_CHPCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_CHPCTRL_CHPOUTPUTTRISTATEMODE
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM0
+    ldr r1, =EFR32_RAC_SYTRIM0_TX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_VCOCTRL
+    movs r1, #EFR32_RAC_VCOCTRL_TX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_ENRETIME
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM1
+    ldr r1, =EFR32_RAC_SYTRIM1_STARTUP
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
+    str r1, [r0]
+    bx lr
+
+.ltorg
+
+/*
+ * Stock's RF front-end power-down (fn_0xc02, SS7.65), offsets now named from
+ * the public RAC_S model.  Stock first clears the retime enables when SR0
+ * bit 0 is clear; this image's other paths already clear them.
+ */
+.equ EFR32_RAC_RX_FRONTEND_OFF, (EFR32_RAC_RX_IFADCENLDOSERIES | EFR32_RAC_RX_IFADCENLDOSHUNT | \
+    (1 << 3) /* LNAMIXENRFPKD */ | EFR32_RAC_RX_LNAMIXLDOLOWCUR | EFR32_RAC_RX_PGAENLDO | \
+    EFR32_RAC_RX_SYPFDCHPLPEN | EFR32_RAC_RX_SYPFDFPWEN)
+/* PGAENBIAS, PGAENGHZ, PGAENPGAI, PGAENPGAQ, PGAENPKD, PGAENRCMOUT. */
+.equ EFR32_RAC_PGACTRL_FRONTEND_OFF, ((1 << 2) | (1 << 3) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12))
+.equ EFR32_RAC_IFADCDBG_FRONTEND_OFF, (EFR32_RAC_IFADCDBG_IFADCENCLK | (1 << 0)) /* + IFADCENADC */
+.equ EFR32_RAC_CMD_LNAENCLEAR,        (1 << 15)
+
+.thumb_func
+efr32_seq_rx_frontend_stop:
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_RX_FRONTEND_OFF
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PGACTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PGACTRL_FRONTEND_OFF
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYLOEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYLOEN_RX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_RFPATHEN
+    movs r1, #0
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_IFADCDBG + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_IFADCDBG_FRONTEND_OFF
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_LNAMIXEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_LNAMIXEN_LNAMIXENLDO
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_CMD
+    ldr r1, =EFR32_RAC_CMD_LNAENCLEAR
+    str r1, [r0]
+    bx lr
+
+.ltorg
+
+/* Open ABI word: the M33 writes PENDING when it arms RAC.CMD.TXAFTERFRAME,
+ * then RESPOND after publishing the response to BUFC or CANCEL when the LLL
+ * declines (SS7.65). */
+.equ EFR32_SEQ_RX2TX_DECISION,        0x00004fa4
+.equ EFR32_SEQ_RX2TX_PENDING,         3 /* 0 = idle: SEQRAM reset value */
+.equ EFR32_SEQ_RX2TX_RESPOND,         1
+.equ EFR32_SEQ_RX2TX_CANCEL,          2
+/* Bound in ~1 us steps; the response must start within the 150 us tIFS. */
+.equ EFR32_SEQ_RX2TX_DECISION_WAIT_US, 120
+.equ EFR32_RAC_CMD_TXDIS,             (1 << 5)
+.equ EFR32_RAC_CMD_TXEN_BIT,          (1 << 0)
+
+/*
+ * RX->TX (IRQ7, SS7.65).  A full responding stock IRQ7 cannot be traced (its
+ * deadline expires under single-stepping and RAIL cancels), but the captured
+ * part is the TXWARM configuration block and synth-lock routine with the
+ * supplies left on; the front-end power-down and PA start are [I] taken from
+ * the RXPD and TXWARM paths.
+ */
+.thumb_func
+efr32_seq_tx_turnaround:
+    push {r4, lr}
+    /* Wait (bounded) for the M33's decision on this received frame: it
+     * either published a response or cancelled; this core never chooses. */
+    ldr r4, =EFR32_SEQ_RX2TX_DECISION_WAIT_US
+1:  ldr r0, =EFR32_SEQ_RX2TX_DECISION
+    ldr r0, [r0]
+    cmp r0, #EFR32_SEQ_RX2TX_RESPOND
+    beq 2f
+    cmp r0, #EFR32_SEQ_RX2TX_CANCEL
+    beq 3f
+    movs r0, #1
+    bl efr32_seq_delay
+    subs r4, #1
+    bne 1b
+    /* No decision in time: drop the response rather than send stale data. */
+    movs r0, #EFR32_SEQ_TRACE_RX2TX_TIMEOUT_SLOT
+    bl efr32_seq_trace_count
+    b 4f
+3:  movs r0, #EFR32_SEQ_TRACE_RX2TX_CANCEL_SLOT
+    bl efr32_seq_trace_count
+    /* Declined: stop the TX the RXFRAME request set up, as stock does. */
+4:  ldr r0, =EFR32_RAC_CMD
+    movs r1, #EFR32_RAC_CMD_TXDIS
+    str r1, [r0]
+    b 9f
+2:  movs r0, #EFR32_SEQ_TRACE_RX2TX_RESPOND_SLOT
+    bl efr32_seq_trace_count
+    bl efr32_seq_rx_frontend_stop
+    bl efr32_seq_synth_config_tx
+    bl efr32_seq_synth_lock
+    cmp r0, #0
+    bne 9f
+    bl efr32_seq_pa_start
+9:  pop {r4, pc}
+.ltorg
+
+/* Diagnostic only: bump byte r0 of the per-IRQ count area (slots 24-26 are
+ * the RX2TX decision outcomes).  Clobbers r0-r1. */
+.equ EFR32_SEQ_TRACE_RX2TX_RESPOND_SLOT, 25
+.equ EFR32_SEQ_TRACE_RX2TX_CANCEL_SLOT,  26
+.equ EFR32_SEQ_TRACE_RX2TX_TIMEOUT_SLOT, 27
+.thumb_func
+efr32_seq_trace_count:
+    ldr r1, =EFR32_SEQ_TRACE_IRQ_COUNTS
+    adds r1, r1, r0
+    ldrb r0, [r1]
+    adds r0, #1
+    strb r0, [r1]
+    bx lr
 .ltorg
