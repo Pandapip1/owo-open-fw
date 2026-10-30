@@ -5372,3 +5372,13 @@ open M0+ sequencer -- transmits real BLE advertisements.** Not yet
 checked: receive (scan requests/connections), the remaining advertising
 channels' calibration values, and whether the synth-only build of §7.61
 radiated anything without the PA.
+
+**QEMU follow-up to §7.62.** `vendor/qemu` now ends a released
+sequencer's TX in TXPD, raises `STATETXPD` on the sequencer's IRQ10, and
+reaches OFF only on its acknowledgement (qtest
+`seq-tx-waits-for-synthesizer` extended; suites 80/80 and 17/17). Running
+the current stage-3 image under QEMU (`-M efr32bg22,flash=...`) gives 187
+complete OFF -> TXWARM -> TX -> TXPD -> OFF cycles in 25 s, the same
+sequence measured on silicon. The model passes through SHUTDOWN (13)
+before TXWARM on each launch; that step was never seen in the sparse
+hardware sampling and is unconfirmed either way.
