@@ -541,6 +541,8 @@ static struct {
  * it represents a software delivery failure, not a second hardware CRC.
  */
 static bool efr32_rx_delivery_invalid;
+/* CRC result of the frame last handed to the LLL (hardware RX handoff). */
+static bool efr32_rx_crc_ok;
 
 static void efr32_packet_stage_reset(void)
 {
@@ -605,6 +607,15 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_FRC_IF_RXDONE (1U << 4)
 #define EFR32_FRC_IF_COMPLETION (EFR32_FRC_IF_TXDONE | EFR32_FRC_IF_RXDONE)
 #define EFR32_FRC_TRAILRXDATA_CRCOK (1U << 1)
+#define EFR32_FRC_RXCTRL_ACCEPTCRCERRORS (1U << 1)
+/*
+ * The appended octet that TRAILRXDATA.CRCOK selects.  [I] Bit 7 is the CRC
+ * result: it was set on every frame while FRC discarded CRC failures, and
+ * clear on a frame received with a deliberately corrupted RFCRC.INIT; the
+ * low bits vary with the signal (SS7.66).
+ */
+#define EFR32_FRC_TRAILER_CRCOK_BIT (1U << 7)
+#define EFR32_FRC_TRAILER_OCTETS 1U
 
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
@@ -1825,6 +1836,68 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 
 
 /* [software] lll_init() connects LL_RADIO_IRQn (FRC_IRQn) to this entry. */
+#if !defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+static int efr32_packet_stage_rx_complete(const uint8_t *pdu, uint16_t bytes);
+
+/*
+ * Hardware RX handoff (docs/radio-tables.md SS7.66).  Measured on silicon:
+ * FRC writes a received frame into BUFC RX channel 1 as header octet, length
+ * octet, then exactly that many payload octets -- WRITEOFFSET advanced by
+ * length + 2 for both a 31- and a 37-octet PDU -- with no trailer; CRC status
+ * is FRC.TRAILRXDATA.  Hand the frame at READOFFSET to the LLL and consume
+ * it.  Each RX window starts from a CLEARed channel, so a frame never wraps
+ * in practice; one that would is rejected rather than reassembled.
+ */
+static void efr32_hw_rx_deliver(void)
+{
+	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
+	uint32_t read = *radio_reg32(base + EFR32_BUFC_READOFFSET_OFFSET) %
+			sizeof(efr32_rx_fifo);
+	uint32_t write = *radio_reg32(base + EFR32_BUFC_WRITEOFFSET) %
+			 sizeof(efr32_rx_fifo);
+	uint32_t available = (write + sizeof(efr32_rx_fifo) - read) %
+			     sizeof(efr32_rx_fifo);
+	uint32_t bytes;
+
+	if (available < 2U || read + 2U > sizeof(efr32_rx_fifo)) {
+		efr32_rx_delivery_invalid = true;
+		return;
+	}
+	bytes = (uint32_t)efr32_rx_fifo[read + 1U] + 2U;
+	if (bytes + EFR32_FRC_TRAILER_OCTETS > available ||
+	    read + bytes + EFR32_FRC_TRAILER_OCTETS > sizeof(efr32_rx_fifo)) {
+		efr32_rx_delivery_invalid = true;
+		return;
+	}
+	efr32_rx_crc_ok = !!(efr32_rx_fifo[read + bytes] & EFR32_FRC_TRAILER_CRCOK_BIT);
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+	{
+		/* Diagnostic only, in spare SEQRAM: CRC-ok/CRC-bad frame counts,
+		 * then the last SCAN_REQ-typed frame's first 16 octets and its
+		 * TRAILRXDATA. */
+		volatile uint32_t *diag = radio_reg32(0xB0004F00UL);
+		uint32_t trail = *radio_reg32(EFR32_FRC_BASE +
+					      EFR32_FRC_TRAILRXDATA_OFFSET);
+
+		ARG_UNUSED(trail);
+		diag[efr32_rx_crc_ok ? 0 : 1]++;
+		if ((efr32_rx_fifo[read] & 0x0FU) == 0x03U) {
+			for (uint32_t i = 0U; i < 4U; i++) {
+				diag[2U + i] = (uint32_t)efr32_rx_fifo[read + 4U * i] |
+					((uint32_t)efr32_rx_fifo[read + 4U * i + 1U] << 8) |
+					((uint32_t)efr32_rx_fifo[read + 4U * i + 2U] << 16) |
+					((uint32_t)efr32_rx_fifo[read + 4U * i + 3U] << 24);
+			}
+			diag[6] = trail;
+		}
+	}
+#endif
+	(void)efr32_packet_stage_rx_complete(&efr32_rx_fifo[read], (uint16_t)bytes);
+	*radio_reg32(base + EFR32_BUFC_READOFFSET_OFFSET) =
+		(read + bytes + EFR32_FRC_TRAILER_OCTETS) % sizeof(efr32_rx_fifo);
+}
+#endif
+
 void isr_radio(void *arg)
 {
 	uint32_t pending;
@@ -1903,6 +1976,11 @@ void isr_radio(void *arg)
 		 * is retired by radio_status_reset(), the LLL's explicit status
 		 * consumption boundary, rather than by this IRQ entry.
 		 */
+#if !defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+		if (completion_direction == EFR32_RADIO_PACKET_RX) {
+			efr32_hw_rx_deliver();
+		}
+#endif
 		LL_ASSERT(efr32_packet_lifecycle_latch_completion(
 			&efr32_packet_stage.lifecycle, completion_direction));
 		/* Do not run an LLL state machine on the hardware interrupt stack. */
@@ -2085,6 +2163,21 @@ void radio_setup(void)
 	 * are exact initialization writes; they do not assert a packet policy.
 	 */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_RXCTRL_OFFSET) = 0x60U;
+	/*
+	 * [F] BLE RX policy, as stock runs it (live RXCTRL 0x262 and
+	 * TRAILRXDATA 0x1B in RXSEARCH, SS7.64): keep CRC-failed frames so the
+	 * LLL sees them, and append the CRC result after each frame.  Without
+	 * ACCEPTCRCERRORS FRC silently discards a failed frame (no RXDONE);
+	 * without TRAILRXDATA.CRCOK there is no per-frame CRC result at all --
+	 * TRAILRXDATA is configuration, not status (SS7.66).
+	 */
+#if !defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	/* The QEMU descriptor seam keeps its own CRC contract. */
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_FRC_RXCTRL_OFFSET) = EFR32_FRC_RXCTRL_ACCEPTCRCERRORS;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) =
+		EFR32_FRC_TRAILRXDATA_CRCOK;
+#endif
 	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_CMD_OFFSET) =
 		EFR32_FRC_CMD_RXABORT | EFR32_FRC_CMD_CONVINIT;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
@@ -2492,7 +2585,7 @@ void radio_pkt_rx_set(void *rx_packet)
  * Keeping the controller-facing copy and its bounds check separate from that
  * unresolved hardware handoff makes the eventual delivery path auditable.
  */
-static int __maybe_unused efr32_packet_stage_rx_complete(const uint8_t *pdu,
+static int efr32_packet_stage_rx_complete(const uint8_t *pdu,
 						  uint16_t bytes)
 {
 	int err;
@@ -3077,9 +3170,13 @@ uint32_t radio_crc_is_valid(void)
 		return 1U;
 	}
 	#endif
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 	return !efr32_rx_delivery_invalid &&
 	       !!(*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_TRAILRXDATA_OFFSET) &
 		 EFR32_FRC_TRAILRXDATA_CRCOK);
+#else
+	return !efr32_rx_delivery_invalid && efr32_rx_crc_ok;
+#endif
 }
 
 /* [software] software (no register access needed); not implemented yet */

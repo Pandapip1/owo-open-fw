@@ -5589,3 +5589,42 @@ and persist across events) leaves the outcome unchanged over 6 s windows --
 0 respond, roughly even decline/timeout. `MODEM.BLEIQDSA` reads back 0 after
 a write in this context, so it could not be tested this way. The bit-error
 cause remains open.
+
+### 7.66 Received frames now reach the LLL with a real CRC result; scan responses are sent but late
+
+**Correction to §7.65.** Its "bit errors on received SCAN_REQs" were a
+measurement artifact: the bytes came from the head of the 512-octet RX ring,
+which held stale data. Two driver gaps were the real cause [F]:
+
+1. **No hardware RX handoff.** `efr32_packet_stage_rx_complete()` was only
+   wired to the QEMU descriptor seam, so on silicon the LLL parsed whatever
+   was in its own buffer. Measured FIFO layout (§7.64): header, length, then
+   exactly `length` payload octets at READOFFSET, plus any trailer
+   `TRAILRXDATA` selects. `isr_radio()` now hands that frame to the LLL at
+   RXDONE and consumes it. A delivered SCAN_REQ's AdvA then matched the
+   board's identity exactly.
+2. **`FRC.TRAILRXDATA` is configuration, not status** (public model:
+   read-write, reset 0; fields RSSI, CRCOK, PROTIMER/RTC stamps). The driver
+   never set it and read it back as the CRC result, so every frame looked
+   CRC-failed. Stock runs `TRAILRXDATA=0x1B` and `RXCTRL=0x262`
+   (`ACCEPTCRCERRORS`, which ours lacked: without it FRC silently drops a
+   failed frame, no RXDONE). With `TRAILRXDATA.CRCOK` FRC appends one octet;
+   [I] its bit 7 is the CRC result -- set on every frame while failures
+   were dropped, clear on a frame received with a deliberately corrupted
+   `RFCRC.INIT` (set while the M33 was halted after its own CRC setup), low
+   bits varying with signal. The hardware path now sets both, reads bit 7
+   per frame, and `radio_crc_is_valid()` returns it; the QEMU descriptor
+   path is unchanged.
+
+**Result [F]:** CRC-good and CRC-failed frames are both delivered and
+classified; the LLL now accepts SCAN_REQs addressed to the board and stages
+the scan response -- the open sequencer's RX2TX handler records "respond"
+outcomes and TX entries exceed TXWARM entries by the same count.
+
+**Not yet received by the host: timing.** RAC.STIMER runs at ~4.8 ticks/us
+(against BURTC's 32.768 kHz). Timestamped from IRQ7 entry: the M33's
+decision arrives after ~132 us (the LLL runs in a thread after RXDONE),
+synthesizer retune + VCO calibration take ~48 us, PA bring-up ~28 us --
+~210 us before TX, against BLE's 150 +/- 2 us T_IFS, and the TX start is not
+hardware-timed at all. Many "timeout" outcomes are decisions arriving just
+past the M0+'s 120 us wait.

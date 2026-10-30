@@ -1596,6 +1596,8 @@ efr32_seq_rx_frontend_stop:
 .thumb_func
 efr32_seq_tx_turnaround:
     push {r4, lr}
+    movs r0, #0
+    bl efr32_seq_trace_stimer
     /* Wait (bounded) for the M33's decision on this received frame: it
      * either published a response or cancelled; this core never chooses. */
     ldr r4, =EFR32_SEQ_RX2TX_DECISION_WAIT_US
@@ -1622,12 +1624,18 @@ efr32_seq_tx_turnaround:
     b 9f
 2:  movs r0, #EFR32_SEQ_TRACE_RX2TX_RESPOND_SLOT
     bl efr32_seq_trace_count
+    movs r0, #1
+    bl efr32_seq_trace_stimer
     bl efr32_seq_rx_frontend_stop
     bl efr32_seq_synth_config_tx
     bl efr32_seq_synth_lock
     cmp r0, #0
     bne 9f
+    movs r0, #2
+    bl efr32_seq_trace_stimer
     bl efr32_seq_pa_start
+    movs r0, #3
+    bl efr32_seq_trace_stimer
 9:  pop {r4, pc}
 .ltorg
 
@@ -1643,5 +1651,20 @@ efr32_seq_trace_count:
     ldrb r0, [r1]
     adds r0, #1
     strb r0, [r1]
+    bx lr
+.ltorg
+
+/* Diagnostic only: RAC.STIMER into word r0 of the RX2TX timing record
+ * (entry, decision, locked, PA up).  Clobbers r0-r1. */
+.equ EFR32_SEQ_TRACE_RX2TX_TIMES,     0x00004f40
+.equ EFR32_RAC_STIMER,                0xa8020030
+.thumb_func
+efr32_seq_trace_stimer:
+    lsls r0, r0, #2
+    ldr r1, =EFR32_SEQ_TRACE_RX2TX_TIMES
+    adds r0, r0, r1
+    ldr r1, =EFR32_RAC_STIMER
+    ldr r1, [r1]
+    str r1, [r0]
     bx lr
 .ltorg
