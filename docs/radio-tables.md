@@ -5465,3 +5465,27 @@ configuration, not the turnaround or framing. Next: diff the radio blocks
 during RXSEARCH, stock vs stage 3 (stage 3 can be held in RX by halting the
 M33 at `radio_tmr_hcto_configure`; stock via a watchpoint inside its IRQ2).
 RX->TX (scan response) remains unimplemented on hardware.
+
+**QEMU: model fix, and a known regression in the simulated firmware run.**
+`vendor/qemu` now latches `MODEM.IF`/`SEQIF.TXRAMPDONE` when
+`RAC.PAENCTRL.PARAMP` changes (hardware evidence above); without it the
+open sequencer's bounded ramp-down wait ran to its limit on every TXPD in
+simulation. Qtests 80/80 and 17/17.
+
+**Open regression (QEMU only, hardware unaffected):** the QEMU-config
+firmware (`tests/radio-port` with `prj.conf`, board `bg22_ek4108a`) ran 486
+OFF -> TXWARM -> TX -> TXPD -> OFF -> RX cycles with the sequencer at
+`9713ed9`, but with the PA port (`9df1c9c`) it completes one cycle and stops,
+and with the RX turnaround (`9ce39d3`) it dies before the first TXWARM. The
+current `radio.c` is not the cause (`9713ed9`'s sequencer plus current
+`radio.c` runs 501 cycles), nor are the added RX IRQ enables (reverting
+only those still fails). The failure is an `LL_ASSERT` in
+`ull_periph_setup()` (`ull_peripheral.c:467`, caught at `z_fatal_error` via
+the QEMU gdbstub): with no peer attached, the simulated advertiser accepts
+something as a CONNECT_IND. With the default 448-byte launch stack the
+assert path itself overflows that thread's stack, which first presented as
+a "stack overflow" with PC 0. [I] Suspected: the QEMU RF medium offering a
+still-active transmission to a receiver entering RXSEARCH, made reachable
+by the longer sequencer handlers -- unconfirmed. Next step for whoever
+continues: trace `efr32bg22_rf_*` medium events and the delivered RX bytes
+around the first RX window.
