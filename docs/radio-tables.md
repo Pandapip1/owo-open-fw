@@ -5382,3 +5382,43 @@ complete OFF -> TXWARM -> TX -> TXPD -> OFF cycles in 25 s, the same
 sequence measured on silicon. The model passes through SHUTDOWN (13)
 before TXWARM on each launch; that step was never seen in the sparse
 hardware sampling and is unconfirmed either way.
+
+### 7.63 Receive: what stage 3 is missing, mapped on stock hardware (in progress)
+
+Stage 3 transmits (§7.62) but never listens: on silicon and in QEMU its RAC
+only ever shows OFF/TXWARM/TX/TXPD. Two separate gaps [F]:
+
+1. **No TX->RX turnaround request.** Sampled on running stock, `RAC.STATUS`
+   during TX reads `0x89400002`: `RXENS=1` with `RXMASK` bit 1, and
+   `RAC.RXENSRCEN` mostly `0x2` (`SWRXEN`) -- an RX request is already
+   pending while the frame goes out, and the RAC then passes TX ->
+   TX2RX (11) -> RXSEARCH (2) by itself. Stage 3's TX reads `0x09400000`
+   (nothing requested). `radio.c`'s `radio_switch_complete_and_rx/tx` are
+   `EFR32_RADIO_TODO` on hardware (only a QEMU software-tIFS path exists),
+   although `radio_rx_enable()` already writes exactly `RXENSRCEN.SWRXEN`.
+2. **No M0+ RX analog bring-up.** Stock's M0+ enables IRQ0-15 and more
+   (`ISER0=0x089BFFFF`; the open image enables 8/9/10). An AP3 watchpoint
+   on `RAC.SYCAL`'s CLR alias, resumed until it fired outside IRQ8, lands
+   in IRQ11 (`STATETX2RX`). From there to its ack the handler stores:
+   AGC `ADCATTENCODE`, manual LNA/mixer/PGA overrides, `RFPATHEN.LNAMIXTRSW`,
+   an **IF PGA DC-offset calibration** (`IFPGACTRL.DCCALON`/`DCRSTEN`,
+   successive-approximation writes to `RAC.PGACAL` bracketed by
+   `MODEM.DCCOMP.DCCOMPFREEZE`), `MODEM.DCCOMP` enabled, overrides
+   released, `FRC.SEQIF` clear, `STATETX2RX` ack. The part *before* the
+   watchpoint (the synthesizer retune for RX: an earlier watchpoint saw
+   IRQ11 code write `SYEN=0x1FBF`) is not yet captured. IRQ2's
+   (`STATERXSEARCH`) handler is RX bookkeeping only (`WCNTCMP0`=0xFF,
+   `MODEM.IF` frame-detect clears, `FRC.SEQIF` RX clears, ack).
+
+**Methodology notes.** (a) With the dual-core server's current target set
+to the M0+, `read_memory` of a `0xB8...` non-secure alias reads 0 -- the
+M0+ bus does not decode it; use `0xA8...`. A "stock radio stopped" reading
+in this session was exactly that misread, not a real stop. (b) Hardware
+breakpoints on the IRQ11/IRQ1 entries never reported a usable halt even
+with `VTOR=0` and the vector table confirmed live; a watchpoint on a store
+inside the handler does work. Halting the M0+ inside RX-side handlers can
+also leave its registers unreadable afterwards.
+
+Next: capture IRQ11's head (synth retune) and the RXWARM/RXFRAME/RXPD
+handlers, port them as for TX, and arm `SWRXEN` from the hardware
+`radio_switch_complete_and_rx()` while TX is in progress.
