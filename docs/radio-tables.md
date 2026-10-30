@@ -5582,3 +5582,10 @@ strong signal point at gain control/saturation. Open RX-configuration
 differences from stock's RXSEARCH capture (§7.64): `AGC.CTRL0`
 `0x000A72F5` vs `0x00093AF5`, `MODEM.IRCALCOEFWR1` 0 vs `0x80C080D1`,
 `MODEM.BLEIQDSA` 0 vs `0x13C4`, `FRC.RXCTRL`, the retime controls. Next.
+
+**Checked and negative:** poking stock's `AGC.CTRL0` (`0x00093AF5`) and
+`MODEM.IRCALCOEFWR1` (`0x80C080D1`) into the running board (both read back
+and persist across events) leaves the outcome unchanged over 6 s windows --
+0 respond, roughly even decline/timeout. `MODEM.BLEIQDSA` reads back 0 after
+a write in this context, so it could not be tested this way. The bit-error
+cause remains open.
