@@ -5321,3 +5321,13 @@ samples: the stall that held every previous section in TX is gone. QEMU:
 is not ported, so nothing drives the antenna; and nothing on the open
 M0+ services the TX power-down transition, so the RAC parks in TXPD
 instead of returning to OFF for the next event. Both are next.
+
+**QEMU follow-up.** The model used to complete a released sequencer's TX
+whether or not the synthesizer ran, which is how simulation hid this
+stall. `vendor/qemu` now defers that completion until `SYNTH.CMD.SYNTHSTART`
+has run with `RAC.SYEN`'s VCO supplies on (and drains a parked frame as
+soon as it does), reports `SYNTH.STATUS.INLOCK` only while running, and
+keeps `SYNTH.STATUS`/`LOCNTSTATUS`/`LOCNTTARGET` read-only. New qtest
+`seq-tx-waits-for-synthesizer` fails on the old model; suites 80/80 and
+17/17. Still unmodeled: TX ending in TXPD rather than OFF, the LO
+counter's measured values, and §7.59's extra CMU gates.
