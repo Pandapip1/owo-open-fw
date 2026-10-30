@@ -301,6 +301,8 @@ efr32_radio_seq_reset:
     b 1b
 
 .global efr32_radio_seq_exception
+.ltorg
+
 .thumb_func
 efr32_radio_seq_exception:
     /* Acknowledge only enabled state-transition events.  The M0+ does not
@@ -608,6 +610,8 @@ efr32_radio_seq_exception:
 .equ EFR32_SEQ_DELAY_BIAS,            111
 .equ EFR32_SEQ_DELAY_STEP,            30
 
+.ltorg
+
 .thumb_func
 efr32_seq_delay:
     ldr r1, =EFR32_SEQ_DELAY_PER_UNIT
@@ -636,6 +640,8 @@ efr32_seq_locnt_trial_numcycle:
 
 /* Returns the calibrated VCOTUNING register value in r0, or
  * EFR32_SEQ_SYNTH_CAL_ABORTED.  Clobbers r0-r3; preserves r4-r7. */
+.ltorg
+
 .thumb_func
 efr32_seq_vco_calibrate:
     push {r4-r7, lr}
@@ -698,6 +704,8 @@ efr32_seq_vco_calibrate:
     pop {r4-r7, pc}
 
 /* Brings the TX synthesizer up in stock's order.  Clobbers r0-r3. */
+.ltorg
+
 .thumb_func
 efr32_seq_synth_start:
     push {r4, lr}
@@ -841,6 +849,7 @@ efr32_seq_synth_start:
     ldr r0, =EFR32_RAC_SYTRIM1
     ldr r1, =EFR32_RAC_SYTRIM1_RUNNING
     str r1, [r0]
+    bl efr32_seq_pa_start
 9:  pop {r4, pc}
 
 /* Powers the synthesizer down in stock's TXPD order (SS7.62).  Clobbers
@@ -851,9 +860,12 @@ efr32_seq_synth_start:
     EFR32_RAC_SYEN_SYENVCOBIAS | EFR32_RAC_SYEN_SYLODIVLDOBIASEN | \
     (1 << 13) /* SYSTARTCHPREG */ | (1 << 14) /* SYSTARTMMDREG */)
 
+.ltorg
+
 .thumb_func
 efr32_seq_synth_stop:
     push {r4, lr}
+    bl efr32_seq_pa_stop
     ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
     movs r1, #EFR32_RAC_RETIME_ENRETIME
     str r1, [r0]
@@ -898,3 +910,217 @@ efr32_seq_synth_stop:
     ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
     str r1, [r0]
     pop {r4, pc}
+
+/*
+ * 6 dBm PA bring-up and ramp-down (SS7.62), in the stock TXWARM/TXPD
+ * handlers' recorded order and waits.  Stock's ramp-down waits on
+ * MODEM.SEQIF.TXRAMPDONE without a bound; bounded here like the other
+ * waits in this file.
+ */
+.equ EFR32_MODEM_BASE,                0xa8014000
+.equ EFR32_MODEM_RAMPCTRL,            (EFR32_MODEM_BASE + 0x0c4)
+.equ EFR32_MODEM_RAMPCTRL_RAMPDIS,    (1 << 23)
+.equ EFR32_MODEM_SEQIF,               (EFR32_MODEM_BASE + 0x24c)
+.equ EFR32_MODEM_SEQIF_TXRAMPDONE,    (1 << 3)
+.equ EFR32_RAC_CMD,                   (EFR32_RAC_BASE + 0x010)
+.equ EFR32_RAC_CMD_PAENSET,           (1 << 12)
+.equ EFR32_RAC_CMD_PAENCLEAR,         (1 << 13)
+.equ EFR32_RAC_PAENCTRL,              (EFR32_RAC_BASE + 0x0b4)
+.equ EFR32_RAC_PAENCTRL_PARAMP,       (1 << 8)
+.equ EFR32_RAC_PAENCTRL_INVRAMPCLK,   (1 << 16)
+.equ EFR32_RAC_APC,                   (EFR32_RAC_BASE + 0x0b8)
+.equ EFR32_RAC_APC_ENAPCSW,           (1 << 2)
+.equ EFR32_RAC_APC_AMPCONTROLLIMITSW_MAX, (0xff << 24)
+.equ EFR32_RAC_LNAMIXEN,              (EFR32_RAC_BASE + 0x108)
+.equ EFR32_RAC_LNAMIXEN_LNAMIXENLDO,  (1 << 0)
+.equ EFR32_RAC_PATRIM3,               (EFR32_RAC_BASE + 0x11c)
+.equ EFR32_RAC_PATRIM3_TX6DBMTRIMREGBLEEDAUTO, (1 << 11)
+.equ EFR32_RAC_PATRIM3_TX6DBMTRIMREGPSR,       (1 << 14)
+.equ EFR32_RAC_PACTRL,                (EFR32_RAC_BASE + 0x120)
+.equ EFR32_RAC_PACTRL_TX6DBMSLICERESET, (1 << 24)
+.equ EFR32_RAC_RFPATHEN,              (EFR32_RAC_BASE + 0x140)
+.equ EFR32_RAC_RFPATHEN_LNAMIXRFATTDCEN, (1 << 2)
+.equ EFR32_RAC_RFPATHEN_LNAMIXTRSW,   (1 << 4)
+.equ EFR32_RAC_RX_LNAMIXLDOLOWCUR,    (1 << 4)
+.equ EFR32_RAC_RX_LNAMIXREGLOADEN,    (1 << 5)
+.equ EFR32_RAC_TX,                    (EFR32_RAC_BASE + 0x148)
+.equ EFR32_RAC_TX_TX0DBMENBLEEDPREDRVREG, (1 << 0)
+.equ EFR32_RAC_TX_TX0DBMENBLEEDREG,   (1 << 1)
+.equ EFR32_RAC_TX_TX0DBMENPREDRV,     (1 << 2)
+.equ EFR32_RAC_TX_TX0DBMENPREDRVREG,  (1 << 3)
+.equ EFR32_RAC_TX_TX0DBMENPREDRVREGBIAS, (1 << 4)
+.equ EFR32_RAC_TX_TX0DBMENBIAS,       (1 << 5)
+.equ EFR32_RAC_TX_TX0DBMENREG,        (1 << 7)
+.equ EFR32_RAC_TX_TX6DBMENBLEEDPREDRVREG, (1 << 16)
+.equ EFR32_RAC_TX_TX6DBMENBLEEDREG,   (1 << 17)
+.equ EFR32_RAC_TX_TX6DBMENPREDRVREG,  (1 << 19)
+.equ EFR32_RAC_TX_TX6DBMENRAMPCLK,    (1 << 22)
+.equ EFR32_RAC_TX_TX6DBMENREG,        (1 << 23)
+.equ EFR32_RAC_TX_TX6DBMENPACORE,     (1 << 24)
+.equ EFR32_RAC_TX_TX6DBMENPAOUT,      (1 << 25)
+.equ EFR32_RAC_TX_ENPAPOWER,          (1 << 30)
+.equ EFR32_RAC_TX_ENPASELSLICE,       (1 << 31)
+.equ EFR32_RAC_TX_BLEED, (EFR32_RAC_TX_TX0DBMENBLEEDPREDRVREG | EFR32_RAC_TX_TX0DBMENBLEEDREG | \
+    EFR32_RAC_TX_TX6DBMENBLEEDPREDRVREG | EFR32_RAC_TX_TX6DBMENBLEEDREG)
+.equ EFR32_RAC_SYLOEN,                (EFR32_RAC_BASE + 0x160)
+.equ EFR32_RAC_SYLOEN_SYLODIVTLO6DBM2G4EN, (1 << 10)
+.equ EFR32_RAC_AGCOVERWRITE,          (EFR32_RAC_BASE + 0x188)
+/* LNA/mixer held at manual maximum attenuation, one slice, while the PA is
+ * on: ENMANLNAMIXRFATT, ENMANLNAMIXSLICE, MANLNAMIXRFATT=63,
+ * MANLNAMIXSLICE=1. */
+.equ EFR32_RAC_AGCOVERWRITE_TX,       ((1 << 0) | (1 << 1) | (0x3f << 4) | (1 << 10))
+.equ EFR32_SEQ_RAMP_WAIT_BOUND,       0x00010000
+
+.ltorg
+
+.thumb_func
+efr32_seq_pa_start:
+    push {r4, lr}
+    ldr r0, =(EFR32_RAC_APC + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_RAC_APC_ENAPCSW | EFR32_RAC_APC_AMPCONTROLLIMITSW_MAX)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_CMD
+    ldr r1, =EFR32_RAC_CMD_PAENSET
+    str r1, [r0]
+    ldr r4, =(EFR32_RAC_TX + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_RAC_TX_ENPAPOWER | EFR32_RAC_TX_ENPASELSLICE)
+    str r1, [r4]
+    ldr r0, =(EFR32_RAC_PAENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PAENCTRL_INVRAMPCLK
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYLOEN
+    ldr r1, =EFR32_RAC_SYLOEN_SYLODIVTLO6DBM2G4EN
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_AGCOVERWRITE
+    ldr r1, =EFR32_RAC_AGCOVERWRITE_TX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_RFPATHEN
+    movs r1, #(EFR32_RAC_RFPATHEN_LNAMIXRFATTDCEN | EFR32_RAC_RFPATHEN_LNAMIXTRSW)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_SET)
+    movs r1, #(EFR32_RAC_RX_LNAMIXLDOLOWCUR | EFR32_RAC_RX_LNAMIXREGLOADEN)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_LNAMIXEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_LNAMIXEN_LNAMIXENLDO
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PATRIM1 + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PATRIM1_TX0DBMTRIMTAPCAP_MASK
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PATRIM3 + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PATRIM3_TX6DBMTRIMREGPSR
+    str r1, [r0]
+    ldr r1, =EFR32_RAC_TX_TX6DBMENREG
+    str r1, [r4]
+    movs r0, #6
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_PACTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PACTRL_TX6DBMSLICERESET
+    str r1, [r0]
+    movs r0, #2
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_PACTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PACTRL_TX6DBMSLICERESET
+    str r1, [r0]
+    ldr r1, =EFR32_RAC_TX_TX6DBMENPREDRVREG
+    str r1, [r4]
+    movs r0, #8
+    bl efr32_seq_delay
+    ldr r1, =EFR32_RAC_TX_TX6DBMENPACORE
+    str r1, [r4]
+    movs r0, #3
+    bl efr32_seq_delay
+    ldr r1, =EFR32_RAC_TX_TX6DBMENPAOUT
+    str r1, [r4]
+    ldr r1, =EFR32_RAC_TX_TX6DBMENRAMPCLK
+    str r1, [r4]
+    movs r0, #1
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_PAENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PAENCTRL_PARAMP
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_TX + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_TX_BLEED
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PATRIM3 + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PATRIM3_TX6DBMTRIMREGBLEEDAUTO
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_APC + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_APC_ENAPCSW
+    str r1, [r0]
+    pop {r4, pc}
+
+.ltorg
+
+.thumb_func
+efr32_seq_pa_stop:
+    push {r4, lr}
+    ldr r0, =(EFR32_RAC_PATRIM3 + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PATRIM3_TX6DBMTRIMREGBLEEDAUTO
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_TX + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_RAC_TX_TX6DBMENBLEEDPREDRVREG | EFR32_RAC_TX_TX6DBMENBLEEDREG | EFR32_RAC_TX_TX6DBMENRAMPCLK)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PAENCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PAENCTRL_PARAMP
+    str r1, [r0]
+    ldr r0, =(EFR32_MODEM_SEQIF + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_MODEM_SEQIF_TXRAMPDONE
+    str r1, [r0]
+    ldr r0, =EFR32_MODEM_RAMPCTRL
+    ldr r0, [r0]
+    ldr r1, =EFR32_MODEM_RAMPCTRL_RAMPDIS
+    tst r0, r1
+    bne 2f
+    ldr r2, =EFR32_SEQ_RAMP_WAIT_BOUND
+    ldr r0, =EFR32_MODEM_SEQIF
+1:  ldr r1, [r0]
+    movs r3, #EFR32_MODEM_SEQIF_TXRAMPDONE
+    tst r1, r3
+    bne 2f
+    subs r2, #1
+    bne 1b
+2:  movs r0, #1
+    bl efr32_seq_delay
+    ldr r4, =(EFR32_RAC_TX + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_TX_TX6DBMENPAOUT
+    str r1, [r4]
+    ldr r1, =EFR32_RAC_TX_TX6DBMENRAMPCLK
+    str r1, [r4]
+    movs r0, #4
+    bl efr32_seq_delay
+    ldr r1, =(EFR32_RAC_TX_TX0DBMENPREDRV | EFR32_RAC_TX_TX0DBMENBIAS | EFR32_RAC_TX_TX6DBMENPACORE)
+    str r1, [r4]
+    movs r0, #1
+    bl efr32_seq_delay
+    ldr r1, =(EFR32_RAC_TX_TX0DBMENPREDRVREG | EFR32_RAC_TX_TX0DBMENPREDRVREGBIAS | \
+        EFR32_RAC_TX_TX0DBMENREG | EFR32_RAC_TX_TX6DBMENPREDRVREG | EFR32_RAC_TX_TX6DBMENREG)
+    str r1, [r4]
+    ldr r1, =(EFR32_RAC_TX_TX6DBMENPACORE | EFR32_RAC_TX_TX6DBMENPAOUT | \
+        EFR32_RAC_TX_ENPAPOWER | EFR32_RAC_TX_ENPASELSLICE)
+    str r1, [r4]
+    ldr r0, =(EFR32_RAC_PAENCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PAENCTRL_INVRAMPCLK
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RFPATHEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RFPATHEN_LNAMIXTRSW
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PATRIM3 + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PATRIM3_TX6DBMTRIMREGPSR
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYLOEN
+    movs r1, #0
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_LNAMIXEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_LNAMIXEN_LNAMIXENLDO
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_CLR)
+    movs r1, #(EFR32_RAC_RX_LNAMIXLDOLOWCUR | EFR32_RAC_RX_LNAMIXREGLOADEN)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_AGCOVERWRITE
+    movs r1, #0
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_CMD
+    ldr r1, =EFR32_RAC_CMD_PAENCLEAR
+    str r1, [r0]
+    pop {r4, pc}
+.ltorg

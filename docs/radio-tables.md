@@ -5331,3 +5331,44 @@ keeps `SYNTH.STATUS`/`LOCNTSTATUS`/`LOCNTTARGET` read-only. New qtest
 `seq-tx-waits-for-synthesizer` fails on the old model; suites 80/80 and
 17/17. Still unmodeled: TX ending in TXPD rather than OFF, the LO
 counter's measured values, and §7.59's extra CMU gates.
+
+### 7.62 TXPD servicing and the 6 dBm PA path ported: **stage 3 transmits on air**
+
+**Stock's TXPD handler [F].** `SEQIF` state events reach the M0+ as
+`IRQn <-> bit n+16` (IRQ8 TXWARM, IRQ9 TX), so `STATETXPD` (bit 26) is
+IRQ10. One stock IRQ10 invocation, traced store-by-store the same way as
+§7.61's IRQ8, mirrors the bring-up: PA ramp-down (`PATRIM3` bleed,
+`RAC.TX` bleed/ramp-clock bits, `PAENCTRL.PARAMP` off, then a wait on
+`MODEM.SEQIF.TXRAMPDONE` -- skipped when `MODEM.RAMPCTRL.RAMPDIS` -- ~1 us,
+`TX6DBMENPAOUT`/`RAMPCLK` off, ~4 us, core/predriver off, ~1 us, regulators
+and `ENPAPOWER`/`ENPASELSLICE` off, `PAENCTRL`/`RFPATHEN`/`PATRIM3`/
+`SYLOEN`/`LNAMIXEN`/`RX`/`AGCOVERWRITE` restored, `RAC.CMD.PAENCLEAR`),
+then synthesizer power-down (`SYNTH.CMD.SYNTHSTOP`, staged `SYEN` clears
+with ~1 us, `RADIOEN` off, `VCDACCTRL` off, `SYNTHENCTRL` clears), then the
+`STATETXPD` ack. The open image never enabled IRQ10, which is why §7.61's
+build parked in TXPD. Stock's IRQ8 also opens with
+`RADIOEN.SET = PREEN|RFBIASEN`, which §7.61 had missed.
+
+**Ported** (`efr32_seq_synth_stop`, `efr32_seq_pa_start`,
+`efr32_seq_pa_stop`; IRQ10 enabled at priority 1 like IRQ8/IRQ9), every
+value named from the public `RAC_S`/`MODEM_S` fields: the 6 dBm PA
+bring-up from §7.61's step 5 (`APC` limit, `PAENSET`, `ENPAPOWER|
+ENPASELSLICE`, `INVRAMPCLK`, `SYLODIVTLO6DBM2G4EN`, LNA/mixer held at
+manual maximum attenuation, regulator -> slice-reset pulse -> predriver ->
+core -> output -> ramp clock with stock's 6/2/8/3/1 us waits, `PARAMP`,
+bleeds off), and the TXPD sequence above with the ramp-done wait bounded.
+Not ported: stock's RAIL bookkeeping in the same handlers (`SR0`/`SR1`
+words, RF mailbox, `PROTIMER` alias writes, `RAC.IF.SEQ`, the
+`FRC.FCD` buffer reselect) -- none is needed for the result below.
+
+**Result [F].** The RAC now cycles TXWARM -> TX -> TXPD -> OFF every
+event; VCO calibration lands on `0x8335`, stock's own value. On air, with
+a control in the same boot: the board's identity (read from `bt_dev`
+without halting) was `EE:55:E1:6A:AF:47`; a 15 s `bluetoothctl scan le`
+saw it at **-36 dBm** while running and **zero times** with the M33
+halted. An earlier boot's identity, `FC:F5:7F:1E:F0:B4`, was likewise
+seen at -38 dBm. **The all-open stage-3 configuration -- open M33 driver,
+open M0+ sequencer -- transmits real BLE advertisements.** Not yet
+checked: receive (scan requests/connections), the remaining advertising
+channels' calibration values, and whether the synth-only build of §7.61
+radiated anything without the PA.
