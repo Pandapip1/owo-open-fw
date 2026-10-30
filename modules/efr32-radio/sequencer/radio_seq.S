@@ -69,6 +69,11 @@
 /* SEQIF.STATETXPD (bit 26) arrives on IRQ10 (IRQn <-> SEQIF bit n+16, the
  * same mapping as TXWARM/TX), SS7.62. */
 .equ EFR32_RAC_IRQ_TXPD,              (1 << 10)
+/* RX side, same mapping (SS7.63): RXWARM 1, RXSEARCH 2, RXFRAME 3, RXPD 4,
+ * RX2TX 7, TX2RX 11. */
+.equ EFR32_RAC_IRQ_RX_STATES, ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 7) | (1 << 11))
+.equ EFR32_EXCEPTION_RXPD,            (16 + 4)
+.equ EFR32_EXCEPTION_TX2RX,           (16 + 11)
 .equ EFR32_EXCEPTION_TXWARM,          (16 + 8)
 .equ EFR32_EXCEPTION_TX,              (16 + 9)
 .equ EFR32_EXCEPTION_TXPD,            (16 + 10)
@@ -293,7 +298,7 @@ efr32_radio_seq_reset:
      * state-service entries.  Enable only those bounded peripheral events;
      * the M33 scheduler remains the sole source of radio-job policy. */
     ldr r0, =EFR32_NVIC_ISER0
-    ldr r1, =(EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX | EFR32_RAC_IRQ_TXPD)
+    ldr r1, =(EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX | EFR32_RAC_IRQ_TXPD | EFR32_RAC_IRQ_RX_STATES)
     str r1, [r0]
 
     cpsie i
@@ -310,8 +315,21 @@ efr32_radio_seq_exception:
     mrs r3, ipsr
     cmp r3, #EFR32_EXCEPTION_TXWARM
     beq 1f
+    cmp r3, #EFR32_EXCEPTION_TX2RX
+    bne 16f
+    /* TX->RX turnaround (SS7.63): retune and bring the receiver up, then
+     * let the common tail acknowledge STATETX2RX. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_rx_turnaround
+    pop {r0}
+    mov lr, r0
+    b 2f
+16: cmp r3, #EFR32_EXCEPTION_RXPD
+    beq 17f
     cmp r3, #EFR32_EXCEPTION_TXPD
     bne 15f
+17:
     /* TX power-down: stop the synthesizer as stock's IRQ10 does, then let
      * the common tail acknowledge STATETXPD so the RAC can reach OFF. */
     mov r0, lr
@@ -803,6 +821,21 @@ efr32_seq_synth_start:
     ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
     ldr r1, =EFR32_RAC_SYEN_SYLODIVEN
     str r1, [r0]
+    bl efr32_seq_synth_lock
+    cmp r0, #0
+    bne 9f
+    bl efr32_seq_pa_start
+9:  pop {r4, pc}
+
+.ltorg
+
+/* Second half of stock's synthesizer start, shared by the TX warm-up and
+ * the TX->RX retune: VCDAC/loop filter on, VCO calibration, SYNTHSTART.
+ * Returns r0 = 0 when started, nonzero when the calibration aborted.
+ * Clobbers r0-r3. */
+.thumb_func
+efr32_seq_synth_lock:
+    push {r4, lr}
     ldr r0, =(EFR32_SYNTH_VCDACCTRL + EFR32_ALIAS_SET)
     ldr r1, =(EFR32_SYNTH_VCDACCTRL_VCDACEN | EFR32_SYNTH_VCDACCTRL_LPFEN | EFR32_SYNTH_VCDACCTRL_LPFQSEN)
     str r1, [r0]
@@ -827,7 +860,7 @@ efr32_seq_synth_start:
     ldr r1, =EFR32_SEQ_TRACE_SYNTH_TUNING
     str r0, [r1]
     adds r0, #1            /* EFR32_SEQ_SYNTH_CAL_ABORTED + 1 == 0 */
-    beq 9f
+    beq 8f
     ldr r0, =EFR32_SYNTH_CMD
     movs r1, #EFR32_SYNTH_CMD_SYNTHSTART
     str r1, [r0]
@@ -849,8 +882,10 @@ efr32_seq_synth_start:
     ldr r0, =EFR32_RAC_SYTRIM1
     ldr r1, =EFR32_RAC_SYTRIM1_RUNNING
     str r1, [r0]
-    bl efr32_seq_pa_start
-9:  pop {r4, pc}
+    movs r0, #0
+    pop {r4, pc}
+8:  movs r0, #1
+    pop {r4, pc}
 
 /* Powers the synthesizer down in stock's TXPD order (SS7.62).  Clobbers
  * r0-r3. */
@@ -1122,5 +1157,293 @@ efr32_seq_pa_stop:
     ldr r0, =EFR32_RAC_CMD
     ldr r1, =EFR32_RAC_CMD_PAENCLEAR
     str r1, [r0]
+    pop {r4, pc}
+.ltorg
+
+/*
+ * TX->RX turnaround, in stock IRQ11's recorded order (SS7.63): PA down, keep
+ * the RX request asserted, retune the running synthesizer for RX, power the
+ * receive chain, then calibrate the IF PGA's DC offset.
+ */
+.equ EFR32_RAC_RXENSRCEN,              (EFR32_RAC_BASE + 0x008)
+.equ EFR32_RAC_RXENSRCEN_SWRXEN,       (1 << 1)
+.equ EFR32_SYNTH_CMD_ENABLEIF,         (1 << 2)
+.equ EFR32_SYNTH_VCORANGE_RX,          ((1 << 3) | (3 << 6)) /* HIGHTHRESH=1, LOWTHRESH=3 */
+.equ EFR32_RAC_SYMMDCTRL_RX,           (4 << 9) /* SYMMDMODE=4 */
+.equ EFR32_RAC_RX_IFADCCAPRESET,       (1 << 0)
+.equ EFR32_RAC_RX_IFADCENLDOSERIES,    (1 << 1)
+.equ EFR32_RAC_RX_IFADCENLDOSHUNT,     (1 << 2)
+.equ EFR32_RAC_RX_PGAENLDO,            (1 << 6)
+.equ EFR32_RAC_RX_SYPFDCHPLPEN,        (1 << 9)
+.equ EFR32_RAC_RX_SYPFDFPWEN,          (1 << 10)
+.equ EFR32_RAC_SYTRIM0_RX,             (EFR32_RAC_SYTRIM0_TX | (1 << 0)) /* + SYCHPBIAS=1 */
+.equ EFR32_RAC_SYLOEN_RX, ((1 << 0) | (1 << 1)) /* SYLODIVRLOADCCLK2G4EN, SYLODIVRLO2G4EN */
+.equ EFR32_RAC_SYTRIM1_SYLODIVRLOADCCLKSEL, (1 << 17)
+.equ EFR32_RAC_CMD_LNAENSET,           (1 << 14)
+.equ EFR32_RAC_IFADCDBG,               (EFR32_RAC_BASE + 0x0e0)
+/* IFADCENADC, IFADCENREFBUF, IFADCENSIDETONE, IFADCINVERTCLK; then IFADCENCLK. */
+.equ EFR32_RAC_IFADCDBG_RX_POWER,      ((1 << 0) | (1 << 2) | (1 << 3) | (1 << 4))
+.equ EFR32_RAC_IFADCDBG_IFADCENCLK,    (1 << 1)
+.equ EFR32_RAC_RFPATHEN_LNAMIXEN,      (1 << 1)
+.equ EFR32_RAC_PGACTRL,                (EFR32_RAC_BASE + 0x130)
+/* PGAENBIAS, PGAENGHZ, PGAENPGAI, PGAENPGAQ, PGAENPKD, PGAENRCMOUT, PGAENSUBG. */
+.equ EFR32_RAC_PGACTRL_RX_ENABLES, ((1 << 2) | (1 << 3) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13))
+.equ EFR32_SEQ_RX_LDO_SETTLE_US,       7
+
+.thumb_func
+efr32_seq_rx_turnaround:
+    push {r4, lr}
+    bl efr32_seq_pa_stop
+    ldr r0, =(EFR32_RAC_RXENSRCEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_RXENSRCEN_SWRXEN
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_VCORANGE
+    ldr r1, =EFR32_SYNTH_VCORANGE_RX
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #(EFR32_SYNTH_CMD_SYNTHSTOP | EFR32_SYNTH_CMD_ENABLEIF)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_LPFBWSEL
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYMMDCTRL
+    ldr r1, =EFR32_RAC_SYMMDCTRL_RX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_RAC_RX_SYPFDCHPLPEN | EFR32_RAC_RX_SYPFDFPWEN)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_SYEN_SYCHPLPEN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_CHPCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_CHPCTRL_CHPOUTPUTTRISTATEMODE
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM0
+    ldr r1, =EFR32_RAC_SYTRIM0_RX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_VCOCTRL
+    movs r1, #EFR32_RAC_VCOCTRL_TX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_ENRETIME
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM1
+    ldr r1, =EFR32_RAC_SYTRIM1_STARTUP
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
+    str r1, [r0]
+    bl efr32_seq_synth_lock
+    cmp r0, #0
+    bne 9f
+
+    ldr r0, =(EFR32_RAC_SYLOEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_SYLOEN_RX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYTRIM1 + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYTRIM1_SYLODIVRLOADCCLKSEL
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_CMD
+    ldr r1, =EFR32_RAC_CMD_LNAENSET
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_LNAMIXEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_LNAMIXEN_LNAMIXENLDO
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RX_IFADCCAPRESET
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_IFADCDBG + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_IFADCDBG_RX_POWER
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RX + EFR32_ALIAS_SET)
+    movs r1, #(EFR32_RAC_RX_IFADCENLDOSERIES | EFR32_RAC_RX_IFADCENLDOSHUNT | EFR32_RAC_RX_LNAMIXLDOLOWCUR | EFR32_RAC_RX_PGAENLDO)
+    str r1, [r0]
+    movs r0, #EFR32_SEQ_RX_LDO_SETTLE_US
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_IFADCDBG + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_IFADCDBG_IFADCENCLK
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RFPATHEN + EFR32_ALIAS_SET)
+    movs r1, #(EFR32_RAC_RFPATHEN_LNAMIXEN | EFR32_RAC_RFPATHEN_LNAMIXRFATTDCEN)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PGACTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_PGACTRL_RX_ENABLES
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYCAL + EFR32_ALIAS_CLR)
+    ldr r1, =(EFR32_RAC_SYCAL_SYVCOMORECURRENT | EFR32_RAC_SYCAL_SYVCOSLOWNOISEFILTER)
+    str r1, [r0]
+    bl efr32_seq_pga_dc_cal
+9:  pop {r4, pc}
+
+.ltorg
+
+/*
+ * IF PGA DC-offset calibration (stock fn_0x21e8, SS7.63): with the LNA
+ * isolated, measure MODEM.DCESTI at two opposite PGAOFF settings, interpolate
+ * each of I and Q to the zero-offset P code, and set each N code to its
+ * 6-bit two's complement.
+ */
+.equ EFR32_AGC_CTRL0,                  0xa800c020
+.equ EFR32_AGC_CTRL0_ADCATTENCODE_MASK, (3 << 25)
+/* ENMANLNAMIXRFATT, ENMANLNAMIXSLICE, ENMANPGAGAIN, MANLNAMIXRFATT=63,
+ * MANLNAMIXSLICE=5 -- and the mask stock clears afterwards (all manual
+ * enables and the three manual value fields). */
+.equ EFR32_RAC_AGCOVERWRITE_DCCAL,     ((1 << 0) | (1 << 1) | (1 << 2) | (0x3f << 4) | (5 << 10))
+.equ EFR32_RAC_AGCOVERWRITE_DCCAL_RELEASE, ((1 << 0) | (1 << 1) | (1 << 2) | (0x3f << 4) | (0x3f << 10) | (0xf << 20))
+.equ EFR32_RAC_IFPGACTRL,              (EFR32_RAC_BASE + 0x0b0)
+.equ EFR32_RAC_IFPGACTRL_DCCALON,      (1 << 19)
+.equ EFR32_RAC_IFPGACTRL_DCRSTEN,      (1 << 20)
+.equ EFR32_RAC_IFPGACTRL_DCESTIEN,     (1 << 21)
+.equ EFR32_RAC_IFPGACTRL_DCCALDEC0_MASK,  (7 << 22)
+.equ EFR32_RAC_IFPGACTRL_DCCALDCGEAR_MASK, (7 << 25)
+.equ EFR32_RAC_PGACAL,                 (EFR32_RAC_BASE + 0x12c)
+/* Fields PGAOFFNCALI[5:0], NCALQ[13:8], PCALI[21:16], PCALQ[29:24]. */
+.equ EFR32_RAC_PGACAL_POINT_A,         0x30301010 /* P=48, N=16 */
+.equ EFR32_RAC_PGACAL_POINT_B,         0x10103030 /* P=16, N=48 */
+.equ EFR32_RAC_PGACAL_MIDSCALE,        0x20202020
+.equ EFR32_RAC_PGACAL_CODE_MASK,       0x3f
+.equ EFR32_RAC_PGACAL_N_FIELDS,        0x3f3f
+.equ EFR32_RAC_PGACAL_N_NEGATE_ONE,    0x0101 /* +1 in each N field */
+.equ EFR32_MODEM_DCCOMP,               (EFR32_MODEM_BASE + 0x0e0)
+.equ EFR32_MODEM_DCCOMP_DCCOMPFREEZE,  (1 << 3)
+.equ EFR32_MODEM_DCESTI,               (EFR32_MODEM_BASE + 0x0e8)
+.equ EFR32_MODEM_DCESTI_Q_SHIFT,       15
+.equ EFR32_SEQ_DCCAL_ISOLATE_US,       16
+.equ EFR32_SEQ_DCCAL_SETTLE_US,        8
+.equ EFR32_SEQ_DCCAL_FREEZE_US,        1
+
+.thumb_func
+efr32_seq_pga_dc_measure:
+    /* r0 = PGACAL setting; returns MODEM.DCESTI in r0.  Clobbers r0-r3. */
+    push {lr}
+    ldr r1, =EFR32_RAC_PGACAL
+    str r0, [r1]
+    ldr r0, =(EFR32_RAC_IFPGACTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_IFPGACTRL_DCRSTEN
+    str r1, [r0]
+    movs r0, #EFR32_SEQ_DCCAL_SETTLE_US
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_MODEM_DCCOMP + EFR32_ALIAS_SET)
+    movs r1, #EFR32_MODEM_DCCOMP_DCCOMPFREEZE
+    str r1, [r0]
+    movs r0, #EFR32_SEQ_DCCAL_FREEZE_US
+    bl efr32_seq_delay
+    ldr r0, =EFR32_MODEM_DCESTI
+    ldr r2, [r0]
+    ldr r0, =(EFR32_MODEM_DCCOMP + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_MODEM_DCCOMP_DCCOMPFREEZE
+    str r1, [r0]
+    mov r0, r2
+    pop {pc}
+
+.thumb_func
+efr32_seq_pga_dc_cal:
+    push {r4-r7, lr}
+    ldr r0, =(EFR32_AGC_CTRL0 + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_AGC_CTRL0_ADCATTENCODE_MASK
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_AGCOVERWRITE
+    ldr r1, =EFR32_RAC_AGCOVERWRITE_DCCAL
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RFPATHEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_RFPATHEN_LNAMIXTRSW
+    str r1, [r0]
+    movs r0, #EFR32_SEQ_DCCAL_ISOLATE_US
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_IFPGACTRL + EFR32_ALIAS_CLR)
+    ldr r1, =(EFR32_RAC_IFPGACTRL_DCRSTEN | EFR32_RAC_IFPGACTRL_DCESTIEN | EFR32_RAC_IFPGACTRL_DCCALDEC0_MASK | EFR32_RAC_IFPGACTRL_DCCALDCGEAR_MASK)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_IFPGACTRL + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_RAC_IFPGACTRL_DCCALON | EFR32_RAC_IFPGACTRL_DCRSTEN | EFR32_RAC_IFPGACTRL_DCESTIEN | EFR32_RAC_IFPGACTRL_DCCALDCGEAR_MASK)
+    str r1, [r0]
+    ldr r0, =EFR32_MODEM_DCCOMP
+    ldr r7, [r0]                     /* restored afterwards */
+    ldr r0, =EFR32_RAC_PGACAL_POINT_A
+    bl efr32_seq_pga_dc_measure
+    mov r4, r0                       /* estimate at point A */
+    ldr r0, =EFR32_RAC_PGACAL_POINT_B
+    bl efr32_seq_pga_dc_measure
+    mov r5, r0                       /* estimate at point B */
+    ldr r0, =EFR32_RAC_PGACAL
+    ldr r1, =EFR32_RAC_PGACAL_MIDSCALE
+    str r1, [r0]
+    mov r0, r5
+    mov r1, r4
+    bl efr32_seq_pga_dc_interp       /* I channel */
+    movs r1, #EFR32_RAC_PGACAL_CODE_MASK
+    ands r0, r1
+    lsls r6, r0, #16                 /* PGAOFFPCALI */
+    lsrs r0, r5, #EFR32_MODEM_DCESTI_Q_SHIFT
+    lsrs r1, r4, #EFR32_MODEM_DCESTI_Q_SHIFT
+    bl efr32_seq_pga_dc_interp       /* Q channel */
+    movs r1, #EFR32_RAC_PGACAL_CODE_MASK
+    ands r0, r1
+    lsls r0, r0, #24                 /* PGAOFFPCALQ */
+    orrs r6, r0
+    lsrs r0, r6, #16                 /* P codes moved to the N positions */
+    ldr r1, =EFR32_RAC_PGACAL_N_FIELDS
+    eors r0, r1
+    ldr r2, =EFR32_RAC_PGACAL_N_NEGATE_ONE
+    adds r0, r0, r2                  /* N = -P, per 6-bit field */
+    ands r0, r1
+    orrs r0, r6
+    ldr r1, =EFR32_RAC_PGACAL
+    str r0, [r1]
+    ldr r0, =EFR32_MODEM_DCCOMP
+    str r7, [r0]
+    ldr r0, =(EFR32_RAC_IFPGACTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_IFPGACTRL_DCCALON
+    str r1, [r0]
+    ldr r0, =EFR32_MODEM_DCCOMP
+    ldr r1, [r0]
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RFPATHEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RFPATHEN_LNAMIXTRSW
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_AGCOVERWRITE + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_AGCOVERWRITE_DCCAL_RELEASE
+    str r1, [r0]
+    pop {r4-r7, pc}
+
+/*
+ * Stock fn_0x2308, lifted: r0 = DC estimate at point B, r1 = at point A, each
+ * a signed 15-bit value in bits [14:0].  Returns the 6-bit P code at which
+ * the linear interpolation between the two crosses zero.
+ */
+.equ EFR32_SEQ_DCEST_SEXT_UP,          17 /* bit 14 to bit 31 */
+.equ EFR32_SEQ_DCEST_SEXT_DOWN,        3  /* keep 14 fractional bits */
+.equ EFR32_SEQ_DCCAL_TOP_CODE_BIT,     32
+
+.thumb_func
+efr32_seq_pga_dc_interp:
+    push {r4, lr}
+    lsls r1, r1, #EFR32_SEQ_DCEST_SEXT_UP
+    asrs r2, r1, #EFR32_SEQ_DCEST_SEXT_DOWN   /* a */
+    lsls r0, r0, #EFR32_SEQ_DCEST_SEXT_UP
+    asrs r3, r0, #EFR32_SEQ_DCEST_SEXT_DOWN   /* b */
+    subs r1, r3, r2                           /* step = b - a */
+    movs r0, #0
+    adds r2, r3, r2
+    lsrs r3, r2, #31
+    adds r2, r3, r2
+    asrs r2, r2, #1                           /* (a + b) / 2, toward zero */
+    adds r2, r2, r1
+    asrs r3, r1, #6
+    lsrs r3, r3, #25
+    adds r3, r3, r1
+    asrs r3, r3, #7                           /* step / 128, toward zero */
+    adds r2, r2, r3
+    movs r3, #EFR32_SEQ_DCCAL_TOP_CODE_BIT
+1:  subs r4, r2, r1
+    bmi 2f
+    mov r2, r4
+    orrs r0, r3
+2:  lsrs r4, r1, #31
+    adds r1, r4, r1
+    asrs r1, r1, #1                           /* step / 2, toward zero */
+    lsrs r3, r3, #1
+    bne 1b
     pop {r4, pc}
 .ltorg
