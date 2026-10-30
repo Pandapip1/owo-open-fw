@@ -5257,3 +5257,67 @@ uncontrolled. Next: port stock's M0+ synthesizer power-up and VCO
 calibration into `radio_seq.S`'s TX warm-up, with every value derived
 from public field names, then verify `INLOCK=1` and an over-the-air
 scan.
+
+### 7.61 Ported stock's TXWARM synthesizer power-up and VCO calibration into `radio_seq.S`: the PLL now locks and `FRC` sends the whole frame on real hardware
+
+**How stock does it [F].** AP3 watchpoints on `RAC.SYEN`'s SET/CLR
+aliases (with the M0+ target examined only after `EMU.CTRL.EM2DBGEN` is
+set from the M33, so the debug link survives EM2) land in stock's IRQ8
+handler. `trace_stores.py` then single-stepped one complete stock IRQ8
+invocation (1656 steps, ending in the `SEQIF.STATETXWARM` ack) and
+recorded 149 MMIO stores. Every one decodes to public `RAC_S`/`SYNTH_S`/
+`FRC_S` field names except the RF mailbox and two `PROTIMER` alias
+writes. The handler is the whole analog TX bring-up, in order:
+
+1. retime/MMD resets, `SYCAL` clear, `VCORANGE` thresholds,
+   `SYNTH.CMD` = `SYNTHSTOP|DISABLEIF`, `SYNTHENCTRL.LPFBWSEL`,
+   `SYMMDCTRL.SYMMDMODE=2`, `RX.SYCHPBIASTRIMBUF`, `CHPCTRL` tristate
+   mode, `SYTRIM0`/`SYTRIM1`/`VCOCTRL` trims (each a named field set);
+2. `SYNTHSTARTREQ`, staged `SYEN` power-up (charge pump/MMD/VCO bias,
+   then VCO PFET, then VCO regulator and LO-divider LDO, then LO divider)
+   with ~1/2/2 us waits, `RADIOEN.PRESTB100UDIS`, `CHPLDOVREFTRIM=2`,
+   `VCOSTARTUP` pulse, `VCDACCTRL` enables, ~4 us;
+3. `VCORANGE.LOAD|THROUGH`, `SYNTH.CMD.CAPCALSTART`, `LOCNTCTRL.ENABLE`,
+   then an 11-bit successive-approximation search of
+   `VCOTUNING.VCOTUNING` (`VCAPSEL` fixed at 16): per trial bit it ORs in
+   a few low bits, programs `LOCNTCTRL.NUMCYCLE` (2..5, finer bits count
+   longer), runs the LO counter, and keeps the bit when
+   `LOCNTSTATUS.LOCOUNT` exceeds `LOCNTTARGET.TARGET`. `LOCNTTARGET` is
+   **read-only** in the public model -- hardware derives it from the
+   programmed channel, which is why it read `0` on stage 3 (never
+   enabled) and differs per channel on stock. Each measurement is bounded
+   to 2047 `BUSY` polls, and `RAC.CTRL.FORCEDISABLE` aborts the search;
+   an aborted search skips the start;
+4. `SYNTH.CMD.SYNTHSTART`, counter off, `VCDACEN`/`LPFQSEN` off,
+   `VCORANGE` override off, `SYTRIM1.SYLODIVLDOTRIMNDIO` 3 -> 1;
+5. then the PA bring-up (`RAC.CMD.PAENSET`, `RAC.TX` enables,
+   `PAENCTRL`, `PACTRL` slice-reset pulse, `PARAMP`, timed ramp) -- **not
+   yet ported**;
+6. the `STATETXWARM` ack already in `radio_seq.S`.
+
+The waits use stock's busy-wait helper (`fn_0x21d8`, already
+decompiled): `n * 195 - 111`, minus 30 per pass. Stock skips the
+calibration only when `RAC.SR3` bit 6 is set or a per-channel cached
+result exists; neither is reproduced (bit 6 is clear on both stacks, and
+the cache is an optimisation).
+
+**Ported (steps 1-4)** as `efr32_seq_synth_start` /
+`efr32_seq_vco_calibrate`, called from the TXWARM path just before the
+ack, with every value written as named public fields and the two per-bit
+schedule columns read off the hardware trace (not the blob). The
+calibration result goes to diagnostic word `0x4FBC`.
+
+**Result on real hardware (fresh HEAD stage-3 build) [F]:** sampled
+non-intrusively while advertising, `SYNTH.STATUS` now reads `0x4000005`/
+`0x4010005` (**`INLOCK=1`**, matching stock in TX), the calibration
+converges to `VCOTUNING=0x8338` (stock: `0x8335` on its channel) against
+a hardware `LOCNTTARGET=0xFA3`, `FRC.STATUS=0x20` (`ACTIVETXFCD`), and
+`BUFC` TX read = write = 11 (the whole frame). The RAC now passes
+TXWARM -> TX -> **TXPD** and then sits in TXPD (state 10) for 99% of
+samples: the stall that held every previous section in TX is gone. QEMU:
+`efr32bg22-test` 79/79 and `efr32bg22-rf-test` 17/17 pass.
+
+**Not yet on air**, for two now-specific reasons: the PA bring-up (step 5)
+is not ported, so nothing drives the antenna; and nothing on the open
+M0+ services the TX power-down transition, so the RAC parks in TXPD
+instead of returning to OFF for the next event. Both are next.

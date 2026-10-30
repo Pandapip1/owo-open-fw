@@ -436,7 +436,16 @@ efr32_radio_seq_exception:
      * which re-executes `str r0, [CLR]` each time around before
      * re-reading SEQIF. A single write that doesn't fully stick (a
      * plausible race on real silicon) would otherwise leave this bounded
-     * loop spinning uselessly to its timeout instead of self-correcting. */
+     * loop spinning uselessly to its timeout instead of self-correcting.
+     *
+     * Before acknowledging, power the TX synthesizer up and start it, as
+     * stock's TXWARM handler does at this same point (SS7.60/SS7.61).  lr
+     * holds EXC_RETURN, so keep it across the call. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_synth_start
+    pop {r0}
+    mov lr, r0
     ldr r3, =EFR32_RAC_TXWARM_WAIT_BOUND
 11: ldr r0, =EFR32_RAC_SEQIF_CLEAR
     ldr r1, =EFR32_RAC_SEQIF_TXWARM_ACK_MASK
@@ -463,3 +472,351 @@ efr32_radio_seq_exception:
     ldr r0, =EFR32_RAC_SEQIF_CLEAR
     str r1, [r0]
     bx lr
+
+/*
+ * TX synthesizer power-up and VCO calibration (docs/radio-tables.md SS7.60,
+ * SS7.61).  Without this the RAC reaches TX with every synthesizer analog
+ * block off and the VCO never started, and FRC stalls after parsing the
+ * header (ACTIVETXFCD never sets).  The order, values and waits below are
+ * the stock TXWARM handler's own, recorded store-by-store on hardware with
+ * tests/hardware-lockstep/trace_stores.py and decoded against the public
+ * RAC_S/SYNTH_S field models; every value is expressed in those fields.
+ */
+.equ EFR32_RAC_BASE,                  0xa8020000
+.equ EFR32_SYNTH_BASE,                0xa8018000
+.equ EFR32_ALIAS_SET,                 0x1000
+.equ EFR32_ALIAS_CLR,                 0x2000
+
+.equ EFR32_RAC_CTRL,                  (EFR32_RAC_BASE + 0x014)
+.equ EFR32_RAC_CTRL_FORCEDISABLE,     (1 << 0)
+.equ EFR32_RAC_SYNTHENCTRL,           (EFR32_RAC_BASE + 0x094)
+.equ EFR32_RAC_SYNTHENCTRL_VCOSTARTUP,    (1 << 1)
+.equ EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ, (1 << 9)
+.equ EFR32_RAC_SYNTHENCTRL_LPFBWSEL,      (1 << 20)
+.equ EFR32_RAC_SYNTHREGCTRL,          (EFR32_RAC_BASE + 0x098)
+.equ EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_SHIFT, 24
+.equ EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_MASK,  (7 << EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_SHIFT)
+.equ EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_TX,    (2 << EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_SHIFT)
+.equ EFR32_RAC_VCOCTRL,               (EFR32_RAC_BASE + 0x09c)
+.equ EFR32_RAC_VCOCTRL_TX,            ((0xc << 0) | (4 << 4)) /* VCOAMPLITUDE=12, VCODETAMPLITUDE=4 */
+.equ EFR32_RAC_CHPCTRL,               (EFR32_RAC_BASE + 0x0a0)
+.equ EFR32_RAC_CHPCTRL_CHPOUTPUTTRISTATEMODE, (1 << 14)
+.equ EFR32_RAC_PATRIM1,               (EFR32_RAC_BASE + 0x114)
+.equ EFR32_RAC_PATRIM1_TX0DBMTRIMTAPCAP_MASK, (7 << 16)
+.equ EFR32_RAC_RADIOEN,               (EFR32_RAC_BASE + 0x13c)
+.equ EFR32_RAC_RADIOEN_PRESTB100UDIS, (1 << 1)
+.equ EFR32_RAC_RX,                    (EFR32_RAC_BASE + 0x144)
+.equ EFR32_RAC_RX_SYCHPBIASTRIMBUF,   (1 << 7)
+.equ EFR32_RAC_SYTRIM0,               (EFR32_RAC_BASE + 0x150)
+/* SYCHPCURR=5, SYCHPLEVPSRC=7, SYCHPSRCEN=1, SYCHPREPLICACURRADJ=1,
+ * SYTRIMCHPREGAMPBIAS=3. */
+.equ EFR32_RAC_SYTRIM0_TX,            ((5 << 3) | (7 << 9) | (1 << 13) | (1 << 14) | (3 << 17))
+.equ EFR32_RAC_SYTRIM1,               (EFR32_RAC_BASE + 0x154)
+/* SYMMDREPLICA1CURRADJ=7, SYMMDREPLICA2CURRADJ=7, SYTRIMMMDREGAMPBIAS=3;
+ * SYLODIVLDOTRIMNDIO is 3 while starting and 1 once the synthesizer runs. */
+.equ EFR32_RAC_SYTRIM1_COMMON,        ((7 << 6) | (7 << 9) | (3 << 12))
+.equ EFR32_RAC_SYTRIM1_STARTUP,       (EFR32_RAC_SYTRIM1_COMMON | (3 << 2))
+.equ EFR32_RAC_SYTRIM1_RUNNING,       (EFR32_RAC_SYTRIM1_COMMON | (1 << 2))
+.equ EFR32_RAC_SYCAL,                 (EFR32_RAC_BASE + 0x158)
+.equ EFR32_RAC_SYCAL_SYVCOMORECURRENT,     (1 << 9)
+.equ EFR32_RAC_SYCAL_SYVCOSLOWNOISEFILTER, (1 << 10)
+.equ EFR32_RAC_SYEN,                  (EFR32_RAC_BASE + 0x15c)
+.equ EFR32_RAC_SYEN_SYCHPEN,          (1 << 0)
+.equ EFR32_RAC_SYEN_SYCHPLPEN,        (1 << 1)
+.equ EFR32_RAC_SYEN_SYENCHPREG,       (1 << 2)
+.equ EFR32_RAC_SYEN_SYENCHPREPLICA,   (1 << 3)
+.equ EFR32_RAC_SYEN_SYENMMDREG,       (1 << 4)
+.equ EFR32_RAC_SYEN_SYENMMDREPLICA1,  (1 << 5)
+.equ EFR32_RAC_SYEN_SYENVCOBIAS,      (1 << 7)
+.equ EFR32_RAC_SYEN_SYENVCOPFET,      (1 << 8)
+.equ EFR32_RAC_SYEN_SYENVCOREG,       (1 << 9)
+.equ EFR32_RAC_SYEN_SYLODIVEN,        (1 << 10)
+.equ EFR32_RAC_SYEN_SYLODIVLDOBIASEN, (1 << 11)
+.equ EFR32_RAC_SYEN_SYLODIVLDOEN,     (1 << 12)
+.equ EFR32_RAC_SYEN_STAGE1, (EFR32_RAC_SYEN_SYCHPEN | EFR32_RAC_SYEN_SYENCHPREG | \
+    EFR32_RAC_SYEN_SYENCHPREPLICA | EFR32_RAC_SYEN_SYENMMDREG | \
+    EFR32_RAC_SYEN_SYENMMDREPLICA1 | EFR32_RAC_SYEN_SYENVCOBIAS | \
+    EFR32_RAC_SYEN_SYLODIVLDOBIASEN)
+.equ EFR32_RAC_SYEN_STAGE3, (EFR32_RAC_SYEN_SYENVCOREG | EFR32_RAC_SYEN_SYLODIVLDOEN)
+.equ EFR32_RAC_SYMMDCTRL,             (EFR32_RAC_BASE + 0x168)
+.equ EFR32_RAC_SYMMDCTRL_SYMMDENRSDIG, (1 << 0)
+.equ EFR32_RAC_SYMMDCTRL_TX,          (2 << 9) /* SYMMDMODE=2 */
+.equ EFR32_RAC_DIGCLKRETIMECTRL,      (EFR32_RAC_BASE + 0x16c)
+.equ EFR32_RAC_XORETIMECTRL,          (EFR32_RAC_BASE + 0x174)
+.equ EFR32_RAC_RETIME_ENRETIME,       (1 << 0) /* same position in both RETIMECTRLs */
+.equ EFR32_RAC_RETIME_RESETN,         (1 << 2)
+
+.equ EFR32_SYNTH_VCDACCTRL,           (EFR32_SYNTH_BASE + 0x02c)
+.equ EFR32_SYNTH_VCDACCTRL_VCDACEN,   (1 << 6)
+.equ EFR32_SYNTH_VCDACCTRL_LPFEN,     (1 << 7)
+.equ EFR32_SYNTH_VCDACCTRL_LPFQSEN,   (1 << 8)
+.equ EFR32_SYNTH_CMD,                 (EFR32_SYNTH_BASE + 0x00c)
+.equ EFR32_SYNTH_CMD_SYNTHSTART,      (1 << 0)
+.equ EFR32_SYNTH_CMD_SYNTHSTOP,       (1 << 1)
+.equ EFR32_SYNTH_CMD_DISABLEIF,       (1 << 3)
+.equ EFR32_SYNTH_CMD_CAPCALSTART,     (1 << 4)
+.equ EFR32_SYNTH_VCOTUNING,           (EFR32_SYNTH_BASE + 0x04c)
+.equ EFR32_SYNTH_VCOTUNING_VCAPSEL_TX, (0x10 << 11)
+.equ EFR32_SYNTH_VCOTUNING_TOP_BIT,   10 /* VCOTUNING is 11 bits wide */
+.equ EFR32_SYNTH_VCORANGE,            (EFR32_SYNTH_BASE + 0x054)
+.equ EFR32_SYNTH_VCORANGE_TX,         ((3 << 3) | (5 << 6)) /* HIGHTHRESH=3, LOWTHRESH=5 */
+.equ EFR32_SYNTH_VCORANGE_LOAD,       (1 << 11)
+.equ EFR32_SYNTH_VCORANGE_THROUGH,    (1 << 18)
+.equ EFR32_SYNTH_LOCNTCTRL,           (EFR32_SYNTH_BASE + 0x088)
+.equ EFR32_SYNTH_LOCNTCTRL_ENABLE,    (1 << 0)
+.equ EFR32_SYNTH_LOCNTCTRL_CLEAR,     (1 << 1)
+.equ EFR32_SYNTH_LOCNTCTRL_RUN,       (1 << 2)
+.equ EFR32_SYNTH_LOCNTCTRL_READ,      (1 << 3)
+.equ EFR32_SYNTH_LOCNTCTRL_NUMCYCLE_SHIFT, 4
+.equ EFR32_SYNTH_LOCNTCTRL_NUMCYCLE_MASK,  (0xf << EFR32_SYNTH_LOCNTCTRL_NUMCYCLE_SHIFT)
+.equ EFR32_SYNTH_LOCNTSTATUS,         (EFR32_SYNTH_BASE + 0x08c)
+.equ EFR32_SYNTH_LOCNTSTATUS_LOCOUNT_MASK, 0x0007ffff
+.equ EFR32_SYNTH_LOCNTSTATUS_BUSY,    (1 << 19)
+.equ EFR32_SYNTH_LOCNTTARGET,         (EFR32_SYNTH_BASE + 0x090)
+/* Stock bounds each LO-count measurement to this many BUSY polls before
+ * abandoning the calibration (and then does not start the synthesizer). */
+.equ EFR32_SYNTH_LOCNT_POLL_BOUND,    2047
+.equ EFR32_SEQ_TRACE_SYNTH_TUNING,    0x00004fbc /* diagnostic only */
+.equ EFR32_SEQ_SYNTH_CAL_ABORTED,     0xffffffff
+
+/*
+ * Stock's microsecond-scale busy wait: count = n * 195 - 111, then subtract
+ * 30 per pass while count >= 0, with the count held in memory each pass.
+ * Reproduced with the same memory round trip so the per-pass cost, and so
+ * the delay, stays comparable rather than becoming several times shorter.
+ */
+.equ EFR32_SEQ_DELAY_PER_UNIT,        195
+.equ EFR32_SEQ_DELAY_BIAS,            111
+.equ EFR32_SEQ_DELAY_STEP,            30
+
+.thumb_func
+efr32_seq_delay:
+    ldr r1, =EFR32_SEQ_DELAY_PER_UNIT
+    muls r0, r1
+    subs r0, #EFR32_SEQ_DELAY_BIAS
+    sub sp, #4
+    str r0, [sp]
+    bmi 2f
+1:  ldr r0, [sp]
+    subs r0, #EFR32_SEQ_DELAY_STEP
+    str r0, [sp]
+    bpl 1b
+2:  add sp, #4
+    bx lr
+
+/* Per-bit successive-approximation schedule, highest VCOTUNING bit last in
+ * memory (index = bit number).  Both columns are read directly off the
+ * stock trace: the low bits written alongside each trial bit, and the
+ * LOCNTCTRL.NUMCYCLE programmed for that trial. */
+.section .rodata, "a", %progbits
+efr32_seq_vcotuning_trial_low_bits:
+    .byte 0, 0, 0, 1, 1, 2, 4, 8, 16, 32, 32
+efr32_seq_locnt_trial_numcycle:
+    .byte 5, 5, 5, 4, 4, 4, 4, 3, 2, 2, 2
+.section .text, "ax", %progbits
+
+/* Returns the calibrated VCOTUNING register value in r0, or
+ * EFR32_SEQ_SYNTH_CAL_ABORTED.  Clobbers r0-r3; preserves r4-r7. */
+.thumb_func
+efr32_seq_vco_calibrate:
+    push {r4-r7, lr}
+    ldr r2, =(EFR32_SYNTH_LOCNTCTRL + EFR32_ALIAS_SET)
+    movs r1, #EFR32_SYNTH_LOCNTCTRL_READ
+    str r1, [r2]
+    ldr r4, =EFR32_SYNTH_VCOTUNING_VCAPSEL_TX   /* accepted bits so far */
+    movs r5, #EFR32_SYNTH_VCOTUNING_TOP_BIT     /* trial bit index */
+1:  movs r6, #1
+    lsls r6, r5
+    orrs r6, r4                                 /* trial = accepted | bit */
+    ldr r0, =efr32_seq_vcotuning_trial_low_bits
+    ldrb r0, [r0, r5]
+    orrs r0, r6
+    ldr r1, =EFR32_SYNTH_VCOTUNING
+    str r0, [r1]
+    ldr r1, =(EFR32_SYNTH_LOCNTCTRL + EFR32_ALIAS_CLR)
+    movs r0, #EFR32_SYNTH_LOCNTCTRL_NUMCYCLE_MASK
+    str r0, [r1]
+    ldr r0, =efr32_seq_locnt_trial_numcycle
+    ldrb r0, [r0, r5]
+    lsls r0, #EFR32_SYNTH_LOCNTCTRL_NUMCYCLE_SHIFT
+    movs r1, #EFR32_SYNTH_LOCNTCTRL_CLEAR
+    orrs r0, r1
+    ldr r1, =(EFR32_SYNTH_LOCNTCTRL + EFR32_ALIAS_SET)
+    str r0, [r1]
+    movs r0, #EFR32_SYNTH_LOCNTCTRL_RUN
+    str r0, [r1]
+    ldr r0, =EFR32_RAC_CTRL
+    ldr r0, [r0]
+    movs r1, #EFR32_RAC_CTRL_FORCEDISABLE
+    tst r0, r1
+    bne 8f
+    ldr r7, =EFR32_SYNTH_LOCNT_POLL_BOUND
+    ldr r2, =EFR32_SYNTH_LOCNTSTATUS
+    ldr r3, =EFR32_SYNTH_LOCNTSTATUS_BUSY
+2:  ldr r0, [r2]
+    tst r0, r3
+    beq 3f
+    subs r7, #1
+    bne 2b
+    b 8f
+3:  ldr r1, =EFR32_SYNTH_LOCNTSTATUS_LOCOUNT_MASK
+    ands r0, r1
+    ldr r1, =EFR32_SYNTH_LOCNTTARGET
+    ldr r1, [r1]
+    cmp r1, r0
+    bhs 4f                 /* count <= target: VCO not too fast, drop bit */
+    mov r4, r6             /* count > target: keep the trial capacitance */
+4:  subs r5, #1
+    bpl 1b
+    ldr r1, =(EFR32_SYNTH_LOCNTCTRL + EFR32_ALIAS_CLR)
+    movs r0, #EFR32_SYNTH_LOCNTCTRL_READ
+    str r0, [r1]
+    ldr r1, =EFR32_SYNTH_VCOTUNING
+    str r4, [r1]
+    mov r0, r4
+    pop {r4-r7, pc}
+8:  ldr r0, =EFR32_SEQ_SYNTH_CAL_ABORTED
+    pop {r4-r7, pc}
+
+/* Brings the TX synthesizer up in stock's order.  Clobbers r0-r3. */
+.thumb_func
+efr32_seq_synth_start:
+    push {r4, lr}
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_RESETN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYMMDCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYMMDCTRL_SYMMDENRSDIG
+    str r1, [r0]
+
+    ldr r0, =(EFR32_RAC_SYCAL + EFR32_ALIAS_CLR)
+    ldr r1, =(EFR32_RAC_SYCAL_SYVCOMORECURRENT | EFR32_RAC_SYCAL_SYVCOSLOWNOISEFILTER)
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_VCORANGE
+    ldr r1, =EFR32_SYNTH_VCORANGE_TX
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #(EFR32_SYNTH_CMD_SYNTHSTOP | EFR32_SYNTH_CMD_DISABLEIF)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_LPFBWSEL
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYMMDCTRL
+    ldr r1, =EFR32_RAC_SYMMDCTRL_TX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_RX
+    movs r1, #EFR32_RAC_RX_SYCHPBIASTRIMBUF
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYEN_SYCHPLPEN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_CHPCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_CHPCTRL_CHPOUTPUTTRISTATEMODE
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM0
+    ldr r1, =EFR32_RAC_SYTRIM0_TX
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_VCOCTRL
+    movs r1, #EFR32_RAC_VCOCTRL_TX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_ENRETIME
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM1
+    ldr r1, =EFR32_RAC_SYTRIM1_STARTUP
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYEN_STAGE1
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_RESETN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYMMDCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYMMDCTRL_SYMMDENRSDIG
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RADIOEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_RADIOEN_PRESTB100UDIS
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_PATRIM1 + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_PATRIM1_TX0DBMTRIMTAPCAP_MASK
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHREGCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_MASK
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHREGCTRL + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYNTHREGCTRL_CHPLDOVREFTRIM_TX
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_SYNTHENCTRL_VCOSTARTUP
+    str r1, [r0]
+    movs r0, #1
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYEN_SYENVCOPFET
+    str r1, [r0]
+    movs r0, #2
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYEN_STAGE3
+    str r1, [r0]
+    movs r0, #2
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_RAC_SYEN_SYLODIVEN
+    str r1, [r0]
+    ldr r0, =(EFR32_SYNTH_VCDACCTRL + EFR32_ALIAS_SET)
+    ldr r1, =(EFR32_SYNTH_VCDACCTRL_VCDACEN | EFR32_SYNTH_VCDACCTRL_LPFEN | EFR32_SYNTH_VCDACCTRL_LPFQSEN)
+    str r1, [r0]
+    movs r0, #4
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYNTHENCTRL_VCOSTARTUP
+    str r1, [r0]
+    ldr r0, =(EFR32_SYNTH_VCORANGE + EFR32_ALIAS_SET)
+    ldr r1, =EFR32_SYNTH_VCORANGE_LOAD
+    str r1, [r0]
+    ldr r1, =EFR32_SYNTH_VCORANGE_THROUGH
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #EFR32_SYNTH_CMD_CAPCALSTART
+    str r1, [r0]
+    ldr r0, =(EFR32_SYNTH_LOCNTCTRL + EFR32_ALIAS_SET)
+    movs r1, #EFR32_SYNTH_LOCNTCTRL_ENABLE
+    str r1, [r0]
+
+    bl efr32_seq_vco_calibrate
+    ldr r1, =EFR32_SEQ_TRACE_SYNTH_TUNING
+    str r0, [r1]
+    adds r0, #1            /* EFR32_SEQ_SYNTH_CAL_ABORTED + 1 == 0 */
+    beq 9f
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #EFR32_SYNTH_CMD_SYNTHSTART
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_LOCNTCTRL
+    movs r1, #0
+    str r1, [r0]
+    movs r0, #2
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_SYNTH_VCDACCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_SYNTH_VCDACCTRL_VCDACEN
+    str r1, [r0]
+    ldr r1, =EFR32_SYNTH_VCDACCTRL_LPFQSEN
+    str r1, [r0]
+    movs r0, #2
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_SYNTH_VCORANGE + EFR32_ALIAS_CLR)
+    ldr r1, =(EFR32_SYNTH_VCORANGE_LOAD | EFR32_SYNTH_VCORANGE_THROUGH)
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SYTRIM1
+    ldr r1, =EFR32_RAC_SYTRIM1_RUNNING
+    str r1, [r0]
+9:  pop {r4, pc}
