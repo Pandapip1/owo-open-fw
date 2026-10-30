@@ -5628,3 +5628,25 @@ synthesizer retune + VCO calibration take ~48 us, PA bring-up ~28 us --
 ~210 us before TX, against BLE's 150 +/- 2 us T_IFS, and the TX start is not
 hardware-timed at all. Many "timeout" outcomes are decisions arriving just
 past the M0+'s 120 us wait.
+
+### 7.67 RX->TX: TX retune moved ahead of the decision, with cached calibration
+
+The RAC holds RX2TX until the sequencer acknowledges (a TXDIS issued after
+the decision wait prevented the transmission), so the open RX2TX handler
+now powers the receiver down and retunes the synthesizer for TX *while* the
+M33 decides, and brings the PA up only on "respond" -- nothing radiates for
+a declined frame. The retune reuses this event's TXWARM VCO calibration
+(same channel; `0x4FA0`), as stock's per-channel cache does, instead of
+recalibrating; `efr32_seq_synth_lock` takes a mode (calibrate; calibrate and
+cache as TX tuning; use cached).
+
+**Measured [F]** (RAC.STIMER, ~4.8 ticks/us, from IRQ7 entry): synthesizer
+locked at ~17 us (was ~48 us after the decision), decision ~154 us, PA up
+~182 us. Per 5 s: 7 "respond", 14 "cancel", **0 timeouts** (was 3/10/17).
+The host still does not receive the scan response: the remaining excess
+is the M33's decision latency -- the LLL runs from a job thread after
+RXDONE ("do not run an LLL state machine on the hardware interrupt
+stack") -- and the TX start is still not hardware-timed to T_IFS. Both need
+an architecture decision (running the RX callback at interrupt level, or
+letting the sequencer pre-qualify a SCAN_REQ) and finding stock's
+hardware T_IFS timing mechanism.

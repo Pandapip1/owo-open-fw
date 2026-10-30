@@ -31,6 +31,10 @@
 .equ EFR32_SEQ_TRACE_RXFRAME_STATUS,  0x00004f9c /* diagnostic only */
 .equ EFR32_RAC_STATUS,                0xa802000c
 .equ EFR32_RAC_RXENSRCEN_SWRXEN_BIT, (1 << 1)
+.equ EFR32_SEQ_SYNTH_LOCK_CAL,          0 /* calibrate (TX->RX retune) */
+.equ EFR32_SEQ_SYNTH_LOCK_CAL_AND_CACHE, 1 /* calibrate, keep as TX tuning */
+.equ EFR32_SEQ_SYNTH_LOCK_CACHED,       2 /* reuse this event's TX tuning */
+.equ EFR32_SEQ_TX_VCOTUNING_CACHE,      0x00004fa0
 .equ EFR32_SEQ_TRACE_WAIT_BIT_REMAINING,  0x00004fa8
 .equ EFR32_SEQ_TRACE_SEQIF_ACK_REMAINING, 0x00004fac
 /* Diagnostic only (not part of the bounded production trace words above):
@@ -847,6 +851,7 @@ efr32_seq_synth_start:
     ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_SET)
     ldr r1, =EFR32_RAC_SYEN_SYLODIVEN
     str r1, [r0]
+    movs r0, #EFR32_SEQ_SYNTH_LOCK_CAL_AND_CACHE
     bl efr32_seq_synth_lock
     cmp r0, #0
     bne 9f
@@ -862,6 +867,7 @@ efr32_seq_synth_start:
 .thumb_func
 efr32_seq_synth_lock:
     push {r4, lr}
+    mov r4, r0             /* EFR32_SEQ_SYNTH_LOCK_* mode */
     ldr r0, =(EFR32_SYNTH_VCDACCTRL + EFR32_ALIAS_SET)
     ldr r1, =(EFR32_SYNTH_VCDACCTRL_VCDACEN | EFR32_SYNTH_VCDACCTRL_LPFEN | EFR32_SYNTH_VCDACCTRL_LPFQSEN)
     str r1, [r0]
@@ -882,12 +888,26 @@ efr32_seq_synth_lock:
     movs r1, #EFR32_SYNTH_LOCNTCTRL_ENABLE
     str r1, [r0]
 
-    bl efr32_seq_vco_calibrate
+    cmp r4, #EFR32_SEQ_SYNTH_LOCK_CACHED
+    bne 6f
+    /* Same channel as this event's TXWARM: reuse its calibration, as
+     * stock's per-channel cache does (SS7.61, SS7.67). */
+    ldr r0, =EFR32_SEQ_TX_VCOTUNING_CACHE
+    ldr r0, [r0]
+    ldr r1, =EFR32_SYNTH_VCOTUNING
+    str r0, [r1]
+    b 7f
+6:  bl efr32_seq_vco_calibrate
     ldr r1, =EFR32_SEQ_TRACE_SYNTH_TUNING
     str r0, [r1]
     adds r0, #1            /* EFR32_SEQ_SYNTH_CAL_ABORTED + 1 == 0 */
     beq 8f
-    ldr r0, =EFR32_SYNTH_CMD
+    subs r0, #1
+    cmp r4, #EFR32_SEQ_SYNTH_LOCK_CAL_AND_CACHE
+    bne 7f
+    ldr r1, =EFR32_SEQ_TX_VCOTUNING_CACHE
+    str r0, [r1]
+7:  ldr r0, =EFR32_SYNTH_CMD
     movs r1, #EFR32_SYNTH_CMD_SYNTHSTART
     str r1, [r0]
     ldr r0, =EFR32_SYNTH_LOCNTCTRL
@@ -1274,6 +1294,7 @@ efr32_seq_rx_turnaround:
     ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_SET)
     ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
     str r1, [r0]
+    movs r0, #EFR32_SEQ_SYNTH_LOCK_CAL
     bl efr32_seq_synth_lock
     cmp r0, #0
     bne 9f
@@ -1598,6 +1619,15 @@ efr32_seq_tx_turnaround:
     push {r4, lr}
     movs r0, #0
     bl efr32_seq_trace_stimer
+    /* The RAC holds RX2TX until this handler acknowledges, so retune for
+     * TX while the M33 decides; the PA comes up only on RESPOND, so nothing
+     * radiates for a declined frame (SS7.67). */
+    bl efr32_seq_rx_frontend_stop
+    bl efr32_seq_synth_config_tx
+    movs r0, #EFR32_SEQ_SYNTH_LOCK_CACHED
+    bl efr32_seq_synth_lock
+    movs r0, #2
+    bl efr32_seq_trace_stimer
     /* Wait (bounded) for the M33's decision on this received frame: it
      * either published a response or cancelled; this core never chooses. */
     ldr r4, =EFR32_SEQ_RX2TX_DECISION_WAIT_US
@@ -1625,13 +1655,6 @@ efr32_seq_tx_turnaround:
 2:  movs r0, #EFR32_SEQ_TRACE_RX2TX_RESPOND_SLOT
     bl efr32_seq_trace_count
     movs r0, #1
-    bl efr32_seq_trace_stimer
-    bl efr32_seq_rx_frontend_stop
-    bl efr32_seq_synth_config_tx
-    bl efr32_seq_synth_lock
-    cmp r0, #0
-    bne 9f
-    movs r0, #2
     bl efr32_seq_trace_stimer
     bl efr32_seq_pa_start
     movs r0, #3
