@@ -5121,3 +5121,76 @@ location, not yet its root cause. Board restored to the ordinary
 proprietary capture remain exactly where they already were, under
 `Projects/owo-bg22-proprietary-baselines/`, untouched and uncommitted
 to this repository.
+
+### 7.59 Stage 2.5's M0+ lockup root-caused: stock enables five radio-subsystem bus clocks the open M33 driver never does -- fixes the crash, but is not stage 3's `ACTIVETXFCD` blocker
+
+Picked up §7.58's open thread with the comparison it had queued but not
+run: stock `build-stage2` versus stage 2.5 at the same pre-release
+boundary (stock `0x12da0`, stage 2.5 `0x15f0e` -- each the
+`RAC.CTRL.CPUWAITDIS` SET-alias write in its own image; `RAC.CTRL=0x381`
+in both). Everything below was measured with `bg22_reset_to_breakpoint`
+inside one continuous OpenOCD session per measurement (§7.54), with the
+breakpoint removed before every `resume` (§7.11).
+
+**1. `RAC.SR3` is written by stock's M33 after all -- correcting §7.5.2.**
+At stock's boundary `SR3` already reads `0x00F00A01` (stage 2.5: `0`).
+DWT write-watchpoints on `SR3`'s base, SET and CLR aliases from
+`z_prep_c` onward caught every M33 write [F]: a direct store of
+`0x00F04800` at `0x12e50` (in `sli_rail_83b3e2e9...`, reached from
+`0xe2e4`), then SET bit 0, CLR bit 14, SET bit 9 -- giving exactly
+`0x00F00A01` at release -- and later SET bit 15, CLR bit 30, bits 0/6/4/5,
+reaching the familiar `0x08F08A31`. §7.5.2 missed this because the store
+uses the **RAC base literal plus an immediate `#0x4c` offset**, not an
+`0x...4C` literal; its "zero write sites anywhere in M33 RAIL" and the
+§7.9 "hardware-latched flag" inference built on it are withdrawn. (Not
+re-checked here: whether the M0+ object's `SR3` reads were likewise
+undercounted by the same literal-only search.) **But `SR3` is not the
+stage-2.5 gap:** poking `0x00F00A01` at stage 2.5's boundary left the M0+
+lockup rate unchanged (36 vs. 31 in 6 s).
+
+**2. The M0+'s memory image is not the gap either.** The full 20 KiB at
+`0xB0000000` at stage 2.5's boundary is **byte-identical** to
+`stage2-pre-release-frcram.bin`, the stock capture the stage-2.5 build
+embeds: in both configurations the M0+ starts from the same RAM.
+
+**3. Register-block diff at the boundary** (RAC, FRC, BUFC, AGC, MODEM,
+PROTIMER, RFCRC, SYNTH, CMU, EMU, secure SMU; aliased mirrors collapsed).
+AGC, PROTIMER, RFCRC and SMU match. Real differences: `RAC.SCRATCH6/7`
+(public `RAC_S.SCRATCH6/7`, `+0x3F8/+0x3FC`; stock `0x3FCC`/`8`, open `0`),
+`RAC.SR3` (above), `FRC.CTRL/RXCTRL/IEN`, `MODEM.DCCOMP/IRCALCOEFWR1`,
+`SYNTH.VCORANGE`, `BUFC` buffer-0 configuration, and **`CMU.CLKEN0/CLKEN1`**.
+Decoded against `efr32bg22_cmu.h`, stock has these bus clocks on and the
+open driver does not: `CLKEN1.RDSCRATCHPAD`, `RDMAILBOX0`, `RDMAILBOX1`,
+`PRORTC`, `IFADCDEBUG` and `CLKEN0.SYSCFG` (TIMER0/BURTC/RTCC also differ,
+but those are Zephyr system-timer selection). Independent symptom: SYSCFG
+reads fault from the debugger under stage 2.5 but not under stock.
+
+**4. Those clocks are the crash [F].** Setting exactly those six enables
+(CMU SET aliases) at stage 2.5's boundary takes the passive 6 s lockup
+count from 28-36 to **0** on every run; `SCRATCH6/7` alone (28) or with
+`SR3` (36) do not. Baseline: stock shows 0 lockups under the identical
+passive observation, so the observation method is not itself causing
+them. The real M0+ blob evidently touches the radio mailbox/scratchpad/
+PRORTC/SYSCFG blocks early and bus-faults when their clocks are gated,
+then double-faults in its own fault path.
+
+**5. Fixing the crash is not sufficient for on-air TX, and does not touch
+stage 3.** Stage 2.5 with the clocks set still re-issues the M0+ reset
+at the advertising-event rate (~9/s, unchanged with `SCRATCH6/7`/`SR3`
+also poked) and a 22 s `scan le` does not see it -- expected, since the
+open M33 does not speak the blob's mailbox protocol. The stock image
+was seen in the same scan setup immediately (positive control). Stage 3,
+rebuilt from current HEAD, is **unchanged** with the same six enables set
+from `main`: `RAC.STATUS=0x09400000` (TX), `FRC.STATUS=0x01100200`
+(`ACTIVETXFCD` clear) in both control and test, no advertiser in a 22 s
+scan. The open sequencer does not use those blocks, so this is consistent.
+
+Net: §7.58's stage-2.5 crash is closed (missing bus clocks, not a
+shared-memory/ABI field); §7.57's stage-3 verdict stands. Not yet ported:
+whether the open driver should enable `RDMAILBOX0/1`/`RDSCRATCHPAD`
+anyway is moot until it uses them. The remaining stage-2.5-only
+differences (`SCRATCH6/7`, FRC/MODEM/SYNTH/BUFC fields above) are a
+ready-made checklist if stage 2.5 is pushed further toward a TX.
+Captures are in `Projects/owo-bg22-proprietary-baselines/release-boundary/`
+and `stage2.5-sdk-sequencer/stage2.5-open-pre-release-seqram.bin`,
+uncommitted to this repository.
