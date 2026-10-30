@@ -5422,3 +5422,22 @@ also leave its registers unreadable afterwards.
 Next: capture IRQ11's head (synth retune) and the RXWARM/RXFRAME/RXPD
 handlers, port them as for TX, and arm `SWRXEN` from the hardware
 `radio_switch_complete_and_rx()` while TX is in progress.
+
+**IRQ11 captured in full [F].** A watchpoint on `RAC.SR1`'s SET alias (the
+first store of `fn_0x894`, which every stock handler calls first), filtered
+to exception 27, halts IRQ11 within a few instructions of entry; tracing
+from there to the `STATETX2RX` ack (149 stores) gives the whole TX->RX
+turnaround, in order: (1) the same PA ramp-down as TXPD (§7.62); (2) the
+**M0+ itself sets `RAC.RXENSRCEN.SWRXEN`**; (3) the synthesizer retune for
+RX through the same start routine as TX with RX parameters --
+`VCORANGE` HIGHTHRESH=1/LOWTHRESH=3, `SYNTH.CMD` = `SYNTHSTOP|ENABLEIF`
+(IF on for RX), `SYNTHENCTRL.LPFBWSEL` cleared, `SYMMDMODE=4`,
+`RAC.RX.SYPFDCHPLPEN|SYPFDFPWEN`, `SYEN.SYCHPLPEN` set, `SYTRIM0` with
+`SYCHPBIAS=1` -- while the `SYEN` supplies stay on (no staged power-up),
+then a fresh LO-counter VCO calibration and `SYNTHSTART`; (4) RX
+front-end power-up: `SYLOEN` RX LO dividers, `SYTRIM1.SYLODIVRLOADCCLKSEL`,
+`RAC.CMD.LNAENSET`, `LNAMIXEN.LNAMIXENLDO`, `IFADCDBG` ADC/refbuf/clock
+enables, RX LDOs (`IFADCENLDOSERIES|IFADCENLDOSHUNT|LNAMIXLDOLOWCUR|
+PGAENLDO`), `RFPATHEN.LNAMIXEN|LNAMIXRFATTDCEN`, `PGACTRL` enables,
+`SYCAL` clear; (5) the AGC/PGA DC-offset calibration listed above; (6) the
+ack. Saved with the other traces outside the repo.
