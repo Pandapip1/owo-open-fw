@@ -1176,7 +1176,10 @@ efr32_seq_pa_stop:
 .equ EFR32_RAC_RX_PGAENLDO,            (1 << 6)
 .equ EFR32_RAC_RX_SYPFDCHPLPEN,        (1 << 9)
 .equ EFR32_RAC_RX_SYPFDFPWEN,          (1 << 10)
-.equ EFR32_RAC_SYTRIM0_RX,             (EFR32_RAC_SYTRIM0_TX | (1 << 0)) /* + SYCHPBIAS=1 */
+/* Stock's RX value 0x64E29: the TX trims with SYCHPBIAS=1 and without
+ * SYCHPSRCEN (SS7.64 corrects SS7.63's port, which kept SYCHPSRCEN). */
+.equ EFR32_RAC_SYTRIM0_SYCHPSRCEN,      (1 << 13)
+.equ EFR32_RAC_SYTRIM0_RX,             ((EFR32_RAC_SYTRIM0_TX & ~EFR32_RAC_SYTRIM0_SYCHPSRCEN) | (1 << 0))
 .equ EFR32_RAC_SYLOEN_RX, ((1 << 0) | (1 << 1)) /* SYLODIVRLOADCCLK2G4EN, SYLODIVRLO2G4EN */
 .equ EFR32_RAC_SYTRIM1_SYLODIVRLOADCCLKSEL, (1 << 17)
 .equ EFR32_RAC_CMD_LNAENSET,           (1 << 14)

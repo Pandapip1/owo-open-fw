@@ -5489,3 +5489,47 @@ still-active transmission to a receiver entering RXSEARCH, made reachable
 by the longer sequencer handlers -- unconfirmed. Next step for whoever
 continues: trace `efr32bg22_rf_*` medium events and the delivered RX bytes
 around the first RX window.
+
+### 7.64 Stage 3 receives: the demodulator was correlating against an inverted access address
+
+**Diff in RXSEARCH [F].** Stage 3 held in RXSEARCH by halting the M33 at
+`radio_tmr_hcto_configure`; stock caught in RXSEARCH by an AP3 watchpoint on
+`MODEM.IF`'s CLR alias filtered to IRQ2, blocks dumped over the M0+ bus. Both
+read `SYNTH.STATUS=0x6` (`INLOCK=0` is normal in RX here -- not a lead).
+The decisive difference: `MODEM.VTCORRCFG0` stock `0xB5BEC8B8`, stage 3
+`0x4A413747` -- exact complements. Stock RAIL rewrites it at runtime
+(M33 watchpoints: CLR-alias all-ones then SET-alias the pattern, at setup
+and around every event), and the live value is the advertising access
+address in on-air bit order rotated right by one:
+`ror(bitrev(0x8E89BED6), 1) = 0xB5BEC8B8`. The PHY table's `0x4A413747`
+(and §7.44's "access-address-shaped bytes") is its complement. RAIL also
+lowers `VTCORRCFG1.EXPECTHT` from the table's 5 to 2 (observed; derivation
+unknown). The same diff showed §7.63's RX `SYTRIM0` port wrong: stock's RX
+value is `0x64E29` (`SYCHPBIAS=1`, *no* `SYCHPSRCEN`).
+
+**Fixed:** `radio_aa_set()` now writes `VTCORRCFG0 = ror(bitrev(aa), 1)` and
+`EXPECTHT = 2`; `radio_seq.S`'s RX `SYTRIM0` matches stock.
+
+**Result [F]:** the first RXDONEs on stage 3; `MODEM.IF` gains RX frame
+detection; received buffers hold well-formed ADV_INDs from neighbouring
+devices (e.g. header `60 1F`, AdvA, then a `02 01 xx` Flags AD structure).
+
+**A memory-corruption bug this exposed, fixed:** at the first RXDONE, BUFC
+RX channel 1 was still at reset (`CTRL=0`, `ADDR=0x20000000`) -- the
+hardware turnaround starts receiving before the LLL calls
+`radio_pkt_rx_set()` -- so FRC wrote the frame over the start of RAM
+(`bt_dev`; a later read showed its address type as `0xC3`). The channel is
+now programmed in `radio_setup()` and before `TXEN` whenever a turnaround
+will follow, and `radio_pkt_rx_set()` does not re-CLEAR it then (that
+could discard a frame already arriving). Verified: `ADDR` is
+`efr32_rx_fifo` at every RXDONE and `bt_dev` stays intact.
+
+**Still missing: RX->TX.** The LLL arms RX->TX for every connectable
+advertising event; with no hardware path the first accepted SCAN_REQ left
+it waiting for a TX completion forever and advertising stopped. Until
+RX->TX exists, an RX completion with RX->TX requested ends the event after
+1 ms through the same alarm/`radio_disable()` path. Free-running with the
+host actively scanning: advertising continues (seen at -37 dBm over 30 s),
+no console errors. Stock's mechanism, from this session's watchpoints:
+RAIL writes `RAC.CMD.TXAFTERFRAME`, the RAC goes RXFRAME -> RX2TX (7) -> TX,
+and stock's M0+ services IRQ7 -- the next port.

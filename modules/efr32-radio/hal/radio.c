@@ -1960,6 +1960,13 @@ static bool efr32_hw_rx_after_tx_requested;
 static bool efr32_hw_rx_after_tx_pending;
 static bool efr32_hw_rx_turnaround_claimed;
 /*
+ * RX->TX (e.g. SCAN_RSP) is not implemented on hardware yet.  When the LLL
+ * has asked for one and a frame was received, end the event after this bound
+ * instead of leaving the LLL waiting for a TX completion that cannot come.
+ */
+static bool efr32_hw_tx_after_rx_requested;
+#define EFR32_HW_UNSERVED_RESPONSE_BOUND_US 1000U
+/*
  * Bounds a silent RX window: the BURTC alarm the QEMU TIFS path uses is real
  * hardware, and its expiry callback disables the radio unless a completion
  * already owns cleanup -- the same no-response rule as the QEMU job.  Each
@@ -1967,11 +1974,16 @@ static bool efr32_hw_rx_turnaround_claimed;
  * is interrupt-safe (OpenISA calls it from LLL ISRs); RAM leaves no room for
  * a dedicated thread.
  */
+static void efr32_hw_rx_fifo_reset(void);
+static void efr32_bufc_rx_fifo_configure(void);
+
 static void efr32_hw_turnaround_reset(void)
 {
 	efr32_hw_rx_after_tx_requested = false;
 	efr32_hw_rx_after_tx_pending = false;
 	efr32_hw_rx_turnaround_claimed = false;
+	efr32_hw_tx_after_rx_requested = false;
+	efr32_hw_rx_fifo_reset();
 #if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	atomic_inc(&efr32_hw_hcto_generation);
 	cntr_qemu_tifs_cmp_cancel();
@@ -2061,6 +2073,10 @@ void radio_setup(void)
 
 	/* Match OpenISA's initially available radio-clock contract. */
 	atomic_set(&efr32_radio_power_ref, 1);
+
+	/* Never leave BUFC's RX channel at its reset ADDR (0x20000000, start of
+	 * RAM); see efr32_hw_rx_fifo_preconfigured. */
+	efr32_bufc_rx_fifo_configure();
 
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 	/* The descriptor path is an explicit simulator-only test contract. */
@@ -2247,6 +2263,19 @@ void radio_whiten_iv_set(uint32_t iv)
 		EFR32_FRC_BLE_WHITEINIT_MSB | iv;
 }
 
+#define EFR32_MODEM_VTCORRCFG0_OFFSET 0x104U
+#define EFR32_MODEM_VTCORRCFG1_OFFSET 0x110U
+#define EFR32_MODEM_VTCORRCFG1_EXPECTHT_SHIFT 27U
+#define EFR32_MODEM_VTCORRCFG1_EXPECTHT_MASK (0xFU << EFR32_MODEM_VTCORRCFG1_EXPECTHT_SHIFT)
+#define EFR32_MODEM_VTCORRCFG1_EXPECTHT_BLE_RX (2U << EFR32_MODEM_VTCORRCFG1_EXPECTHT_SHIFT)
+
+static uint32_t efr32_vtcorr_expected_pattern(uint32_t access_address)
+{
+	uint32_t on_air = __RBIT(access_address);
+
+	return (on_air >> 1) | (on_air << 31);
+}
+
 /* [regs-public] MODEM.SYNC0 is the 32-bit BLE synchronization word register (T3). */
 void radio_aa_set(const uint8_t *aa)
 {
@@ -2261,6 +2290,23 @@ void radio_aa_set(const uint8_t *aa)
 			 ((uint32_t)aa[3] << 24);
 
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SYNC0_OFFSET) = sync0;
+
+	/*
+	 * [F] The Viterbi demodulator correlates against the access address in
+	 * on-air (LSB-first) bit order, rotated right by one: stock RAIL rewrites
+	 * VTCORRCFG0 at runtime, and for the advertising address 0x8E89BED6 its
+	 * live value is ror(bitrev(aa), 1) = 0xB5BEC8B8.  The PHY table's
+	 * 0x4A413747 is the exact complement, with which the demodulator never
+	 * detected a frame (docs/radio-tables.md SS7.64).  RAIL also lowers
+	 * VTCORRCFG1.EXPECTHT from the table's 5 to 2 at the same point
+	 * (observed value; its derivation is not yet known).
+	 */
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_VTCORRCFG0_OFFSET) =
+		efr32_vtcorr_expected_pattern(sync0);
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_MODEM_VTCORRCFG1_OFFSET) = EFR32_MODEM_VTCORRCFG1_EXPECTHT_MASK;
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_MODEM_VTCORRCFG1_OFFSET) = EFR32_MODEM_VTCORRCFG1_EXPECTHT_BLE_RX;
 }
 
 /* [regs-partial] FRC length/header configuration remains unproven (T5;
@@ -2340,12 +2386,41 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 }
 
 /*
+ * RAIL's RX FIFO helper configures channel 1 in this exact order: CLEAR,
+ * capacity encoding, backing address, and threshold control. Unlike TX,
+ * its helper does not issue PREFETCH.
+ */
+static void efr32_bufc_rx_fifo_configure(void)
+{
+	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
+
+	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_rx_fifo;
+	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
+}
+
+/*
+ * Set when radio_tx_enable() has already pointed BUFC's RX channel at
+ * efr32_rx_fifo for a hardware TX->RX turnaround.  The receiver is live from
+ * the end of TX, before the LLL stages its RX target, and channel 1's reset
+ * ADDR is 0x20000000: an unconfigured channel let the first received frame
+ * overwrite the start of RAM (bt_dev) on hardware (SS7.64).  It must not be
+ * cleared again then, or a frame already arriving would be discarded.
+ */
+static bool efr32_hw_rx_fifo_preconfigured;
+
+static void efr32_hw_rx_fifo_reset(void)
+{
+	efr32_hw_rx_fifo_preconfigured = false;
+}
+
+/*
  * [regs-partial] Configure only the source-backed BUFC RX staging FIFO.
  * FRC's delivery of a received packet to this FIFO remains unproven (T5).
  */
 void radio_pkt_rx_set(void *rx_packet)
 {
-	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 
 	LL_ASSERT(efr32_packet_stage.packet_configured);
 	/* The current OpenISA callers use the one-octet BLE length field. */
@@ -2360,16 +2435,13 @@ void radio_pkt_rx_set(void *rx_packet)
 	LL_ASSERT(rx_packet != NULL);
 	LL_ASSERT(((uintptr_t)efr32_rx_fifo & 3U) == 0U);
 
-	/*
-	 * RAIL's RX FIFO helper configures channel 1 in this exact order: CLEAR,
-	 * capacity encoding, backing address, and threshold control. Unlike TX,
-	 * its helper does not issue PREFETCH. Keep the caller buffer untouched
-	 * until the unproven FRC packet handoff can be implemented.
-	 */
-	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
-	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
-	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_rx_fifo;
-	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
+	/* Keep the caller buffer untouched until the unproven FRC packet
+	 * handoff can be implemented. */
+	if (efr32_hw_rx_fifo_preconfigured) {
+		efr32_hw_rx_fifo_preconfigured = false;
+	} else {
+		efr32_bufc_rx_fifo_configure();
+	}
 
 	/* Retain the controller's target for the eventual proven RX copy-out. */
 	efr32_packet_stage.rx_target = rx_packet;
@@ -2775,6 +2847,12 @@ void radio_tx_enable(void)
 	/* See EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS: untested hardware hypothesis. */
 	*radio_reg32(EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS) =
 		EFR32_SEQ_UNNAMED_FLAG_3EEC_OBSERVED_VALUE;
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	if (efr32_hw_rx_after_tx_requested) {
+		efr32_bufc_rx_fifo_configure();
+		efr32_hw_rx_fifo_preconfigured = true;
+	}
+#endif
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 #if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_hw_rx_after_tx_pending = efr32_hw_rx_after_tx_requested;
@@ -2868,6 +2946,12 @@ void radio_status_reset(void)
 	    efr32_hw_rx_after_tx_pending) {
 		efr32_hw_rx_after_tx_pending = false;
 		efr32_hw_rx_turnaround_claimed = true;
+	}
+	if (completed && completed_direction == EFR32_RADIO_PACKET_RX &&
+	    efr32_hw_tx_after_rx_requested) {
+		efr32_hw_tx_after_rx_requested = false;
+		cntr_qemu_tifs_arm_after_us(EFR32_HW_UNSERVED_RESPONSE_BOUND_US,
+			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
 	}
 #endif
 	efr32_rx_delivery_invalid = false;
@@ -2988,6 +3072,7 @@ void radio_switch_complete_and_rx(uint8_t phy_rx)
 {
 	ARG_UNUSED(phy_rx);
 	efr32_hw_rx_after_tx_requested = true;
+	efr32_hw_tx_after_rx_requested = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * This is an instruction for the operation following the one currently
@@ -3011,6 +3096,7 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 	ARG_UNUSED(phy_tx);
 	ARG_UNUSED(flags_tx);
 	efr32_hw_rx_after_tx_requested = false;
+	efr32_hw_tx_after_rx_requested = true;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * A scanner or advertiser may record this before RX begins. A real RXDONE
@@ -3027,6 +3113,7 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 void radio_switch_complete_and_disable(void)
 {
 	efr32_hw_rx_after_tx_requested = false;
+	efr32_hw_tx_after_rx_requested = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * This clears the sequencer command that has not been consumed yet. It
