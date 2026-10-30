@@ -5441,3 +5441,27 @@ enables, RX LDOs (`IFADCENLDOSERIES|IFADCENLDOSHUNT|LNAMIXLDOLOWCUR|
 PGAENLDO`), `RFPATHEN.LNAMIXEN|LNAMIXRFATTDCEN`, `PGACTRL` enables,
 `SYCAL` clear; (5) the AGC/PGA DC-offset calibration listed above; (6) the
 ack. Saved with the other traces outside the repo.
+
+**Hardware turnaround wired up (M33 side).** `radio.c` now turns the LLL's
+`radio_switch_complete_and_rx()` into `RXENSRCEN.SWRXEN` right after `TXEN`,
+arms the RX packet stage once the LLL has consumed the TX completion and
+configured HCTO, and bounds the window with the same BURTC alarm the QEMU
+path uses (expiry calls `radio_disable()` unless a completion owns cleanup).
+`radio_disable()` now withdraws `SWRXEN` before RXDIS: with the source still
+asserted, RXDIS left the RAC in RXSEARCH and the next `radio_tx_enable()`
+waited for idle forever. Result on hardware [F]: the state mix matches
+stock -- TXWARM, TX, TX2RX, RXSEARCH, RXPD, OFF every event -- the
+open sequencer's IRQ11 port runs (PGA DC calibration lands on stock's
+`0x1E23221D`), and advertising continues (134 TXDONE in one run, still seen
+on air at -38 dBm).
+
+**Receive does not decode yet [F].** With the host actively scanning the
+board's current address, 134 TXDONE and **0 RXDONE**; no scan response
+seen. `MODEM.IF` (sticky, never cleared by the open stack) shows only TX
+bits -- `RXPREDET`/`RXFRAMEDET*`/`RXTIMDET` have never been set -- while
+`RAC.STATUS` in RXSEARCH carries `RXENS|DEMODENS` like stock's. The
+demodulator never detects a packet, so the gap is demodulator/IF
+configuration, not the turnaround or framing. Next: diff the radio blocks
+during RXSEARCH, stock vs stage 3 (stage 3 can be held in RX by halting the
+M33 at `radio_tmr_hcto_configure`; stock via a watchpoint inside its IRQ2).
+RX->TX (scan response) remains unimplemented on hardware.

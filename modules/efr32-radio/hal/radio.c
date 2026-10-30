@@ -336,7 +336,14 @@ K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 		EFR32_LL_THREAD_PRIO, 0, 0);
 #endif
 
-/* Called from the shared BURTC CC0 alarm: publish work only, never RAC MMIO. */
+/* Hardware RX-window generation; see efr32_hw_turnaround_reset(). */
+static atomic_t efr32_hw_hcto_generation;
+
+/*
+ * Called from the shared BURTC CC0 alarm.  QEMU builds publish work only;
+ * hardware builds end a silent RX window here with radio_disable(), which is
+ * the interrupt-safe OpenISA abort path.
+ */
 void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 {
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
@@ -356,8 +363,11 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 		k_deadline_event_post(&efr32_qemu_tifs_event, (int)deadline);
 	}
 #else
-	ARG_UNUSED(generation);
 	ARG_UNUSED(deadline);
+	if (generation == (uint32_t)atomic_get(&efr32_hw_hcto_generation) &&
+	    !radio_is_done()) {
+		radio_disable();
+	}
 #endif
 }
 
@@ -1937,6 +1947,37 @@ static void efr32_radio_completion_quiesce(void)
 	irq_unlock(key);
 }
 
+/*
+ * Hardware TX->RX turnaround (docs/radio-tables.md SS7.63).  On silicon the
+ * RAC turns around by itself when an RX request is already pending as the
+ * frame ends: stock's RAC.STATUS reads RXENS with the SWRXEN source during
+ * TXWARM and TX, then passes TX2RX into RXSEARCH, where the open sequencer
+ * retunes and powers the receiver.  The LLL's switch request is therefore
+ * turned into SWRXEN right after TXEN, and the RX packet stage is armed once
+ * the LLL has consumed the TX completion and staged its RX buffer.
+ */
+static bool efr32_hw_rx_after_tx_requested;
+static bool efr32_hw_rx_after_tx_pending;
+static bool efr32_hw_rx_turnaround_claimed;
+/*
+ * Bounds a silent RX window: the BURTC alarm the QEMU TIFS path uses is real
+ * hardware, and its expiry callback disables the radio unless a completion
+ * already owns cleanup -- the same no-response rule as the QEMU job.  Each
+ * arm gets a new generation so a stale expiry is ignored.  radio_disable()
+ * is interrupt-safe (OpenISA calls it from LLL ISRs); RAM leaves no room for
+ * a dedicated thread.
+ */
+static void efr32_hw_turnaround_reset(void)
+{
+	efr32_hw_rx_after_tx_requested = false;
+	efr32_hw_rx_after_tx_pending = false;
+	efr32_hw_rx_turnaround_claimed = false;
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	atomic_inc(&efr32_hw_hcto_generation);
+	cntr_qemu_tifs_cmp_cancel();
+#endif
+}
+
 /* [regs-public] Enable the eight radio blocks in the observed stock order. */
 void radio_setup(void)
 {
@@ -1947,6 +1988,7 @@ void radio_setup(void)
 
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
+	efr32_hw_turnaround_reset();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_state_init(&efr32_qemu_tifs);
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -2033,6 +2075,7 @@ void radio_reset(void)
 
 	EFR32_RADIO_TRACE_ONCE("radio-reset");
 	efr32_radio_launch_disarm();
+	efr32_hw_turnaround_reset();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -2733,6 +2776,14 @@ void radio_tx_enable(void)
 	*radio_reg32(EFR32_SEQ_UNNAMED_FLAG_3EEC_ADDRESS) =
 		EFR32_SEQ_UNNAMED_FLAG_3EEC_OBSERVED_VALUE;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	efr32_hw_rx_after_tx_pending = efr32_hw_rx_after_tx_requested;
+	efr32_hw_rx_after_tx_requested = false;
+	if (efr32_hw_rx_after_tx_pending) {
+		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+			     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+	}
+#endif
 	EFR32_RADIO_TRACE_ONCE("txen status-before=0x%08x status-after=0x%08x",
 			       status_before,
 			       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET));
@@ -2744,6 +2795,7 @@ void radio_disable(void)
 	unsigned int key;
 
 	efr32_radio_launch_disarm();
+	efr32_hw_turnaround_reset();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -2766,6 +2818,13 @@ void radio_disable(void)
 	/* An abort is not a TXDONE or RXDONE; discard any pre-abort completion. */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	/*
+	 * [I] Withdraw the software RX source first: on hardware, RXDIS with
+	 * RXENSRCEN.SWRXEN still asserted left the RAC in RXSEARCH, and the next
+	 * radio_tx_enable() then waited for idle forever (SS7.63).
+	 */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
 	/*
@@ -2802,6 +2861,13 @@ void radio_status_reset(void)
 	    efr32_qemu_tifs_next_action_claim(&efr32_qemu_tifs_next_action,
 					       EFR32_QEMU_TIFS_NEXT_RX)) {
 		efr32_qemu_tifs_transition_requested = true;
+	}
+#endif
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	if (completed && completed_direction == EFR32_RADIO_PACKET_TX &&
+	    efr32_hw_rx_after_tx_pending) {
+		efr32_hw_rx_after_tx_pending = false;
+		efr32_hw_rx_turnaround_claimed = true;
 	}
 #endif
 	efr32_rx_delivery_invalid = false;
@@ -2921,6 +2987,7 @@ void *radio_pkt_scratch_get(void)
 void radio_switch_complete_and_rx(uint8_t phy_rx)
 {
 	ARG_UNUSED(phy_rx);
+	efr32_hw_rx_after_tx_requested = true;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * This is an instruction for the operation following the one currently
@@ -2943,6 +3010,7 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 	ARG_UNUSED(flags_rx);
 	ARG_UNUSED(phy_tx);
 	ARG_UNUSED(flags_tx);
+	efr32_hw_rx_after_tx_requested = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * A scanner or advertiser may record this before RX begins. A real RXDONE
@@ -2958,6 +3026,7 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 /* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
 void radio_switch_complete_and_disable(void)
 {
+	efr32_hw_rx_after_tx_requested = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	/*
 	 * This clears the sequencer command that has not been consumed yet. It
@@ -3140,6 +3209,7 @@ uint32_t radio_tmr_start_get(void)
 void radio_tmr_stop(void)
 {
 	efr32_radio_launch_disarm();
+	efr32_hw_turnaround_reset();
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -3164,6 +3234,16 @@ void radio_tmr_stop(void)
 void radio_tmr_hcto_configure(uint32_t hcto)
 {
 	efr32_radio_timer_state_hcto_set(&efr32_radio_timer, hcto);
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	if (efr32_hw_rx_turnaround_claimed) {
+		/* The RAC is already turning around; label the next completion. */
+		efr32_hw_rx_turnaround_claimed = false;
+		efr32_packet_stage_arm(EFR32_RADIO_PACKET_RX);
+		/* As in the QEMU path, HCTO bounds the window from this point. */
+		cntr_qemu_tifs_arm_after_us(hcto,
+			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
+	}
+#endif
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	if (!efr32_qemu_tifs_transition_requested) {
 		/* Initial event setup has no post-TXDONE transition marker. */
