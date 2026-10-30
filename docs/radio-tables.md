@@ -5194,3 +5194,66 @@ ready-made checklist if stage 2.5 is pushed further toward a TX.
 Captures are in `Projects/owo-bg22-proprietary-baselines/release-boundary/`
 and `stage2.5-sdk-sequencer/stage2.5-open-pre-release-seqram.bin`,
 uncommitted to this repository.
+
+### 7.60 Root cause of the `ACTIVETXFCD` stall: stage 3 transmits with the frequency synthesizer powered off -- starting it by hand unsticks `FRC` and completes the frame
+
+**Correction to §7.42 and §7.44 first.** §7.42 dismissed
+`SYNTH.STATUS.INLOCK=0` as "normal on both stacks" by comparing stage 3
+*in TX* (`RAC.STATUS` state 9) against stock's ch37 "pre-TXEN" capture,
+whose `RAC.STATUS=0x00400000` is state 0 (OFF) -- a mismatched-state
+comparison. §7.44 then closed the RAC/MODEM/SYNTH diffs partly as
+"per-physical-chip trim", but both captures are from the same chip, so
+any difference in those registers is firmware-written; and as "never
+touched" test registers (`SCRATCH6/7`), which §7.59 shows stock writes.
+Both conclusions are withdrawn.
+
+**Method:** the radio keeps running while the M33 is halted, and the
+AHB-AP reads radio registers without halting anything, so each stack
+was sampled non-intrusively a few thousand times while advertising,
+bucketed by `RAC.STATUS` state [F]:
+
+| in TX (state 9)        | `RAC.SYEN` | `RAC.SYNTHENCTRL` | `SYNTH.STATUS` |
+|---|---|---|---|
+| stock                  | `0x1FBF`   | `0x100200`        | `0x4010005` (`INLOCK`, `VCOFREQACTIVE`) |
+| stage 3 (HEAD build)   | `0`        | `0`               | `0x4` (only `SYNTHREADY`), in 100% of samples |
+
+`RAC.SYEN` (`+0x15C`, public `RAC_S.SYEN`: `SYCHPEN`, `SYENCHPREG`,
+`SYENMMDREG`, `SYENVCOBIAS`, `SYENVCOREG`, `SYLODIVEN`, ... ; the
+`fn_0x13b0` decomp's "unnamed RAC offset 0x15C") and
+`RAC.SYNTHENCTRL` (`+0x094`, `SYNTHSTARTREQ`/`LPFBWSEL`) are written
+on stock only by the M0+ -- DWT watchpoints on every M33 alias of
+`SYEN`, `SYNTHENCTRL` and `SYNTH.CMD` saw zero M33 writes. Neither the
+open driver nor `radio_seq.S` writes any of them, so stage 3 enters
+`TX` with every synthesizer analog block powered down and the VCO never
+started. Supporting same-chip ch37 diffs that are now real rather than
+"trim": `SYNTH.VCOTUNING` `0x81E6`/`0x8400`, `SYNTH.VCORANGE` `0xC8`/`0`,
+`SYNTH.LOCNTSTATUS/LOCNTTARGET` `0x1026`/`0` (stock ran the LO-counter
+VCO calibration; stage 3 never did), `RAC.TX`, `CHPCTRL`, `SYMMDCTRL`.
+
+**Live intervention on stage 3, stuck in `TX` (M33 halted) [F]:**
+
+| applied (non-secure aliases)                       | after 50 ms |
+|---|---|
+| nothing (control)                                  | unchanged: `RAC` 9, `FRC.STATUS=0x01100200`, `BUFC0.READ=2` |
+| `SYNTH.CMD.SYNTHSTART` only                        | unchanged |
+| `SYEN` + `SYNTHENCTRL` only                        | unchanged |
+| `SYNTHENCTRL` then `SYNTHSTART`                    | unchanged |
+| `SYEN=0x7FBF` (+`SYNTHENCTRL`) then `SYNTHSTART`   | **`FRC.STATUS=0x20` (`ACTIVETXFCD`), `BUFC0.READ=11` (whole packet), `RAC` -> 10 (`TXPD`)**, `SYNTH.STATUS=0x10004` (`VCOFREQACTIVE`) |
+| `SYEN=0x7FBF` then `SYNTHSTART`                    | same |
+| `SYEN=0x1FBF` (stock's TX value) then `SYNTHSTART` | same |
+
+Reproduced on every attempt. **The minimal trigger is powering the
+synthesizer's analog blocks (`RAC.SYEN`) and then issuing
+`SYNTH.CMD.SYNTHSTART`: once the VCO runs, the frame coder immediately
+drains the staged frame and the RAC leaves `TX`.** [I] The TX
+datapath's symbol timing evidently derives from the running LO/VCO, so
+with the synthesizer off `FRC` parses the header (§7.20's
+`WCNTCMP0` observation) and then never gets a clock to emit it.
+
+Not yet a valid on-air transmission: `INLOCK` stays 0 in these pokes
+(`VCORANGE` never calibrated, `CAPCALSTART` alone without stock's
+calibration setup did not produce a result), so the frequency is
+uncontrolled. Next: port stock's M0+ synthesizer power-up and VCO
+calibration into `radio_seq.S`'s TX warm-up, with every value derived
+from public field names, then verify `INLOCK=1` and an over-the-air
+scan.
