@@ -66,8 +66,12 @@
 .equ EFR32_NVIC_ISER0,                0xe000e100
 .equ EFR32_RAC_IRQ_TXWARM,            (1 << 8)
 .equ EFR32_RAC_IRQ_TX,                (1 << 9)
+/* SEQIF.STATETXPD (bit 26) arrives on IRQ10 (IRQn <-> SEQIF bit n+16, the
+ * same mapping as TXWARM/TX), SS7.62. */
+.equ EFR32_RAC_IRQ_TXPD,              (1 << 10)
 .equ EFR32_EXCEPTION_TXWARM,          (16 + 8)
 .equ EFR32_EXCEPTION_TX,              (16 + 9)
+.equ EFR32_EXCEPTION_TXPD,            (16 + 10)
 
 /*
  * The following are the stock IRQ8/TXWARM handler's bounded, mechanical
@@ -183,6 +187,7 @@
 .equ EFR32_NVIC_IPR_BASE,             0xe000e400
 .equ EFR32_NVIC_IPR_IRQ8,             (EFR32_NVIC_IPR_BASE + 8)
 .equ EFR32_NVIC_IPR_IRQ9,             (EFR32_NVIC_IPR_BASE + 9)
+.equ EFR32_NVIC_IPR_IRQ10,            (EFR32_NVIC_IPR_BASE + 10)
 .equ EFR32_NVIC_PRIORITY_TXWARM_TX,   1
 
 /*
@@ -261,6 +266,8 @@ efr32_radio_seq_reset:
     strb r1, [r0]
     ldr r0, =EFR32_NVIC_IPR_IRQ9
     strb r1, [r0]
+    ldr r0, =EFR32_NVIC_IPR_IRQ10
+    strb r1, [r0]
 
     /* Stock's own RAC.STCTRL write and private-SysTick setup
      * (docs/radio-tables.md SS7.9); the SR3-bit-17 busy-wait stock gates
@@ -286,7 +293,7 @@ efr32_radio_seq_reset:
      * state-service entries.  Enable only those bounded peripheral events;
      * the M33 scheduler remains the sole source of radio-job policy. */
     ldr r0, =EFR32_NVIC_ISER0
-    ldr r1, =(EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX)
+    ldr r1, =(EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX | EFR32_RAC_IRQ_TXPD)
     str r1, [r0]
 
     cpsie i
@@ -301,7 +308,17 @@ efr32_radio_seq_exception:
     mrs r3, ipsr
     cmp r3, #EFR32_EXCEPTION_TXWARM
     beq 1f
-    cmp r3, #EFR32_EXCEPTION_TX
+    cmp r3, #EFR32_EXCEPTION_TXPD
+    bne 15f
+    /* TX power-down: stop the synthesizer as stock's IRQ10 does, then let
+     * the common tail acknowledge STATETXPD so the RAC can reach OFF. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_synth_stop
+    pop {r0}
+    mov lr, r0
+    b 2f
+15: cmp r3, #EFR32_EXCEPTION_TX
     bne 2f
     ldr r3, =EFR32_SEQ_TRACE_TX
     b 3f
@@ -504,7 +521,9 @@ efr32_radio_seq_exception:
 .equ EFR32_RAC_PATRIM1,               (EFR32_RAC_BASE + 0x114)
 .equ EFR32_RAC_PATRIM1_TX0DBMTRIMTAPCAP_MASK, (7 << 16)
 .equ EFR32_RAC_RADIOEN,               (EFR32_RAC_BASE + 0x13c)
+.equ EFR32_RAC_RADIOEN_PREEN,         (1 << 0)
 .equ EFR32_RAC_RADIOEN_PRESTB100UDIS, (1 << 1)
+.equ EFR32_RAC_RADIOEN_RFBIASEN,      (1 << 2)
 .equ EFR32_RAC_RX,                    (EFR32_RAC_BASE + 0x144)
 .equ EFR32_RAC_RX_SYCHPBIASTRIMBUF,   (1 << 7)
 .equ EFR32_RAC_SYTRIM0,               (EFR32_RAC_BASE + 0x150)
@@ -682,6 +701,9 @@ efr32_seq_vco_calibrate:
 .thumb_func
 efr32_seq_synth_start:
     push {r4, lr}
+    ldr r0, =(EFR32_RAC_RADIOEN + EFR32_ALIAS_SET)
+    movs r1, #(EFR32_RAC_RADIOEN_PREEN | EFR32_RAC_RADIOEN_RFBIASEN)
+    str r1, [r0]
     ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
     movs r1, #EFR32_RAC_RETIME_RESETN
     str r1, [r0]
@@ -820,3 +842,59 @@ efr32_seq_synth_start:
     ldr r1, =EFR32_RAC_SYTRIM1_RUNNING
     str r1, [r0]
 9:  pop {r4, pc}
+
+/* Powers the synthesizer down in stock's TXPD order (SS7.62).  Clobbers
+ * r0-r3. */
+.equ EFR32_RAC_SYEN_REMAINING, (EFR32_RAC_SYEN_SYCHPEN | EFR32_RAC_SYEN_SYENCHPREG | \
+    EFR32_RAC_SYEN_SYENCHPREPLICA | EFR32_RAC_SYEN_SYENMMDREG | \
+    EFR32_RAC_SYEN_SYENMMDREPLICA1 | (1 << 6) /* SYENMMDREPLICA2 */ | \
+    EFR32_RAC_SYEN_SYENVCOBIAS | EFR32_RAC_SYEN_SYLODIVLDOBIASEN | \
+    (1 << 13) /* SYSTARTCHPREG */ | (1 << 14) /* SYSTARTMMDREG */)
+
+.thumb_func
+efr32_seq_synth_stop:
+    push {r4, lr}
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_ENRETIME
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_XORETIMECTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RETIME_RESETN
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_DIGCLKRETIMECTRL + EFR32_ALIAS_CLR)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYMMDCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYMMDCTRL_SYMMDENRSDIG
+    str r1, [r0]
+    ldr r0, =EFR32_SYNTH_CMD
+    movs r1, #EFR32_SYNTH_CMD_SYNTHSTOP
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_SYEN_SYLODIVLDOEN
+    str r1, [r0]
+    ldr r1, =EFR32_RAC_SYEN_SYENVCOREG
+    str r1, [r0]
+    movs r0, #1
+    bl efr32_seq_delay
+    ldr r0, =(EFR32_RAC_SYEN + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_SYEN_SYENVCOPFET
+    str r1, [r0]
+    ldr r2, =(EFR32_RAC_RADIOEN + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_RADIOEN_PRESTB100UDIS
+    str r1, [r2]
+    ldr r1, =EFR32_RAC_SYEN_REMAINING
+    str r1, [r0]
+    ldr r0, =(EFR32_SYNTH_VCDACCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =(EFR32_SYNTH_VCDACCTRL_VCDACEN | EFR32_SYNTH_VCDACCTRL_LPFEN | EFR32_SYNTH_VCDACCTRL_LPFQSEN)
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_RAC_SYNTHENCTRL_VCOSTARTUP
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_RADIOEN
+    movs r1, #0
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_SYNTHENCTRL + EFR32_ALIAS_CLR)
+    ldr r1, =EFR32_RAC_SYNTHENCTRL_SYNTHSTARTREQ
+    str r1, [r0]
+    pop {r4, pc}
