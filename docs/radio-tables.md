@@ -5865,3 +5865,35 @@ stock's on-air T_IFS is the nominal 150 us, d_rx + d_tx is ~9.2 us. That
 assumption is the remaining unverified link; checking it needs an external
 receiver. Stock's jitter (~1 us) is larger than ours (~0.5 us): the open
 image releases TX from a STIMER compare loop at fixed latency.
+
+**Cross-check with a second peer [F].** The same probe, re-wired so that our
+ADV_IND's FRAMESENT reloads TIMER1 and EOF is captured, timed the laptop's
+Bluetooth controller answering with a SCAN_REQ: FRAMESENT -> SCAN_REQ EOF
+335.7 us (334.4-336.9, n=27). The SCAN_REQ is 22 octets on air, 176 us.
+With the host at the nominal 150 us, d_tx + d_rx = 9.7 us. The stock-based
+estimate above gives 9.2 us, so two independent peers agree within 0.5 us.
+Our absolute T_IFS is then 149.7-150.2 us. The split between d_tx and d_rx
+still needs an external receiver.
+
+**TX ready [F].** PRS `RACL.ACTIVE` (source 0x33, signal 0) rising ->
+ADV_IND SYNCSENT: 131.7 us (131.65-131.76, n~330). That is TXEN to sync
+word, i.e. TXEN -> first bit on air = 91.7 us + d_tx. [I] ACTIVE rising
+marks the TXEN write (RAC leaving OFF). The LLL's
+`radio_tx_ready_delay_get` and the three related getters still return 0.
+
+**Radio prerequisites: which timers must run [F].** Live stage 3 has
+PROTIMER enabled but stopped (`CTRL=0`, counter 0 across samples), and
+RTCC, PRORTC, SYSCFG, RDMAILBOX0/1 and RDSCRATCHPAD clocks off. Knock-outs,
+counting M0+ state-IRQ entries over 3 s before and after each:
+- clearing `PROTIMER.EN` at runtime;
+- gating `CMU.CLKEN1.PROTIMER` at runtime (PROTIMER accesses then bus-fault);
+- a build that never sets `PROTIMER.EN` at all.
+
+None changed TXWARM/TX (~90 per 3 s) or RXSEARCH entries, frames were still
+received, and the last build sent 9 scan responses with the host receiving
+the name. So the open image needs no PROTIMER counter, enable or clock,
+during operation or at boot. §4's "PROTIMER before RAC" ordering came from
+the vendor-sequencer path and does not hold for the open image. One
+difference in the no-enable build: `RAC.STATUS` before the first TXEN read
+`0x00400000` instead of `0x10400000` (bit 28). Its meaning is not yet
+established. Also seen: IRQ1 (RXWARM) never fires in the open flow.
