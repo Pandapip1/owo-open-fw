@@ -37,6 +37,14 @@ build/qemu/qemu-system-arm -trace efr32bg22_rac_command,file=build/qemu-runtime/
 It records written command words and every modeled RAC state transition, including timer-driven
 completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
+## The suit board and stimulation scenarios
+
+`-M efr32bg22,board=owo-suit` attaches the suit control unit's parts (DAC, channel switches,
+expander) to the SoC's SPI, I2C and GPIO lines and models the output stage; it records a VCD
+and injects faults at chosen virtual times. `sim/scripts/run-suit-board.sh` runs an image on it;
+`sim/scripts/stim_scenario.py` runs a scenario (commands through gdb, faults, recording,
+summary). Method, parameters, results and limits: `docs/stim-simulation.md`.
+
 ## Host devices
 
 A host device is handed to an emulated peripheral much as a PCI device is passed through to a
