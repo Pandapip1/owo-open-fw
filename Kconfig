@@ -20,4 +20,14 @@ config OWO_GECKO_APP_VERSION
 	  The stock app carries 1. Kept equal so that neither an update to the open firmware nor
 	  a return to stock depends on the bootloader's unknown version policy.
 
+config OWO_SIM_INJECT
+	bool "TEST ONLY: command mailbox for the QEMU board simulation"
+	help
+	  Adds a RAM mailbox (owo_sim_mailbox) that a debugger fills and a 1 ms system work
+	  item drains: each entry is handed to the GATT write callback (write_cb) exactly as an
+	  ATT write would be after the stack's permission check, or to the disconnect callback.
+	  It lets the QEMU board simulation (docs/stim-simulation.md) command stimulation without
+	  a Bluetooth connection. Never enable it in a product or hardware build: anything that
+	  can write RAM over a debug port could then command output.
+
 source "Kconfig.zephyr"

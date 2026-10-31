@@ -6,6 +6,8 @@
 mod ble;
 mod hal;
 mod ota;
+#[cfg(CONFIG_OWO_SIM_INJECT)]
+mod sim_inject;
 mod wdt;
 
 use core::sync::atomic::{AtomicBool, Ordering};

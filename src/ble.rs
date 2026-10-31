@@ -308,6 +308,24 @@ unsafe extern "C" fn write_cb(
     }
 }
 
+/// TEST ONLY: the GATT write callback for characteristic `id`, as an ATT write request reaches
+/// it after the stack's checks (src/sim_inject.rs). Only `user_data` of the attribute is read.
+#[cfg(CONFIG_OWO_SIM_INJECT)]
+pub(crate) fn sim_write(id: usize, data: &[u8]) -> isize {
+    let a = attr(u(&U_SVC1), None, Some(write_cb), id as *mut c_void, 0);
+    // SAFETY: `write_cb` reads `data` for `len` bytes and the attribute's user data only.
+    unsafe {
+        write_cb(core::ptr::null_mut(), &a, data.as_ptr().cast(), data.len() as u16, 0, 0)
+    }
+}
+
+/// TEST ONLY: the disconnect callback (src/sim_inject.rs).
+#[cfg(CONFIG_OWO_SIM_INJECT)]
+pub(crate) fn sim_disconnect(reason: u8) {
+    // SAFETY: `disconnected` does not dereference the connection.
+    unsafe { disconnected(core::ptr::null_mut(), reason) }
+}
+
 fn store(f: impl FnOnce(&mut crate::State)) {
     f(&mut STATE.lock().unwrap());
 }
