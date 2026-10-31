@@ -1,0 +1,45 @@
+/*
+ * Zephyr's software link layer instead of the Silicon Labs binary controller,
+ * exported over H4 on USART1 (VCOM).  The console moves to USART0, which the
+ * kit routes to its expansion header.  UNVALIDATED ON HARDWARE.
+ */
+&bt_hci_silabs {
+	status = "disabled";
+};
+
+&radio {
+	bt_hci_efr32: bt_hci_efr32 {
+		compatible = "zephyr,bt-hci-ll-sw-split";
+		status = "okay";
+	};
+};
+
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_efr32;
+		zephyr,bt-c2h-uart = &usart1;
+		zephyr,console = &usart0;
+		zephyr,shell-uart = &usart0;
+		zephyr,uart-pipe = &usart0;
+	};
+};
+
+/* The kit's mikroBUS SPI pins, used here as a plain UART (TX PC0, RX PC1). */
+&usart0 {
+	compatible = "silabs,usart-uart";
+	current-speed = <115200>;
+	status = "okay";
+};
+
+&burtc0 {
+	status = "okay";
+};
+
+/* HFXO-clocked 32-bit TIMER0: the scheduler clock's active-state provider. */
+&timer0 {
+	status = "okay";
+
+	counter {
+		status = "okay";
+	};
+};

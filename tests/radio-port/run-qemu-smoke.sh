@@ -70,9 +70,9 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     exit "$status"
 fi
 
-# The EFR32 model intentionally has no host character device.  Reconstruct
-# printable console bytes only from QEMU's internal native-USART trace, rather
-# than creating a host-I/O shortcut. Python is already in the Nix shell.
+# Reconstruct printable console bytes from the native USART's tracepoint (a
+# chardev could carry them too: sim/README.md, "Host devices"). Python is
+# already in the Nix shell.
 console=$(sed -n 's/.*USART1 TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
     "$RUNTIME_DIR/radio.trace" | \
     python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex("".join(sys.stdin.read().split())))' | \

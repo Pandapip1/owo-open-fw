@@ -37,6 +37,70 @@ build/qemu/qemu-system-arm -trace efr32bg22_rac_command,file=build/qemu-runtime/
 It records written command words and every modeled RAC state transition, including timer-driven
 completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
+## Host devices
+
+A host device is handed to an emulated peripheral much as a PCI device is passed through to a
+VM, except that the emulated silicon sits in between and translates: the peripheral model
+(`vendor/qemu/hw/arm/efr32-usart.c`) implements the EFR32's registers, buffers, interrupts and
+line timing, and its line side is a QEMU character device that owns the host device. Nothing
+outside QEMU bridges the two.
+
+Each USART is claimed by the chardev whose id is `<soc>.<usart>`: `soc.usart0` / `soc.usart1`
+on `efr32bg22`, `soc0.usart1`, `soc1.usart0`, ... on `efr32bg22-dual`. Without one, SoC *n*'s
+USART0 and USART1 take `-serial` 2*n* and 2*n*+1, QEMU's usual order. Any chardev backend
+works:
+
+| Give the USART             | Option                                              |
+|----------------------------|-----------------------------------------------------|
+| a host serial port         | `-chardev serial,id=soc.usart1,path=/dev/ttyUSB0`   |
+| a new pty                  | `-chardev pty,id=soc.usart1` (QEMU prints its path) |
+| a file (console capture)   | `-chardev file,id=soc.usart1,path=console.log`      |
+| a socket                   | `-chardev socket,id=soc.usart1,path=u.sock,server=on,wait=off` |
+| the Linux virtual HCI      | `-chardev vhci,id=soc1.usart1[,path=/dev/vhci]`     |
+
+The USART tells a `serial` backend the guest's baud rate, parity, data and stop bits, so a real
+port follows the firmware's configuration. Frames take their real duration in virtual time at
+the programmed rate (start, data, parity and stop bits; PCLK from CMU.SYSCLKCTRL); while the
+receiver is disabled the line is held, and once enabled, a frame completing into a full RX
+buffer is lost with RXOF as on silicon. Not modelled: synchronous (SPI) mode, IrDA, I2S, the
+USART timer comparators (Zephyr's async API), parity/framing errors and the EUSART.
+
+`efr32bg22_usart_tx` still traces every transmitted byte (now at the frame's stop bit) and
+`efr32_usart_rx` every received one, so trace-based console reconstruction keeps working.
+
+### Bluetooth controller on the host (`vhci`)
+
+The `vhci` backend (`vendor/qemu/chardev/char-vhci.c`, Linux only) owns `/dev/vhci`. It is
+silicon-independent: it splits the frontend's H4 byte stream into the one-packet-per-`write()`
+form vhci takes and serialises host packets back into the stream, paced by what the UART
+accepts. The kernel sees the emulated controller as it would a UART-attached one under
+`btattach`: a new `hciN` that `bluetoothd`, `bluetoothctl` and bleak use directly. The
+controller is created when the guest first enables its receiver, as a host would attach to a
+booted controller: the kernel sends HCI_Reset on registration and allows HCI_CMD_TIMEOUT (2 s)
+for each answer. The path can be a QEMU fd set (`-add-fd` + `path=/dev/fdset/N`), which is how
+`tests/hci-uart-port/fake-vhci-scan.py` tests the whole chain without root.
+
+`tests/hci-uart-port` is Zephyr's `hci_uart` sample on our controller (Zephyr's split link layer
+over `modules/efr32-radio`), H4 on USART1 at 115200 baud and its console on USART0.
+`tests/hci-uart-port/run-qemu-vhci.sh <device-image>` runs the device under test on soc0 and the
+controller on soc1 with `/dev/vhci` passed through. Select the new adapter explicitly
+(`bluetoothctl` `list`/`select`, bleak `adapter="hciN"`); the host's other controllers are not
+touched. Access: `/dev/vhci` must be readable and writable by the user running QEMU.
+
+### Timing against a real-time host
+
+The guests run on `-icount` virtual time; BlueZ's HCI command (2 s), connection and ATT (30 s)
+timeouts are real time. On-air timing (supervision timeouts, connection events) involves only
+emulated parties and stays entirely virtual, so it is unaffected by host speed. Run with
+`-icount shift=3,sleep=on`: idle periods then advance virtual time no faster than real time,
+so a real-time host deadline always covers at least as much virtual time, and the emulated
+controller can never time out a host that is merely slow in real terms. (`sleep=off` jumps
+idle periods and ran 2.2x faster than real time on the dual machine.) Measured on a loaded
+host (load average about 25 on 10 cores), dual machine, advertiser on soc0: each HCI command's
+round trip over vhci was 100 to 270 ms, and up to 1 s for the first HCI_Reset during boot, all
+inside HCI_CMD_TIMEOUT; with both SoCs busy virtual time ran at about 0.3x real time. Real
+time is never fed into the guests: bytes from the host enter at the current virtual time.
+
 ## Status
 * The current in-process model cleanly transfers from the bootloader reset vector to the stock
   application's reset vector. A bounded native-QEMU capture reached early radio initialization:
