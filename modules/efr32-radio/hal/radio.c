@@ -3498,7 +3498,7 @@ void radio_tmr_hcto_configure(uint32_t hcto)
 			efr32_hw_rx2tx_armed = true;
 		}
 		/* As in the QEMU path, HCTO bounds the window from this point. */
-		cntr_qemu_tifs_arm_after_us(hcto,
+		cntr_rx_timeout_arm_after_us(hcto,
 			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
 	}
 #endif

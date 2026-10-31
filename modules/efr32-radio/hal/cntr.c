@@ -245,27 +245,38 @@ void cntr_radio_cmp_cancel(void)
 }
 
 /*
- * A QEMU-only software TIFS delay, independent of the normal LLL event launch. Its handler calls
- * only the wake mailbox hook; the persistent Zephyr job owns all RAC state changes.
+ * One software delay on the TIFS clock event, independent of the normal LLL event launch. Its
+ * handler calls only the wake mailbox hook; the persistent Zephyr job owns all RAC state changes.
+ *
+ * With @p exact, the expiry is a physical no-earlier-than boundary, unlike an LLL launch's
+ * start-by deadline: a target inside the clock event's minimum arm lead is waited out by spinning
+ * on the scheduler clock and then woken, neither released early nor stretched late. Without it,
+ * the expiry is a timeout that may fire late, and such a target is stretched to the lead instead
+ * of spinning the caller.
  */
-void cntr_qemu_tifs_arm_after_us(uint32_t delay_us, uint32_t generation)
+static void cntr_tifs_event_arm_after_us(uint32_t delay_us, uint32_t generation, bool exact)
 {
 	uint32_t event_generation;
+	uint32_t target = 0U;
+	bool wait = false;
 	int ret = -ETIME;
 	unsigned int key = irq_lock();
 
 	k_clock_event_cancel(&qemu_tifs_event);
 	K_SPINLOCK(&radio_event_lock) { qemu_tifs.event_generation = 0U; }
-	/*
-	 * TIFS is a physical no-earlier-than boundary, unlike an LLL launch's start-by deadline: an
-	 * interval inside the minimum lead is stretched to that lead, never released early.
-	 */
 	for (uint8_t attempt = 0U; attempt < 2U && ret == -ETIME; attempt++) {
 		uint64_t now = k_clock_event_sched_now();
 		uint64_t delay = DIV_ROUND_UP((uint64_t)delay_us * CONFIG_CLOCK_EVENT_SCHED_FREQUENCY,
 					      USEC_PER_SEC);
+		uint64_t lead = (uint64_t)k_clock_event_min_arm_cycles(&qemu_tifs_event) + 1U;
 
-		delay = MAX(delay, (uint64_t)k_clock_event_min_arm_cycles(&qemu_tifs_event) + 1U);
+		if (exact && delay < lead) {
+			target = (uint32_t)(now + delay);
+			wait = true;
+			ret = 0;
+			break;
+		}
+		delay = MAX(delay, lead);
 		ret = k_clock_event_arm_abs_with_generation(&qemu_tifs_event, (uint32_t)(now + delay),
 							    &event_generation);
 		if (ret == 0) {
@@ -278,6 +289,22 @@ void cntr_qemu_tifs_arm_after_us(uint32_t delay_us, uint32_t generation)
 	}
 	irq_unlock(key);
 	LL_ASSERT(ret == 0);
+	if (wait) {
+		while ((int32_t)(target - (uint32_t)k_clock_event_sched_now()) > 0) {
+			arch_nop();
+		}
+		efr32_radio_qemu_tifs_wake(generation, target);
+	}
+}
+
+void cntr_qemu_tifs_arm_after_us(uint32_t delay_us, uint32_t generation)
+{
+	cntr_tifs_event_arm_after_us(delay_us, generation, true);
+}
+
+void cntr_rx_timeout_arm_after_us(uint32_t delay_us, uint32_t generation)
+{
+	cntr_tifs_event_arm_after_us(delay_us, generation, false);
 }
 
 void cntr_qemu_tifs_cmp_cancel(void)
