@@ -37,6 +37,16 @@ build/qemu/qemu-system-arm -trace efr32bg22_rac_command,file=build/qemu-runtime/
 It records written command words and every modeled RAC state transition, including timer-driven
 completion. The trace file is transient and belongs under `build/qemu-runtime/`.
 
+## Debugging and flashing the simulator
+
+The machine has the BG22's SWD debug port (SW-DP, AHB-AP, DCI, M33 halting
+debug, MSC). OpenOCD connects through QEMU's socket probe
+(`-device swd-remote-bitbang` and `scripts/sim/qemu-swd.cfg`) or a simulated
+J-Link on a host USB device controller (`-object usb-gadget-host`, `-device
+jlink`), and the flashing scripts run unchanged apart from the probe. See
+`docs/debug-port-model.md`; `tests/debug-port/run-e2e.sh` rehearses the
+hardware procedures.
+
 ## Status
 * The current in-process model cleanly transfers from the bootloader reset vector to the stock
   application's reset vector. A bounded native-QEMU capture reached early radio initialization:
