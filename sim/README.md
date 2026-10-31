@@ -101,6 +101,16 @@ round trip over vhci was 100 to 270 ms, and up to 1 s for the first HCI_Reset du
 inside HCI_CMD_TIMEOUT; with both SoCs busy virtual time ran at about 0.3x real time. Real
 time is never fed into the guests: bytes from the host enter at the current virtual time.
 
+## Debugging and flashing the simulator
+
+The machine has the BG22's SWD debug port (SW-DP, AHB-AP, DCI, M33 halting
+debug, MSC). OpenOCD connects through QEMU's socket probe
+(`-device swd-remote-bitbang` and `scripts/sim/qemu-swd.cfg`) or a simulated
+J-Link on a host USB device controller (`-object usb-gadget-host`, `-device
+jlink`), and the flashing scripts run unchanged apart from the probe. See
+`docs/debug-port-model.md`; `tests/debug-port/run-e2e.sh` rehearses the
+hardware procedures.
+
 ## Status
 * The current in-process model cleanly transfers from the bootloader reset vector to the stock
   application's reset vector. A bounded native-QEMU capture reached early radio initialization:

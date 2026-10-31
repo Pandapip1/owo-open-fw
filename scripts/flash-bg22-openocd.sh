@@ -37,11 +37,21 @@ if [ "${2:-}" = --run ]; then
   run_after=1
 fi
 
-common_args=(
-  -s "$scripts"
-  -f interface/jlink.cfg
-  -c 'adapter serial 000440200548'
-  -c 'transport select swd'
+# The EK's on-board J-Link by serial.  OWO_BG22_JLINK_SERIAL selects another
+# J-Link, e.g. a simulated one (docs/debug-port-model.md); OWO_BG22_ADAPTER_CFG
+# replaces the adapter altogether, e.g. scripts/sim/qemu-swd.cfg for QEMU's
+# remote_bitbang probe.
+if [ -n "${OWO_BG22_ADAPTER_CFG:-}" ]; then
+  adapter_args=(-f "$OWO_BG22_ADAPTER_CFG")
+else
+  adapter_args=(
+    -f interface/jlink.cfg
+    -c "adapter serial ${OWO_BG22_JLINK_SERIAL:-000440200548}"
+    -c 'transport select swd'
+  )
+fi
+
+target_args=(
   -f target/silabs/xg21.cfg
   -f "$helpers"
   -c 'adapter speed 1900'
@@ -49,16 +59,16 @@ common_args=(
 
 # Keep preflight in its own OpenOCD process.  If it fails, no erase command has
 # even been parsed in that process, and the existing firmware remains intact.
-"$openocd" "${common_args[@]:0:4}" -c 'set WORKAREASIZE 0x800' \
-  "${common_args[@]:4}" \
+"$openocd" -s "$scripts" "${adapter_args[@]}" -c 'set WORKAREASIZE 0x800' \
+  "${target_args[@]}" \
   -c 'init; if {[catch {bg22_preflight} err]} { echo $err; shutdown error }; shutdown'
 
-if ! "$openocd" "${common_args[@]:0:4}" -c 'set WORKAREASIZE 0x800' \
-  "${common_args[@]:4}" -c "set OWO_RUN_AFTER $run_after" \
+if ! "$openocd" -s "$scripts" "${adapter_args[@]}" -c 'set WORKAREASIZE 0x800' \
+  "${target_args[@]}" -c "set OWO_RUN_AFTER $run_after" \
   -c 'init; if {[catch {bg22_fast_flash $::env(OWO_BG22_FLASH_IMAGE) $OWO_RUN_AFTER} err]} { echo $err; shutdown error }; shutdown'; then
   echo "fast flash failed after erase; restoring with AP writes" >&2
-  "$openocd" "${common_args[@]:0:4}" -c 'set WORKAREASIZE 0' \
-    "${common_args[@]:4}" -c "set OWO_RUN_AFTER $run_after" \
+  "$openocd" -s "$scripts" "${adapter_args[@]}" -c 'set WORKAREASIZE 0' \
+    "${target_args[@]}" -c "set OWO_RUN_AFTER $run_after" \
     -c 'init; if {[catch {bg22_slow_recover $::env(OWO_BG22_FLASH_IMAGE) $OWO_RUN_AFTER} err]} { echo $err; shutdown error }; shutdown'
   exit 1
 fi
