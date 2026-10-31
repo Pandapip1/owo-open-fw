@@ -5897,3 +5897,188 @@ the vendor-sequencer path and does not hold for the open image. One
 difference in the no-enable build: `RAC.STATUS` before the first TXEN read
 `0x00400000` instead of `0x10400000` (bit 28). Its meaning is not yet
 established. Also seen: IRQ1 (RXWARM) never fires in the open flow.
+
+### 7.72 The RAC state machine, RAC.STATUS, bus-clock gating and radio timing, measured and modelled
+
+All on the BGM220 board, stage 3 (`build-stage3-head`) unless noted. Probe
+scripts and raw logs are in the session scratchpad, not in this repository.
+
+**Methods.** (a) *Passive sampling*: ~20k reads of `RAC.STATUS` over the
+AHB-AP while stage 3 advertised to an actively scanning host, bucketed by
+state. (b) *Debugger as sequencer*: M33 halted; the M0+ halted, its NVIC
+disabled (`ICER0`), and its PC set to a `wfi; b .-2` loop in spare SEQRAM, so
+nothing but the debugger cleared state events; commands and `SEQIF` clears
+were then written one at a time, reading `STATUS`/`SEQIF` after each.
+(c) *Gate map*: M33 halted, every `CMU.CLKEN1` bit, `RADIOCLKCTRL.EN` and
+`CLKEN0.SYSCFG` cleared one at a time while reading each 16 KiB radio
+window. (d) *PRS*: `scripts/bg22-tifs-probe.tcl` generalised to any three
+PRS signals (RACL.ACTIVE/RX/TX, MODEMH.SYNCSENT/EOF, MODEM.FRAMESENT,
+MODEML.FRAMEDET) into TIMER1 CC0-2 at 76.8 MHz, CC0 reload-starting the
+counter. (e) *M0+ SysTick probe*: a scratch build of `radio_seq.S` that
+stamps SysTick (38.4 MHz assumed) at every IRQ entry, after each
+acknowledgement until `STATUS` changes, after `SYNTHSTART` until `INLOCK`,
+and around `PARAMP`.
+
+**First attempts that were wrong.** An earlier version of (b) never halted
+anything: `efm32.cpu halt` is not a target method in this OpenOCD, so the
+firmware kept running and every command appeared to complete at once. With
+the M0+ only *halted* (not in WFI), the RAC never left OFF at all, even for
+TXEN: `STATUS` showed TXENS or RXENS and the state stayed 0. The parked-WFI
+setup is what made the state machine observable. The first SysTick probe put
+its ring at SEQRAM `0x4000`, which is in use by something else (it read
+`0xe5ecc0de`, `0x01010201`, `0xaabbccdd`, ...; the owner is not identified),
+and the image stopped advertising; moved to `0x2000`. That probe's
+RX-side numbers are discarded: its `INLOCK` poll ran to its bound in the
+TX2RX handler, where the receive synthesizer never reports lock.
+
+**State machine [F]** (method b):
+- OFF + SWRXEN -> RXWARM (1), `STATERXWARM` latched. TXEN in OFF ->
+  TXWARM. **OFF leaves at once even with `STATEOFF` still set.**
+- **Every other observed state is left only once its own `SEQIF` bit is
+  cleared, whether or not `SEQIEN` enables it**: RXWARM was held with
+  `SEQIEN` = 0. A pending event of *another* state does not hold: TXEN went
+  OFF -> TXWARM, and the TXWARM clear went to TX, with `STATEOFF` set
+  throughout. This refines §7.69's "any SEQIEN-enabled event" rule.
+- RXWARM -> RXSEARCH on the clear, even if SWRXEN was withdrawn
+  meanwhile. RXDIS in RXWARM did nothing.
+- RXSEARCH -> RXPD when SWRXEN is withdrawn, no RXDIS needed. RXDIS also
+  gives RXPD **with SWRXEN still set**. The RXPD clear then gives OFF ->
+  RXWARM (both events latched), so the radio is soon back in RXSEARCH. This
+  explains §7.63's "RXDIS left the RAC in RXSEARCH". TXDIS in RXSEARCH did
+  nothing.
+- RXPD, TXPD, SHUTDOWN -> OFF on their clear. TXDIS/RXDIS in RXPD did
+  nothing. SWRXEN set during RXPD gave RXWARM right after the OFF entry.
+- TXWARM -> TX on the clear. TXDIS in TXWARM only clears TXENS, and the
+  clear then gives TXPD.
+- **TXDIS in TX is immediate, even with `STATETX` uncleared**: TXPD, or
+  TX2RX with SWRXEN set. RXDIS in TX does nothing. TXEN in TX sets TXENS
+  (`0x49400000`); what that does at frame end was not observed.
+- TX2RX -> RXSEARCH on the clear.
+- FORCEDISABLE from RXSEARCH or TX -> SHUTDOWN (13) at once, clearing TXENS.
+  The SHUTDOWN clear -> OFF with FORCEDISABLE still set. OFF then holds until
+  FORCEDISABLE is cleared, after which a still-asserted SWRXEN gives RXWARM.
+- Running stage 3, counted with the M0+ IRQ counters (method a): IRQ1 = 0,
+  so the open flow never uses RXWARM (TX2RX goes straight to RXSEARCH).
+  TXPD entries = responses + cancels, so **RX2TX goes to TXPD when the M0+
+  withdrew the request with TXDIS**. A sample in RX2TX after that TXDIS
+  read `0x17000000` (TXENS clear, still RX2TX).
+
+**RAC.STATUS bits [F]:**
+
+| state, condition | sample |
+|---|---|
+| OFF, events clear / STATEOFF pending | `0x00400000` / `0x10400000` |
+| RXWARM pending (SWRXEN) | `0x91400002` |
+| RXSEARCH pending / cleared | `0xb2400002` / `0xa2400002` |
+| RXFRAME after TXEN (running) | `0x63400000` |
+| RXPD (running, handler busy) | `0x14000000` |
+| RX2TX (running) | `0x57000000`, `0x17000000` after TXDIS |
+| TXWARM pending | `0x58400000` (`0xd8000002` running, SWRXEN set) |
+| TX pending / cleared | `0x19400000` / `0x09400000` |
+| TX2RX (running) | `0x9b000002` |
+| SHUTDOWN pending (from TX / from RXSEARCH) | `0x1d400000` / `0x9d400002` |
+
+So: SEQACTIVE (28) = any `SEQIF` state event set, regardless of `SEQIEN`
+(it matches the coordinator's `0x10400000` before the first TXEN). TXENS (30)
+= the latched TX request. RXENS (31) and RXMASK bit 1 = SWRXEN. DEMODENS
+(29) = RXSEARCH or RXFRAME (clear in RXWARM, RXPD, RX2TX, TX2RX, TX,
+TXWARM, OFF and SHUTDOWN). SEQSLEEPING (22) = the M0+ is sleeping in WFI:
+clear while it is halted (`0x00000000` in OFF), and clear in every sample
+taken while a handler ran. [I] RX2RX was never sampled.
+
+**Bus clocks [F]** (method c). With `RADIOCLKCTRL.EN` set, clearing each
+`CLKEN1` bit turns every read of exactly one window into a bus error:
+
+| bit | block | bit | block |
+|---|---|---|---|
+| 0 | AGC `0xB800C000` | 6 | SYNTH `0xB8018000` |
+| 1 | MODEM `0xB8014000` | 7 | **RDSCRATCHPAD `0xB8024000`** |
+| 2 | RFCRC `0xB8010000` | 8 | RDMAILBOX0 `0xB8028000` |
+| 3 | FRC `0xB8004000` | 9 | RDMAILBOX1 `0xB802C000` |
+| 4 | PROTIMER `0xB801C000` | 10 | PRORTC `0xB8000000` (§1's [I] base confirmed) |
+| 5 | RAC `0xB8020000` | 11 (BUFC) | **nothing**: BUFC stays readable |
+
+Bits 12-15 changed nothing. `RADIOCLKCTRL.EN` cleared made every radio
+window, BUFC (`0xBA000000`) and SEQRAM (`0xB0000000`) fault.
+`CLKEN0.SYSCFG` cleared made SYSCFG fault at both the secure and the
+non-secure address. A write while gated is accepted by the AP without error
+and dropped: RAC `SR0` and SYSCFG `ROOTDATA1` read back their pre-gating
+value once the clock returned. The windows at `0xB8008000` and from
+`0xB8030000` to at least `0xB80FC000` fault whatever the enables. The
+secure `0xA8...` radio aliases read 0 while the radio is attributed
+non-secure. The coordinator saw the same bus-error response for TIMER1 and
+PRS (§7.71). [I] That a CPU access takes a BusFault rests on the AHB error
+seen by the AP; a CPU-side load was not stepped on silicon.
+
+**Timing [F]** (methods d, e; TIMER1 at 76.8 MHz, n > 300 per row unless
+noted):
+
+| interval | value |
+|---|---|
+| RACL.ACTIVE rise (TXEN) -> RACL.TX rise | 91.0 us (TXWARM incl. the M0+ handler) |
+| RACL.TX rise -> SYNCSENT | 40.6-40.7 us |
+| FRAMESENT -> RACL.TX fall | 0.8-1.0 us |
+| FRAMESENT -> RACL.RX rise | 124.3-124.6 us (TX exit to RX: 123.4-123.7 us, TX2RX incl. the M0+ handler) |
+| EOF -> RACL.RX fall | 3.2-3.4 us |
+| MODEML.FRAMEDET -> EOF | 131.4-133.2 us (frames assumed 14-octet SCAN_REQs) |
+| `SEQIF` clear -> `STATUS` change (SysTick) | 1.09-1.22 us, same for TX2RX, RXPD, TXPD, RX2TX |
+| `SYNTHSTART` -> `INLOCK`, TX (SysTick, n = 216) | 7.6-9.95 us, median ~8.9 us |
+| `PARAMP` set -> `TXRAMPDONE` (SysTick, n = 110) | 0.44 us (one poll) |
+| `PARAMP` clear -> `TXRAMPDONE` (SysTick, n = 216) | 0.81-3.96 us, median 3.96 us |
+
+In receive, `SYNTH.STATUS` stayed `0x6` (IFFREQEN, SYNTHREADY) and never
+showed `INLOCK`. The SysTick rate is assumed rather than cross-calibrated:
+the probe's TX entry-to-exit read 150.9 us against 153.55 us from PRS, but
+its two ends have different IRQ-entry latencies, so this is not a clean
+check (±2%). **Note on a firmware comment:** `radio_seq.S` says the RAC
+enters TX "~3 us after this handler acknowledges" (§7.68). The direct
+clear-to-`STATUS` latency is 1.09 us; the ~3 us included the M0+'s
+exception exit and the IRQ9 entry. The 135.6 us hold constant was tuned
+end-to-end against stock (§7.71), so this changes no value.
+
+**QEMU model** (`vendor/qemu` `2707a58585`): everything above under [F] is
+modelled: the state routes and own-event holds, the 1.09 us acknowledgement
+latency, the STATUS bits, the gate map (bus error on read, write dropped;
+the machines no longer ignore bus errors, so a gated access is a CPU fault),
+the TX timing (TX entry to exit = 0.65 + 40 + 8·(PDU + 3) + 0.9 us), the
+receiver's EOF (peer FRAMESENT + 9.45 us, the d_tx + d_rx of §7.71) and its
+exit 3.3 us later, `INLOCK` after 8.9 us (`IFFREQEN` instead in IF mode), and
+the PA ramp times. Model check: EOF -> SCAN_RSP SYNCSENT is 180.6 us
+(silicon 180.1-180.9 us).
+
+[I]/placeholder choices in the model:
+- RXFRAME begins at frame detection, 3.5 us after the access address
+  arrives (from the FRAMEDET row, assuming those frames were SCAN_REQs).
+- Frame-driven exits (TX end, frame end, RXFRAME entry) obey the own-event
+  hold, which the debugger could not exercise.
+- RXDIS in RXFRAME/RX2RX/RX2TX/TX2RX is ignored.
+- A TXEN latched during TX is dropped at frame end.
+- RXDONE is raised at EOF and TXDONE at TX exit.
+- An aborted TX (TXDIS) raises no TXDONE.
+- A receiver must be searching when the preamble arrives.
+- Commands (TXEN, SWRXEN, TXDIS in TX, FORCEDISABLE) act with no latency.
+- SEQRAM is not gated by `RADIOCLKCTRL`.
+- Only LE 1M is modelled.
+
+**Results in QEMU.**
+- **Hardware-configuration advertiser alone** (shift=5): 159 TX in 5.2 s,
+  no panic.
+- **Against the QEMU-configuration scanner** (shift=3, sleep=off): 2863
+  SCAN_REQs, 2863 SCAN_RSPs and 2863 name reports in 286 s virtual, no
+  panic. The first SCAN_REQ is now answered too.
+- **QEMU-configuration advertiser alone**: 159 TX in 5.2 s, now through
+  RXWARM, as silicon does for OFF + SWRXEN.
+- **QEMU-configuration advertiser against the scanner: a regression.** It
+  hit its QEMU-only TIFS job deadline panic once, 61.48 us late against a
+  61.04 us tolerance, after 33 s virtual. The previous model ran 118 s
+  without one.
+
+**Still divergent.**
+- **M0+ code timing.** One `-icount` rate serves both cores, so the
+  sequencer's handlers run at the M33's instruction rate. In the dual run
+  TXWARM takes 12.6 us against silicon's 91 us, and TX2RX 39 us against
+  123.5 us. The model reproduces the hardware latencies around them, but
+  not the handler durations.
+- **Not measured, so left as [I] or unmodelled:** command latencies,
+  RX2RX's STATUS and hold, TXEN-in-TX semantics, and the d_tx/d_rx split.
+- **Unidentified SEQRAM `0x4000` user.**
