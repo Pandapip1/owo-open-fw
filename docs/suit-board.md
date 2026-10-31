@@ -120,13 +120,30 @@ application area replaced by the default `owo_suit` build. **[E]**
   `owo_suit` build starts straight from the unit's bootloader and runs the radio. **[E]**
 
 ## Build numbers (2026-10-31, with the budget settings in `prj.conf`)
-| Board | Flash | RAM (of 32 760 B) | Fits? |
+| Board | Flash | RAM (of 32 760 B) | Reserve check (31 000 B) |
 |---|---|---|---|
-| `bg22_ek4108a` | 143 228 B | 31 956 B (97.6 %) | links |
-| `owo_suit` | 137 804 B of 221 184 B (62.3 %) | 31 500 B (96.2 %) | links |
-| `owo_suit`, `-DOWO_HW=ON` | - | - | no: RAM overflows by 324 B |
+| `bg22_ek4108a` | 143 068 B | 29 972 B (91.5 %) | passes, 2 788 B free |
+| `bg22_ek4108a`, `-DOWO_HW=ON` | 156 316 B | 30 988 B (94.6 %) | passes, 1 772 B free |
+| `owo_suit` | 137 812 B of 221 184 B (62.3 %) | 29 588 B (90.3 %) | passes, 3 172 B free |
+| `owo_suit`, `-DOWO_HW=ON` | 156 324 B of 221 184 B (70.7 %) | 30 972 B (94.5 %) | passes, 1 788 B free |
+
+What made the output-stage image fit (each number measured as the linker's RAM total before and
+after): four PSA key slots instead of sixteen (-1 248 B; the bound is argued in `prj.conf`), the
+radio HAL's BUFC TX FIFO and scratch PDU sized for the largest PDU this configuration stages
+instead of RAIL's 512 bytes and a 251-octet data PDU (-672 B, `hal/radio.c`), and the IADC
+driver's channel table cut to the one channel the output stage reads, without the unused DMA
+state (-192 B, `owo-suit-hw.conf`). Thread stacks are unchanged: most of their worst-case
+workloads (pairing, GATT writes, encrypted connections, a running output stage) cannot be driven
+in QEMU yet, so they keep their sizes and the reserve.
+
+**Not yet counted: pairing needs a heap.** The image has no mbedtls heap and no CCM, so AES-CMAC,
+the ECB session key and link-layer CCM fail (see `prj.conf`); LE Secure Connections pairing and
+encryption cannot complete. Adding them costs about 1.4 KB of RAM (measured per operation, four
+contexts at once), which would leave the output-stage images below the 1 760 B reserve again,
+unless the AES work moves to the BG22's AES hardware or stacks are sized from measurements of
+those workloads.
 
 Before the budget settings (LTO, no printk, no controller privacy or filter list, no fault dump,
 no GATT caching, no vendor HCI) the kit needed 192 708 B / 33 068 B (RAM over by 308 B) and the
-suit 186 284 B / 32 612 B; `-DOWO_HW=ON` was 1 444 B over. The suit's 1 260 B of RAM headroom is
-still below the 1 760 B reserve that `scripts/check-hardware-ram.sh` enforces.
+suit 186 284 B / 32 612 B; `-DOWO_HW=ON` was 1 444 B over. With those settings alone the kit
+needed 31 956 B, the suit 31 500 B and the suit with `-DOWO_HW=ON` 33 084 B (324 B over).

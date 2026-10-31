@@ -246,6 +246,11 @@ static const struct device *const dac_dev =
 	DEVICE_DT_GET(DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude));
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
+#if defined(CONFIG_ADC_SILABS_IADC)
+/* owo-suit-hw.conf sizes the IADC driver's channel table for this channel. */
+BUILD_ASSERT(DT_IO_CHANNELS_INPUT_BY_NAME(SUIT, sense) < CONFIG_ADC_SILABS_IADC_CHANNELS,
+	     "raise CONFIG_ADC_SILABS_IADC_CHANNELS to cover the sense channel");
+#endif
 
 /*
  * Reset safe-off runs before Rust has an error channel. Preserve whether every

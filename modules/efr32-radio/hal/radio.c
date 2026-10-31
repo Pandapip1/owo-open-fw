@@ -625,16 +625,46 @@ static void efr32_radio_launch_disarm(void)
  */
 static atomic_t efr32_radio_power_ref = ATOMIC_INIT(1);
 static uint8_t MALIGN(4) pkt_empty[PDU_EM_LL_SIZE_MAX];
-/* Largest data PDU the controller can be configured to receive, plus MIC; or an advertising PDU. */
-static uint8_t MALIGN(4) pkt_scratch[MAX(PDU_DC_LL_HEADER_SIZE + PDU_DC_PAYLOAD_SIZE_MAX + 4,
-					 PDU_AC_LL_SIZE_MAX)];
 /*
- * RAIL encodes a 512-byte BUFC TX FIFO as control value three. Staging keeps
- * that declared allocation real even when OpenISA hands us a short PDU.
+ * Largest payload length any radio_pkt_configure() caller declares in this configuration
+ * (docs/zephyr-ll-port.md, "Packet-target bounds"): legacy advertising and scanning PDUs,
+ * PDU_AC_LEG_PAYLOAD_SIZE_MAX (lll_adv.c, lll_scan.c, also with extended advertising); a data
+ * PDU, its effective data length -- PDU_DC_PAYLOAD_SIZE_MIN without data length extension --
+ * plus the MIC when encrypted (lll_conn.c); DTM, 255 (lll_test.c). radio_pkt_configure()
+ * asserts it, so every RX target and TX source below holds a whole configured PDU.
  */
-static uint8_t MALIGN(4) efr32_tx_fifo[512];
-/* RAIL configures the RX BUFC channel as a 512-byte power-of-two FIFO too. */
-static uint8_t MALIGN(4) efr32_rx_fifo[512];
+#if defined(CONFIG_BT_CTLR_DTM)
+#define EFR32_PKT_PAYLOAD_MAX UINT8_MAX
+#elif defined(CONFIG_BT_CTLR_DATA_LENGTH)
+#define EFR32_PKT_PAYLOAD_MAX \
+	MAX(PDU_AC_LEG_PAYLOAD_SIZE_MAX, \
+	    MAX(LL_LENGTH_OCTETS_RX_MAX, LL_LENGTH_OCTETS_TX_MAX) + PDU_MIC_SIZE)
+#else
+#define EFR32_PKT_PAYLOAD_MAX \
+	MAX(PDU_AC_LEG_PAYLOAD_SIZE_MAX, PDU_DC_PAYLOAD_SIZE_MIN + PDU_MIC_SIZE)
+#endif
+BUILD_ASSERT(EFR32_PKT_PAYLOAD_MAX <= UINT8_MAX, "the LL length field is one octet");
+/* Header octet, length octet, payload: the OpenISA PDU layout (pdu.h). */
+#define EFR32_PKT_SIZE_MAX (PDU_DC_LL_HEADER_SIZE + EFR32_PKT_PAYLOAD_MAX)
+/*
+ * Encrypted RX lands here before decryption, CCM TX output is built here, and the advertising,
+ * scanning and DTM paths use it through radio_pkt_scratch_get().
+ */
+static uint8_t MALIGN(4) pkt_scratch[EFR32_PKT_SIZE_MAX];
+/*
+ * BUFC_BUF_CTRL.SIZE selects a power-of-two FIFO of 64 << SIZE octets: SIZE64 = 0 up to
+ * SIZE4096 = 6 (efr32bg21_bufc.h; RAIL's SL_RAIL_MINIMUM_FIFO_BYTES is the same 64). The
+ * FIFO is plain system RAM at BUF.ADDR, so it only has to hold the largest frame staged in it.
+ */
+#define EFR32_BUFC_FIFO_BYTES_MIN 64U
+#define EFR32_BUFC_FIFO_BYTES(frame) MAX(EFR32_BUFC_FIFO_BYTES_MIN, NHPOT(frame))
+#define EFR32_BUFC_FIFO_CONFIG(bytes) (LOG2(bytes) - LOG2(EFR32_BUFC_FIFO_BYTES_MIN))
+/*
+ * TX: radio_pkt_tx_set() stages exactly one PDU, at most EFR32_PKT_SIZE_MAX octets (it asserts
+ * the configured length), and FRC appends the CRC itself. RAIL's fixed 512 octets are
+ * SIZE512 = 3; without data length extension and DTM the largest PDU (39 octets) needs SIZE64.
+ */
+static uint8_t MALIGN(4) efr32_tx_fifo[EFR32_BUFC_FIFO_BYTES(EFR32_PKT_SIZE_MAX)];
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 /*
  * The synthetic descriptor producer is a QEMU-only test seam.  Keep its
@@ -758,6 +788,14 @@ static void efr32_packet_stage_reset(void)
  */
 #define EFR32_FRC_TRAILER_CRCOK_BIT (1U << 7)
 #define EFR32_FRC_TRAILER_OCTETS 1U
+/*
+ * RX: FRC writes whatever frame arrives, before this configuration rejects it: the header
+ * octet, a length octet of up to 255 and that payload (FRC.MAXLENGTH is 257 in the PHY
+ * tables), then the trailer. What FRC does when a frame overflows the FIFO is unmeasured, so
+ * the FIFO holds the longest frame: SIZE512, as RAIL's.
+ */
+#define EFR32_RX_FRAME_BYTES_MAX (PDU_DC_LL_HEADER_SIZE + UINT8_MAX + EFR32_FRC_TRAILER_OCTETS)
+static uint8_t MALIGN(4) efr32_rx_fifo[EFR32_BUFC_FIFO_BYTES(EFR32_RX_FRAME_BYTES_MAX)];
 
 #define EFR32_MODEM_BASE 0xB8014000UL
 #define EFR32_MODEM_SYNC0_OFFSET 0x068U
@@ -933,7 +971,6 @@ static inline void efr32_radio_trace_previous_seq_launch(void) { }
  * a hardware hypothesis and understood why it's a no-op here, not just
  * guessed to be irrelevant -- see docs/radio-tables.md §7.17. */
 #define EFR32_BUFC_CMD_PREFETCH 2U
-#define EFR32_BUFC_FIFO_512_CONFIG 3U
 #define EFR32_BUFC_RX_THRESHOLD 0x0FFFU
 #define EFR32_BUFC_DESCRIPTOR_THRESHOLD 7U
 #define EFR32_BUFC_DESCRIPTOR_PENDING BIT(18)
@@ -1077,7 +1114,7 @@ static void efr32_tx_fifo_publish(void)
 	LL_ASSERT(efr32_packet_stage.tx_fifo_configured);
 	LL_ASSERT(efr32_packet_stage.tx_bytes <= sizeof(efr32_tx_fifo));
 	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
-	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_CONFIG(sizeof(efr32_tx_fifo));
 	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_tx_fifo;
 	for (uint32_t index = 0U; index < efr32_packet_stage.tx_bytes; index++) {
 		*radio_reg32(base + EFR32_BUFC_WRITEDATA_OFFSET) = efr32_tx_fifo[index];
@@ -2739,6 +2776,8 @@ void radio_pkt_configure(uint8_t bits_len, uint8_t max_len, uint8_t flags)
 	 * controller contract rather than trying to reconfigure an active FRC.
 	 */
 	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
+	/* pkt_scratch and the TX FIFO are sized for this bound. */
+	LL_ASSERT(max_len <= EFR32_PKT_PAYLOAD_MAX);
 	efr32_packet_stage.rx_target = NULL;
 	efr32_packet_stage.rx_fifo_configured = false;
 	efr32_packet_stage.tx_source = NULL;
@@ -2806,7 +2845,7 @@ static void efr32_bufc_rx_fifo_configure(void)
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 
 	*radio_reg32(base + EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
-	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+	*radio_reg32(base + EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_CONFIG(sizeof(efr32_rx_fifo));
 	*radio_reg32(base + EFR32_BUFC_ADDR_OFFSET) = (uint32_t)(uintptr_t)efr32_rx_fifo;
 	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
 }
@@ -3100,7 +3139,7 @@ static void efr32_radio_qemu_rx_descriptor_setup(void)
 	uintptr_t descriptor_end = descriptor_start +
 		EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES;
 	uintptr_t fifo_start = (uintptr_t)efr32_rx_fifo;
-	uintptr_t fifo_end = fifo_start + 512U;
+	uintptr_t fifo_end = fifo_start + sizeof(efr32_rx_fifo);
 
 	/* Catch a linker/layout regression before QEMU can DMA across regions. */
 	LL_ASSERT(descriptor_end <= fifo_start || fifo_end <= descriptor_start);
@@ -3113,7 +3152,8 @@ static void efr32_radio_qemu_rx_descriptor_setup(void)
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_CMD_OFFSET) = EFR32_BUFC_CMD_CLEAR;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
-		EFR32_BUFC_CFG_OFFSET) = EFR32_BUFC_FIFO_512_CONFIG;
+		EFR32_BUFC_CFG_OFFSET) =
+		EFR32_BUFC_FIFO_CONFIG(EFR32_RADIO_QEMU_RX_DESCRIPTOR_RING_BYTES);
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
 		EFR32_BUFC_ADDR_OFFSET) =
 		(uint32_t)(uintptr_t)efr32_qemu_rx_descriptor_ring_storage;
