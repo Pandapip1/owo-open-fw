@@ -6245,3 +6245,347 @@ within ~26 cycles = 0.34 us); any lead is for software latency only.
 - HF timer IF latency below the 26-cycle poll granularity.
 - LF oscillator readiness gating the BURTC count; frequency of HFRCODPLL
   while the DPLL is locking.
+
+### 7.74 Cross-core timing on silicon: the M33 slows the M0+ 2-3x on shared targets
+
+Date: 2026-10-30. Board: the shared BG22 on J-Link. Probe sources, scripts and raw
+logs are kept outside the repository.
+Tags: [F] = measured directly here; [I] = inferred.
+
+**Setup and method.**
+
+- **Clock tree.** Stage 3 (`build-stage3-head`) boots normally and sets the clocks. Then the
+  debugger halts the M33, loads a bare-metal M33 probe into SRAM (`0x20004000`) and resumes it
+  there. The M0+ probe is loaded into SEQRAM (`0xB0000000`) and released the way
+  `radio_reset()` does it: CTRL=pol|SEQRESET, copy, then CTRL=pol|FORCEDISABLE|CPUWAITDIS.
+  FORCEDISABLE stays set, so the radio stays in OFF/SHUTDOWN. Clocks inherited from stage 3 [F]:
+  - SYSCLK = HFRCODPLL at 76.8 MHz (DPLL referenced to HFXO, N=3839, M=1919).
+  - `CMU.SYSCLKCTRL=0x10402`: HCLK/1, PCLK/2, **RHCLKPRESC=DIV2**.
+  - EM01GRPA = HFRCODPLL, so TIMER1 runs at 76.8 MHz.
+  - RADIOCLKCTRL.EN=1, `CLKEN1=0x2a87f`. ICACHE0's bus clock is off.
+- **Workloads.** Each core runs a fixed loop of 200 iterations. Each iteration is 8 identical
+  ops (ALU add, LDR, or STR to one address) plus `subs; bne`. One measurement is 1600 ops,
+  repeated R=40 times; the first repetition is dropped, so n=39. Each repetition is stamped
+  with the core's own cycle counter (M0+ SysTick, CLKSOURCE=core; M33 DWT.CYCCNT) and with
+  TIMER1.CNT read directly by that core.
+- **Cost per op.** Cost/op = (cycles - 609)/1600 on the M0+ and (cycles - 606)/1600 on the
+  M33. The subtracted constant is the measured loop and stamp overhead: the ALU loop is
+  exactly 1 cycle per add on both cores.
+- **Interference.** The other core runs an interfering loop for the whole window, or sits
+  idle. The debugger only arms an experiment and later reads the results; its footprint is
+  quantified separately (§8).
+- **Production-like rows.** Production M33 code runs from flash. I wrote 220 B of M33 loops
+  into the then-unused flash at `0x60000` (slot1). Rows marked "flash" ran from there. That
+  page was later wiped by `hwtest.sh`'s full erase.
+
+**Calibration [F].**
+- M0+ SysTick vs TIMER1: slope 1.99998 (N=500 vs 2000, n=49 each). So the M0+ core runs at
+  exactly TIMER1/2 = 38.4 MHz in this configuration.
+- M33 DWT vs TIMER1: 1.0000. The M33 runs at 76.8 MHz.
+- BURTC (EM4GRPA = LFXO, 32768 Hz) as an independent reference: DWT measured
+  76.7904 MHz, i.e. the HF tree is -125 ppm relative to the LFXO (crystal offsets, [I] which
+  one).
+
+**Repeatability [F].** With the M33 halted or spinning in flash, every M0+ baseline has zero
+spread (min = max over n=39). The key contention rows were repeated in 3 back-to-back runs
+and in a second session after a chip reset. They agreed to within 1.5% between sessions,
+and within 0-0.2% inside a session.
+
+**Address map seen by the M0+ [F].**
+
+| target | M0+ address | result |
+|---|---|---|
+| SEQRAM | `0x0000_0000` | own RAM; flash is not visible (addr 0x100 is SEQRAM) |
+| radio regs (RAC/FRC/SYNTH/MODEM) | `0xA8xx_xxxx` | ok |
+| BUFC | `0xAA00_0000` | ok |
+| radio/BUFC/SEQRAM NS aliases | `0xB8.., 0xBA.., 0xB0.., 0xA0..` | HardFault |
+| main SRAM | `0x2000_0000` | **same physical SRAM as the M33's** (an M0+ store is read back by the debugger) |
+| TIMER1, PRS, CMU | `0x5004C024`, `0x50038010`, `0x50008070` | ok; TIMER1 counts correctly |
+| TIMER1 at `0x4004C024` | | no fault, but returns a constant value |
+
+**Single-core baselines (the other core halted, or spinning in flash) [F].**
+
+Cycles per op in the core's own clock. n=39, zero spread unless noted.
+
+| op | M0+ @38.4 MHz | M33 @76.8, code in flash | M33 @76.8, code in SRAM |
+|---|---|---|---|
+| ALU add | 1.00 | 1.00 | 1.00 |
+| SEQRAM ld | 2.00 | 1.88 | 3.87 |
+| SEQRAM st | 2.50 | - | 3.87 |
+| main SRAM ld / st | 3.25 / 3.25 | 1.00 / 1.00 | 1.50 / 1.75 |
+| RAC/FRC/SYNTH/MODEM ld | 4.25 (all equal) | 3.88 | 5.87 |
+| RAC SR st | 4.25 | - | 5.87 |
+| BUFC ld | 3.25 | - | 3.87 |
+| TIMER1 CNT ld | 8.75 | - | 13.1 |
+| CMU ld | 4.75 | - | 5.12 |
+| SysTick IRQ entry (reload to first ISR load) | 16 cycles | - | 17 (busy) / 18 (WFI) |
+
+The other agent owns single-core costs. The SRAM-resident column is here only because it
+changes the cross-core picture (§2).
+
+**1. SEQRAM contention: M33 has priority [F].**
+
+M33 loads from flash-resident code, M0+ measured. Cycles for 1600 ops; baseline in brackets.
+
+| M0+ workload | M33 interferer | M0+ result | per M0+ op | slowdown |
+|---|---|---|---|---|
+| ALU (its own instruction fetch from SEQRAM) | SEQRAM ld | 6118-6150 [2209] | - | 2.8x |
+| SEQRAM ld | SEQRAM ld | 10177-10248 [3809] | 5.98 vs 2.00 | 2.7x |
+| SEQRAM st | SEQRAM st / ld | 11501-11527 / 11687-11705 [4609] | 6.8-6.9 vs 2.5 | 2.5x |
+| RAC ld | SEQRAM ld | 9210-9212 [7409] | | +24% (fetch stalls) |
+| SRAM ld | SEQRAM ld | 6723-6740 [5809] | | +16% |
+| TIMER1 ld | SEQRAM ld | 17495-17509 [14610] | | +20% |
+
+- Using the M33's measured rate (1.38 M0+ cycles per M33 SEQRAM load under contention), each
+  M33 SEQRAM access costs the M0+ about **0.9 M0+ cycle** (~23 ns) [F].
+- Same address vs a different SEQRAM word made no difference, so no banking was observed.
+- Reverse direction (M33 measured, flash code): M33 SEQRAM ld goes from 1.88 to **2.38** M33
+  cycles/op (4408 vs 3608, n=39 x 3 runs, zero spread). This happens as soon as the M0+
+  executes anything: M0+ ALU, SEQRAM ld and SEQRAM st all give 4408. With the M0+ in WFI
+  idle: 3608 (range 3608-3662).
+- With M33 code in SRAM, the M33 SEQRAM ld was 3.87 cycles and only M0+ SEQRAM stores slowed
+  it, to 4.49 (+14%).
+
+**2. Main SRAM contention [F].**
+
+Flash-resident M33.
+
+| measured | interferer | result [baseline] | per op |
+|---|---|---|---|
+| M0+ SRAM ld | M33 SRAM ld | 7553-7644 [5809] | 4.34-4.40 vs 3.25 (+34%) |
+| M0+ SRAM ld | M33 SRAM st | 7476-7481 | +29% |
+| M0+ SRAM st | M33 SRAM st | 6940-7020 [5809] | +20% |
+| M0+ SRAM ld | M33 ALU in flash | 5934-5941 | +2% |
+| M0+ SRAM ld | M33 RAC ld | 5853-5857 | +0.8% |
+| M33 SRAM ld | M0+ SRAM ld | 2429-2464 [2205] | 1.15 vs 1.00 (+10.5%) |
+| M33 SRAM ld | M0+ SRAM st | 2695-2710 [2205] | 1.31 (+23%) |
+| M33 SRAM st | M0+ SRAM ld / st | 2589-2599 / 2430-2462 [2205] | +18% / +10% |
+
+- **M33 code fetched from SRAM** competes with the M0+'s SRAM path even when the M33 does no
+  data accesses. An M33 spin loop in SRAM raised M0+ SRAM ld from 5809 to 5810-8409,
+  depending on the loop's address and alignment (it changed between two builds). The M33 ALU
+  loop in SRAM gave 6948.
+- Conversely, M0+ SRAM traffic slows an SRAM-resident M33 ALU loop by 3% (2206 to 2270-2285),
+  and leaves a flash-resident one at 2206-2207.
+- M0+ TIMER1 and CMU loads also pay about +0.5 cycle/op while the M33 does SRAM data
+  traffic (TIMER1: 15408 vs 14610). The M0+ path to the peripherals shares the SRAM/AHB
+  matrix with the M33 [I].
+
+**3. Radio register contention: one shared path for RAC/FRC/SYNTH/MODEM; BUFC separate [F].**
+
+| measured | interferer | result [baseline] | per op |
+|---|---|---|---|
+| M0+ RAC ld | M33 RAC/FRC/SYNTH ld or RAC SR st (code in SRAM) | 15290-15316 [7409] | 9.2 vs 4.25 (2.07x) |
+| M0+ RAC ld | M33 RAC ld (flash) | 16320-16358, 3 runs + 2nd session | 9.83 (2.3x) |
+| M0+ RAC ld | M33 BUFC ld | 7409-7410 | no effect |
+| M0+ BUFC ld | M33 BUFC ld | 8230-8247 [5809] | 4.77 vs 3.25 |
+| M0+ BUFC ld | M33 RAC ld | 5809-5810 | no effect |
+| M33 RAC ld (flash) | M0+ RAC ld / FRC ld | 8373-8383 [6807] | 4.86 vs 3.88 (+23%) |
+| M33 RAC ld (SRAM code) | M0+ RAC/FRC ld or SR2 st | 10677-10685 [10003] | +6.8% |
+
+So any of RAC, FRC, SYNTH and MODEM contends with any other, both for loads and stores, and
+BUFC is an independent target. The M0+ loses about 2x; the M33 loses 7-23%. Priority
+(M33 > M0+) is [I] from this asymmetry; the arbitration scheme is not identified.
+
+**4. Peripheral bus (TIMER1/CMU/PRS, PCLK = 38.4 MHz) [F].**
+
+All rows with M33 code in SRAM.
+
+| measured | interferer | result [baseline] |
+|---|---|---|
+| M0+ TIMER1 ld | M33 TIMER1 ld | 37855-37884 [15409] (2.46x) |
+| M0+ TIMER1 ld | M33 CMU ld | 21808-21828 (+42%) |
+| M0+ CMU ld | M33 TIMER1 ld | 31527-31528 [9009] (3.5x) |
+| M0+ CMU ld | M33 CMU ld | 15163-15176 (1.7x) |
+| M33 TIMER1 ld | M0+ TIMER1 ld | 28339-28365 [21605] (+31%) |
+| M33 TIMER1 ld | M0+ CMU ld | 23581-23591 (+9%) |
+| M33 CMU ld | M0+ TIMER1 / CMU ld | 14781-14839 (+68%) / 10543-10553 (+20%) [8805] |
+
+- Radio-register and SEQRAM traffic by one core does not slow the other core's peripheral
+  accesses, except through the M0+ instruction-fetch stalls of §1.
+- With HCLKPRESC=DIV4, an M0+ ALU chunk bracketed by two TIMER1 reads rose from 484 to 520
+  TIMER1 ticks. The ALU cycle count itself was unchanged (229), so peripheral access latency
+  follows HCLK [F].
+
+**5. Flash / ICACHE [F].**
+
+- The M0+ cannot reach flash.
+- M33 flash data traffic left every M0+ workload at its exact baseline:
+  - a cache-missing sweep (32 B stride over 64 KiB);
+  - repeated hits on one word.
+- M33 code executing from flash with no data traffic: M0+ SEQRAM, radio and BUFC rows at
+  exact baseline. M0+ SRAM ld +2% and TIMER1 ld +0.5% with the flash ALU loop, 0% with the
+  flash spin loop.
+- ICACHE behaviour itself was not varied (its bus clock is off in stage 3). Its effect on
+  cross-core timing is therefore **unmeasured** beyond this.
+
+**6. LDMA traffic [F].**
+
+Continuous self-linked descriptors, 64 words per block, REQMODE=ALL; the M33 measured from
+flash code.
+
+| LDMA traffic | M0+ ALU | M0+ SEQRAM ld | M0+ SRAM ld | M0+ RAC ld | M0+ TIMER1 ld | M33 SRAM ld | M33 SEQRAM ld | M33 RAC ld |
+|---|---|---|---|---|---|---|---|---|
+| none | 2209 | 3809 | 5809 | 7409 | 14610 | 2205 | 3608 | 6807 |
+| SRAM->SRAM (2 runs) | 2209 | 3809 | 6462-6468 | 7409 | 15406-15409 | 2764-2767 | 3960-4017 | 7183-7198 |
+| SRAM->SEQRAM (2 runs) | 3668-3677 | 7107-7115 | 6775 | 8319-8336 | 16137-16159 | 2507-2512 | 5058-5136 | 9005-9021 |
+
+- LDMA from a RAC register raised LDMA IF bit 31 (error) after one block and wrote stray
+  words into my SRAM mailbox. That variant is **unmeasured**.
+- Clearing `LDMA.EN` does **not** stop a busy self-linked channel (CHBUSY stayed 1 and kept
+  loading SEQRAM). Breaking the link and writing CHDIS did stop it [F].
+
+**7. Clock changes made by the M33 [F].**
+
+Static configurations. The M0+ rate is from SysTick vs TIMER1 (in-core, exact) and from the
+monitor counter vs the LFXO BURTC (±0.1%):
+
+| SYSCLKCTRL | M0+ clock | M33 clock |
+|---|---|---|
+| HFRCODPLL 76.8, HCLK/1, RHCLK/2 (stage 3) | 38.4 | 76.8 |
+| CLKSEL=HFXO 38.4 | **19.2** | 38.4 |
+| CLKSEL=FSRCO ~20 | **9.89** | 19.80 |
+| HCLKPRESC=DIV2 | 38.4 | 38.4 |
+| HCLKPRESC=DIV4 | 38.4 | 19.2 |
+| CLKSEL=HFXO, RHCLKPRESC=DIV1 | 38.4 | 38.4 |
+| EM01GRPA = HFXO or FSRCO | 38.4 (unchanged) | 76.8 |
+
+- **M0+ clock = SYSCLK / (RHCLKPRESC + 1)**. It is independent of HCLKPRESC and of the
+  EM01GRPA clock.
+- **Live switching** (the M33 toggled SYSCLKCTRL every 100 µs while the M0+ timed 229-cycle
+  chunks, about 2400 chunks per case):
+  - PLL<->HFXO: chunk durations took the fast value (484 ticks), the slow value (963-965) or
+    intermediates; maximum 972.
+  - PLL<->FSRCO: slow 1868-1873, maximum 1882.
+  - So a switch adds at most ~8-10 TIMER1 ticks (~0.1 µs) beyond the rate change. No stall
+    was observed.
+- **RADIOCLKCTRL.EN = 0** freezes the M0+: 72,695 cycles in 1.006 s, which is the time
+  before the write landed. It resumes on re-enable with its state intact. Meanwhile the
+  debugger's SEQRAM reads fail.
+- **CLKEN1 gating** of RAC or FRC makes M0+ loads from that block HardFault (8 of 8, ~22
+  cycles each). Gating BUFC (bit 11) has no effect, matching §7.72.
+
+**8. Debugger footprint [F].**
+
+OpenOCD on J-Link OB at 4 MHz SWD manages ~17.6k AP word reads/s. M33 halted, M0+ measured,
+n=399 per row.
+
+| debugger target | M0+ ALU | M0+ SEQRAM ld | M0+ RAC ld | M0+ TIMER1 ld |
+|---|---|---|---|---|
+| none | 2209 | 3809 | 7409 | 14610 |
+| SEQRAM reads | 2209-2211 | 3809-3813 | 7409-7412 | 14610-14619 |
+| RAC reads | 2209-2210 | 3809-3810 | 7409-7421 | 14610-14617 |
+| TIMER1 reads | 2209-2210 | 3809-3810 | 7409 | 14610-14645 |
+
+That is about 1 M0+ cycle per AP access on the same target, and 2-5 cycles on the
+peripheral bus.
+
+The larger effects of having the debugger attached:
+- M33 WFI does not stop the M33 core clock: DWT ran at 76.76 MHz through WFI.
+- EM2 is never entered while OpenOCD is attached. EMU.STATUS.EM2ENTERED stayed 0 with or
+  without EM2DBGEN, with the M0+ idle or held in reset, and with TIMER1 stopped.
+- WFI effects are exaggerated (§9).
+
+My own experiment polling (one SRAM word per 20 ms) is below the resolution of these
+measurements. An earlier driver in which the **M33** polled SEQRAM every ~300 cycles added
+0.6% to the M0+ ALU loop, with ±2 cycles of jitter: 22146 vs 22009 for N=2000.
+
+**9. Energy modes [F].**
+
+| M33 state | M0+ SRAM ld | M0+ SRAM st | M0+ TIMER1 ld | M0+ CMU ld | M0+ SEQRAM/radio/ALU |
+|---|---|---|---|---|---|
+| halted / spinning in flash | 5809 | 5809 | 14610 | 8210 | baseline |
+| WFI (EM1), debugger attached | 9709-9909 (+67-71%) | 10509-10709 | 15409 (+5.5%) | 9009 (+9.7%) | unchanged |
+| WFI (EM1), **debugger detached** | **6309-6310 (+8.6%)** | - | **15409 (+5.5%)** | - | - |
+
+- **EM2, debugger detached** (deep-sleep WFI woken by a BURTC compare after 0.5 s; 3 runs):
+  - EM2ENTERED=1.
+  - M33 DWT advanced 70-77 cycles.
+  - **The M0+ advanced 82 cycles (`0xd0f`->`0xd61`) in 0.5 s. It stops whenever the M33 is
+    in EM2.**
+- **After EM2 wake** [F]:
+  - HFXO.STATUS=`0x40000000` (not ready) and DPLL.STATUS=0 (unlocked). SYSCLKCTRL still read
+    HFRCODPLL, so SYSCLK ran on a free-running HFRCO: the M0+ measured 38.374 MHz and the M33
+    76.748 MHz vs the LFXO, about -0.07%.
+  - The M0+ did not complete its stop handshake within 0.5 s of the M33 waking. It was later
+    found in its idle loop with the values its reset handler writes (state=1, cmd=0). [I] It
+    may have been reset or lost context; not resolved.
+  - A chip reset restored the clocks.
+- **Wake latency** of the M0+ from EM2: **unmeasured**.
+
+**10. Interrupt latency under contention [F].**
+
+SysTick period interrupt; latency = reload minus CVR at the handler's first load. n=199 per row.
+
+| core | interferer | latency (cycles) |
+|---|---|---|
+| M0+ (WFI or busy) | none / M33 flash spin / M33 RAC ld / M33 SRAM st / M33 WFI | **16** (17 under RAC ld), sd 0 |
+| M0+, WFI | M33 SEQRAM ld | med 45, 23-51, sd 7.2 |
+| M0+, WFI | M33 SEQRAM st | med 47, 45-55 |
+| M0+, busy | M33 SEQRAM ld / st | med 47 / 51, range 27-54 / 28-59 |
+| M33 (vectors, ISR and stack in SRAM) | M0+ idle / ALU / SEQRAM st / RAC ld | 17 busy, 18 WFI, sd 0 |
+| M33, busy / WFI | M0+ SRAM ld | 17-20 / 19-21 |
+| M33, busy / WFI | M0+ SRAM st | 17-22 / 19-22 |
+
+The M0+ handler entry, which stacks to SEQRAM and fetches its vector and code from SEQRAM,
+goes from 0.42 µs to 0.6-1.54 µs while the M33 streams SEQRAM accesses.
+
+**Not measured.**
+
+- EM2 wake latency of the M0+.
+- LDMA with a radio-register source or target.
+- ICACHE enabled vs disabled.
+- RX/TX-active radio (FRC/BUFC hardware DMA into SEQRAM/BUFC) as an interferer: the radio
+  stayed in FORCEDISABLE throughout.
+- Cross-core IRQ (doorbell) latency.
+- M33 code executing from flash while the M0+ hammers flash: impossible, the M0+ has no
+  flash access.
+
+**What a QEMU model needs to capture (numbers from above).**
+
+1. **M0+ clock**:
+   - `f_M0 = SYSCLK / (RHCLKPRESC + 1)`, which is 38.4 MHz in stage 3. Independent of
+     HCLKPRESC and EM01GRPA. SYSCLKCTRL writes take effect at once with no stall worth
+     modelling (≤0.1 µs).
+   - RADIOCLKCTRL.EN=0 freezes the M0+ with state retained.
+   - M33 EM2 stops the M0+. After EM2 the HF clocks are not restored by hardware (HFXO off,
+     DPLL unlocked).
+2. **Base costs per M0+ op**, the clean single-core numbers (cycles): SEQRAM ld 2, SEQRAM st
+   2.5, SRAM 3.25, radio regs 4.25, BUFC 3.25, TIMER1 8.75, CMU 4.75, SysTick IRQ entry 16.
+3. **SEQRAM is a shared port with M33 priority.**
+   - Each M33 SEQRAM access steals about 0.9 M0+ cycles from M0+ instruction fetch and data.
+   - An M33 streaming SEQRAM loads makes M0+ code run ~2.8x slower and M0+ SEQRAM loads cost
+     ~6 cycles.
+   - The M33's SEQRAM access is 1.88 M33 cycles, rising to 2.38 whenever the M0+ is executing.
+4. **Radio register path** (RAC/FRC/SYNTH/MODEM shared, BUFC separate):
+   - Under M33 streaming, the M0+ access goes from 4.25 to 9.2-9.8 cycles.
+   - The M33 access goes from 3.88 to 4.86 M33 cycles.
+   - BUFC: M0+ 3.25 -> 4.77 under M33 BUFC streaming.
+5. **Main SRAM**: M0+ +0.7 to +1.1 cycle/access under M33 SRAM data traffic. M33 +0.15 to
+   +0.31 cycle/access under M0+ SRAM traffic.
+6. **Peripheral bus** (TIMER1/CMU): mutual slowdowns of +9% to 3.5x (§4). The M0+ also pays
+   +0.5 cycle per peripheral access during M33 SRAM traffic and while the M33 is in WFI
+   (+5.5% for TIMER1, detached).
+7. **M0+ interrupt entry** grows from 16 to 23-59 cycles (median ~45-51) while the M33
+   streams SEQRAM. Contention on other targets leaves it at 16-17.
+8. **Second-order effects, probably not worth modelling**:
+   - flash/ICACHE traffic: nil;
+   - debugger: ~1 cycle per AP access;
+   - LDMA SRAM->SRAM: M0+ SRAM +0.41 cycle/op;
+   - LDMA into SEQRAM: comparable to M33 SEQRAM streaming (M0+ ALU 1.66x, SEQRAM ld 1.87x).
+
+**Files.**
+
+Kept outside the repository:
+
+- **Probe sources**:
+  - `m0.S`, `m0.ld`: the M0+ probe (mailbox at SEQRAM 0x2F00, results at 0x2000).
+  - `m33.c`, `m33.ld`: the M33 SRAM probe (mailbox at 0x20003F00, results at 0x20003000).
+  - `m33flash.S`: the flash-resident loops at 0x60000.
+  - `build.sh`: builds all three.
+- **Driver**: `xc.py`, plus `takeover.py` and `reload33.py`.
+- **Experiment scripts**: `mat_m0.py`, `mat_m33.py`, `flashrun.py`, `base_halt.py`,
+  `lat.py`, `dbg.py`, `clk.py`, `clkdyn.py`, `clk2.py`, `em2*.py`, `detached.py`, `ldma.py`,
+  `rep.py`.
+- **Logs**: the matching `*.log` and `*.json` files. `rep-contaminated-by-ldma.log` is an
+  invalid run: the LDMA was still running.
