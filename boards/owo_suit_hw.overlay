@@ -81,12 +81,16 @@
 	#size-cells = <0>;
 	status = "okay";
 
-	/* Feedback on PD3. Gain 1, VDD reference (3.3 V), 12 bit, like the stock firmware. */
+	/*
+	 * Feedback on PD2. Gain 1, VDD reference (3.3 V), 12 bit, like the stock firmware, whose
+	 * IADC default input is 0xB2 (PD2) with the feedback scaling; it reads its x133/33 battery
+	 * divider on 0xB3 (PD3) (docs/stock-stim-path.md).
+	 */
 	channel@0 {
 		reg = <0>;
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,gain = "ADC_GAIN_1";
-		zephyr,input-positive = <IADC_INPUT_PD3>;
+		zephyr,input-positive = <IADC_INPUT_PD2>;
 		zephyr,reference = "ADC_REF_VDD_1";
 		zephyr,resolution = <12>;
 		zephyr,vref-mv = <3300>;
@@ -114,9 +118,14 @@
 			       <&gpiob 2 GPIO_ACTIVE_HIGH>, <&gpiob 3 GPIO_ACTIVE_HIGH>;
 		supplies = <&suit_supply_a>, <&suit_supply_b>;
 		switch = <&suit_switch>;
-		/* One word per electrode channel 0..10 (stock table, recovered by emulation). */
-		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
-				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
+		/*
+		 * One word per protocol channel 0..10: the stock switch table (recovered by
+		 * emulation) in the order of the stock wire-to-slot map 5 0 6 7 1 2 3 8 4 9 (10 = test
+		 * entry), so a channel selects the electrode the stock firmware selects for it
+		 * (docs/stock-stim-path.md, docs/stim-simulation.md).
+		 */
+		switch-routes = <0x00800080 0x01000100 0x00020002 0x00080008 0x00100010 0x00400040
+				 0x00010001 0x00200020 0x00040004 0x02000200 0x04000400>;
 		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
 		boost-duty-percent = <50>;
 		io-channels = <&suit_dac 15>, <&adc0 0>;

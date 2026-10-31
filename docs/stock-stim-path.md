@@ -7,7 +7,7 @@ rest of the firmware analysis, is in `owo-suit-firmware-analysis.md` §10.
 ## SoC and architecture
 - EFR32xG22-family Cortex-M33. **[F]** All peripheral literals match the xG22 headers (TIMER0-4, GPIO, USART0/1, I2C0/1,
   IADC0, CMU, EMU, RTCC, WDOG0, DCDC, MSC, PRS) and the vector table follows the xG22 IRQ order. Exact part number unknown.
-- No RTOS. Stimulation is a hardware-timer ISR state machine: TIMER0 ISR at 0x3BAE9. **[F]**
+- No RTOS. Stimulation is a hardware-timer ISR state machine (TIMER0, IRQ 7). **[F]** Several code addresses on this page were found to be wrong for this image when it was re-read (2026-10-31: the ISR, bridge, DAC, switch and boost routines); the corrected addresses are kept with the stock dump.
 - TIMER0 reload = 0x0249F000 / 0x4E20 = 1920 counts of 38.4 MHz => a 20 kHz (50 us) tick (init at 0x3BA1C). **[I]** (assumes
   the timer clock is 38.4 MHz and prescaler 1; not measured)
 
@@ -20,11 +20,11 @@ rest of the firmware analysis, is in `owo-suit-firmware-analysis.md` §10.
 | **Channel switch**: SPI on USART0, PC0 MOSI, PC1 MISO, PC2 SCLK, CS = PC3. Four bytes per channel from the table below; shifted in with CS low, CS raised (latch), then 4 zero bytes clocked with CS **high** and the returned bytes compared with what was written; mismatch => fault. **[F]** (`0x444C8`) |
 | **Boost / HV supply**: TIMER1 CC0 PWM on PC7, 4 kHz (0xFA0 passed at boot, 0x24B54), duty 50 % when enabled (0x3AFE2), 0 when off. **[F]** Purpose (boost converter) **[I]**. |
 | **Expander**: I2C0 on PB4 (SDA) and PA7 (SCL), 8-bit write address 0x40, two data bytes (P0-P7 then P10-P17); this is the PCF8575 protocol. **[F]/[I]** P8..P13 = six LEDs (active low), P5 = DAC /CLR (pulsed at boot, 0x3B7E0), P2 and P3 set while running and cleared on power-down (0x24E94, 0x3B0EC); exact function unknown. **[F]/[I]** |
-| **Feedback ADC**: IADC0 single conversion, input PD3 (posInput 0xB3), PD2 (0xB2) is the battery divider. Config (0x1A5EC): normal mode, OSR 2x, gain 1x, VDDX reference 3300 mV, 20 MHz source / 10 MHz ADC clock. level = raw * 0xA1220 / 0xEF510A - 3. **[F]** |
+| **Feedback ADC**: IADC0 single conversion, default input PD2 (posInput 0xB2) with the feedback scaling below; the battery is read on PD3 (0xB3, x133/33, a two-cell pack: its 2 % level is about 6840 mV) and the input switched back to PD2. (Corrected 2026-10-31: this line had PD2 and PD3 swapped.). Config (0x1A5EC): normal mode, OSR 2x, gain 1x, VDDX reference 3300 mV, 20 MHz source / 10 MHz ADC clock. level = raw * 0xA1220 / 0xEF510A - 3. **[F]** |
 | **Button**: PC4, input pull-up, both-edge GPIO interrupt. **[F]** |
 
 ### Channel switch table (RAM 0x20000E6C, recovered by emulating the start-up code) **[E]**
-Four bytes per entry, protocol channel i uses entry i (the frame bytes are copied to the slot table in order, 0x3C1CE).
+Four bytes per entry. Protocol (wire) channel i selects entry map[i] with the wire-to-slot map 5 0 6 7 1 2 3 8 4 9 **[F]** (re-read 2026-10-31; this line said "entry i"), confirmed in emulation: wire channel 0 drives the pad of entry 5 **[E]** (`stim-simulation.md`).
 ```
  0: 01 00 01 00    4: 00 04 00 04    8: 00 20 00 20
  1: 00 10 00 10    5: 00 80 00 80    9: 02 00 02 00
