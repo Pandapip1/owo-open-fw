@@ -395,7 +395,20 @@ static void efr32_radio_qemu_rx_descriptor_isr(void *arg);
 static void efr32_radio_qemu_rx_descriptor_quiesce(void);
 static void efr32_radio_qemu_rx_descriptor_setup(void);
 static inline bool efr32_qemu_rx_descriptor_pending(void);
-K_SEM_DEFINE(efr32_qemu_rx_descriptor_sem, 0, 1);
+/*
+ * The drain runs at the lower link layer's priority, so it is released only
+ * through a deadline event: a thread at that priority without its own EDF key
+ * would keep the key it had, the zero it was created with, which the
+ * scheduler ranks before every real deadline for half the cycle counter's
+ * range and after them all for the other half.
+ */
+K_DEADLINE_EVENT_DEFINE(efr32_qemu_rx_descriptor_event);
+
+/* The drain gates the RX completion, which is due as soon as it is published. */
+static inline void efr32_qemu_rx_descriptor_release(void)
+{
+	k_deadline_event_post(&efr32_qemu_rx_descriptor_event, K_DEADLINE(0));
+}
 static struct {
 	uint16_t descriptor_read_offset;
 	bool descriptor_crc_valid;
@@ -1996,7 +2009,7 @@ void isr_radio(void *arg)
 	    efr32_qemu_rx_descriptor_pending()) {
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 			EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_RXDONE;
-		k_sem_give(&efr32_qemu_rx_descriptor_sem);
+		efr32_qemu_rx_descriptor_release();
 		return;
 	}
 #endif
@@ -2709,6 +2722,14 @@ static inline void efr32_qemu_rx_descriptor_ack(uint16_t offset)
 		offset & EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
 }
 
+/*
+ * The drain may hold the CPU against other lower-link-layer jobs for at most
+ * this long before it re-releases itself: a job released meanwhile with an
+ * earlier deadline then runs first, within the radio jobs' lateness tolerance.
+ */
+#define EFR32_QEMU_RX_DESCRIPTOR_SLICE_CYCLES \
+	(k_ns_to_cyc_ceil32(CONFIG_CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS) / 2U)
+
 static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -2718,9 +2739,12 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 	for (;;) {
 		volatile uint8_t *ring;
 		uint32_t fifo_address;
+		uint32_t slice_start;
 		uint16_t write_offset;
+		bool sliced = false;
 
-		k_sem_take(&efr32_qemu_rx_descriptor_sem, K_FOREVER);
+		k_deadline_event_wait(&efr32_qemu_rx_descriptor_event);
+		slice_start = k_cycle_get_32();
 		ring = efr32_qemu_rx_descriptor_ring();
 		fifo_address = *radio_reg32(EFR32_BUFC_BASE +
 			EFR32_BUFC_RX_BASE_OFFSET + EFR32_BUFC_ADDR_OFFSET);
@@ -2736,6 +2760,12 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 			EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET + EFR32_BUFC_WRITEOFFSET) &
 			EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
 		while (efr32_qemu_rx_descriptor.descriptor_read_offset != write_offset) {
+			if (k_cycle_get_32() - slice_start >= EFR32_QEMU_RX_DESCRIPTOR_SLICE_CYCLES) {
+				/* Continue under a fresh deadline, after any job due sooner. */
+				efr32_qemu_rx_descriptor_release();
+				sliced = true;
+				break;
+			}
 			uint8_t raw[EFR32_RADIO_RX_DESCRIPTOR_BYTES];
 			struct efr32_radio_rx_descriptor descriptor;
 			uint8_t pdu[PDU_AC_LL_SIZE_MAX];
@@ -2795,6 +2825,9 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 			*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET +
 				EFR32_BUFC_READOFFSET_OFFSET) = descriptor.endpoint;
 		}
+		if (sliced) {
+			continue;
+		}
 
 		*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 			EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
@@ -2825,7 +2858,7 @@ static void efr32_radio_qemu_rx_descriptor_isr(void *arg)
 
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
-	k_sem_give(&efr32_qemu_rx_descriptor_sem);
+	efr32_qemu_rx_descriptor_release();
 }
 
 static void efr32_radio_qemu_rx_descriptor_setup(void)
@@ -2843,7 +2876,7 @@ static void efr32_radio_qemu_rx_descriptor_setup(void)
 
 	efr32_qemu_rx_descriptor.descriptor_read_offset = 0U;
 	efr32_qemu_rx_descriptor.descriptor_crc_valid = false;
-	k_sem_reset(&efr32_qemu_rx_descriptor_sem);
+	k_deadline_event_reset(&efr32_qemu_rx_descriptor_event);
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 		EFR32_BUFC_IF_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
 	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET +
