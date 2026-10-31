@@ -17,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/irq.h>
+#include <zephyr/kernel/deadline_miss.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <soc.h>
@@ -48,11 +49,16 @@
 #include "lll/pdu_vendor.h"
 #include "ll_sw/pdu.h"
 
-/* Marks a function that cannot be implemented without the radio register map: logs once. */
+/*
+ * Marks a function that cannot be implemented without the radio register map: logs once. With
+ * immediate logging a printk blocks its caller for the whole line at the console baud rate
+ * (milliseconds), and these run in lower-link-layer contexts that have start-by deadlines: print
+ * only when the console is deferred.
+ */
 #define EFR32_RADIO_TODO(tag) \
 	do { \
 		static bool efr32_once_; \
-		if (!efr32_once_) { \
+		if (!IS_ENABLED(CONFIG_LOG_MODE_IMMEDIATE) && !efr32_once_) { \
 			efr32_once_ = true; \
 			printk("efr32-radio: %s needs %s (docs/radio-tables.md)\n", __func__, tag); \
 		} \
@@ -148,12 +154,11 @@ static void efr32_radio_ar_execute(const uint8_t *pdu, uint16_t bytes)
 static struct efr32_radio_timer_state efr32_radio_timer;
 static atomic_t efr32_radio_launch_generation;
 static atomic_t efr32_radio_launch_active;
+/* Set once by the missed-deadline policy: no wake may release radio work again. */
+static atomic_t efr32_radio_halted;
 /* Generation mailboxes pair the coalescing event latch with its expiry. */
 static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
-/* Start-by deadlines of the pending launch work, for the jobs' lateness check. */
-static atomic_t efr32_radio_tx_pending_deadline;
-static atomic_t efr32_radio_rx_pending_deadline;
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_completion_event);
@@ -163,7 +168,6 @@ static struct {
 	radio_isr_cb_t callback;
 	void *param;
 	bool abort;
-	int deadline;
 } efr32_radio_completion_work;
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
 
@@ -182,8 +186,6 @@ static bool efr32_qemu_tifs_rx_to_tx_staging;
 /* Coalesces an IRQ publication while the persistent TIFS job is running. */
 K_DEADLINE_EVENT_DEFINE(efr32_qemu_tifs_event);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
-/* Start-by deadline of the pending TIFS turn-around, for the job's lateness check. */
-static atomic_t efr32_qemu_tifs_deadline;
 
 static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation)
 {
@@ -258,8 +260,6 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 
 		/* Atomically consume a TIFS publication or become its idle consumer. */
 		k_deadline_event_wait(&efr32_qemu_tifs_event);
-		efr32_radio_deadline_check((int)atomic_get(&efr32_qemu_tifs_deadline),
-					   "qemu tifs");
 		key = irq_lock();
 		phase = efr32_qemu_tifs.phase;
 		generation = efr32_qemu_tifs.generation;
@@ -333,7 +333,7 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 K_THREAD_DEFINE(efr32_qemu_tifs_job_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_qemu_tifs_job, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+		EFR32_LLL_THREAD_PRIO, 0, 0);
 #endif
 
 /* Hardware RX-window generation; see efr32_hw_turnaround_reset(). */
@@ -347,6 +347,9 @@ static atomic_t efr32_hw_hcto_generation;
  */
 void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 {
+	if (atomic_get(&efr32_radio_halted) != 0) {
+		return;
+	}
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	bool valid;
 	unsigned int key = irq_lock();
@@ -356,12 +359,12 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 	irq_unlock(key);
 	if (valid) {
 		/*
-		 * BURTC expiry is this job's release event. The compare target is the
-		 * job's start-by deadline: it orders the now-eligible worker among
-		 * equal-priority ready jobs and is checked for lateness on entry.
+		 * The clock-event expiry is this job's release; the compare target is
+		 * when the turn-around falls due. Its start-by deadline orders the
+		 * worker among equal-priority ready jobs and is checked on entry.
 		 */
-		atomic_set(&efr32_qemu_tifs_deadline, deadline);
-		k_deadline_event_post(&efr32_qemu_tifs_event, (int)deadline);
+		k_deadline_event_post_at(&efr32_qemu_tifs_event, deadline,
+					 efr32_ll_start_by(deadline));
 	}
 #else
 	ARG_UNUSED(deadline);
@@ -396,8 +399,8 @@ static void efr32_radio_qemu_rx_descriptor_quiesce(void);
 static void efr32_radio_qemu_rx_descriptor_setup(void);
 static inline bool efr32_qemu_rx_descriptor_pending(void);
 /*
- * The drain runs at the lower link layer's priority, so it is released only
- * through a deadline event: a thread at that priority without its own EDF key
+ * The drain runs at a meta-IRQ priority, so it is released only through a
+ * deadline event: a thread at that priority without its own EDF key
  * would keep the key it had, the zero it was created with, which the
  * scheduler ranks before every real deadline for half the cycle counter's
  * range and after them all for the other half.
@@ -407,7 +410,10 @@ K_DEADLINE_EVENT_DEFINE(efr32_qemu_rx_descriptor_event);
 /* The drain gates the RX completion, which is due as soon as it is published. */
 static inline void efr32_qemu_rx_descriptor_release(void)
 {
-	k_deadline_event_post(&efr32_qemu_rx_descriptor_event, K_DEADLINE(0));
+	if (atomic_get(&efr32_radio_halted) != 0) {
+		return;
+	}
+	k_deadline_event_post(&efr32_qemu_rx_descriptor_event, efr32_ll_start_by_now());
 }
 static struct {
 	uint16_t descriptor_read_offset;
@@ -422,15 +428,22 @@ static void efr32_radio_tx_job(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 	for (;;) {
 		atomic_val_t generation;
-		atomic_val_t deadline;
 
 		k_deadline_event_wait(&efr32_radio_tx_event);
 		generation = atomic_get(&efr32_radio_tx_pending_generation);
-		deadline = atomic_get(&efr32_radio_tx_pending_deadline);
-		efr32_radio_deadline_check((int)deadline, "tx launch");
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
 			radio_tx_enable();
+#if CONFIG_EFR32_RADIO_TEST_OVERRUN_US > 0
+			static bool efr32_test_overrun_done;
+
+			/* Hold the LLL priority while the frame is sent: its completion waits. */
+			if (!efr32_test_overrun_done &&
+			    k_uptime_get() >= CONFIG_EFR32_RADIO_TEST_OVERRUN_AFTER_MS) {
+				efr32_test_overrun_done = true;
+				k_busy_wait(CONFIG_EFR32_RADIO_TEST_OVERRUN_US);
+			}
+#endif
 		}
 	}
 }
@@ -442,12 +455,9 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 	for (;;) {
 		atomic_val_t generation;
-		atomic_val_t deadline;
 
 		k_deadline_event_wait(&efr32_radio_rx_event);
 		generation = atomic_get(&efr32_radio_rx_pending_generation);
-		deadline = atomic_get(&efr32_radio_rx_pending_deadline);
-		efr32_radio_deadline_check((int)deadline, "rx launch");
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
 			radio_rx_enable();
@@ -458,32 +468,33 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 K_THREAD_DEFINE(efr32_radio_tx_job_thread,
 		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
 		efr32_radio_tx_job, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+		EFR32_LLL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_rx_job_thread,
 		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
 		efr32_radio_rx_job, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+		EFR32_LLL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_completion_job_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_radio_completion_job, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+		EFR32_LLL_THREAD_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
 void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t deadline)
 {
+	if (atomic_get(&efr32_radio_halted) != 0) {
+		return;
+	}
 	if ((uint32_t)atomic_get(&efr32_radio_launch_active) != generation) {
 		return;
 	}
 	if (trx) {
 		atomic_set(&efr32_radio_tx_pending_generation, generation);
-		atomic_set(&efr32_radio_tx_pending_deadline, deadline);
-		/* Compare expiry is the release event; the target is the start-by deadline. */
-		k_deadline_event_post(&efr32_radio_tx_event, (int)deadline);
+		/* Compare expiry is the release; the launch falls due at the target. */
+		k_deadline_event_post(&efr32_radio_tx_event, efr32_ll_start_by(deadline));
 	} else {
 		atomic_set(&efr32_radio_rx_pending_generation, generation);
-		atomic_set(&efr32_radio_rx_pending_deadline, deadline);
 		/* The EDF key orders equal-priority ready jobs; it cannot start early. */
-		k_deadline_event_post(&efr32_radio_rx_event, (int)deadline);
+		k_deadline_event_post(&efr32_radio_rx_event, efr32_ll_start_by(deadline));
 	}
 }
 
@@ -1806,6 +1817,9 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
 static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 						   bool abort)
 {
+	if (atomic_get(&efr32_radio_halted) != 0) {
+		return;
+	}
 	if (!efr32_radio_completion_dispatch_queue(&efr32_radio_completion_dispatch,
 						      efr32_radio_completion_dispatch.generation)) {
 		return;
@@ -1815,8 +1829,7 @@ static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 	efr32_radio_completion_work.param = param;
 	efr32_radio_completion_work.abort = abort;
 	/* FRC completion has occurred; make the callback worker eligible now. */
-	efr32_radio_completion_work.deadline = K_DEADLINE(0);
-	k_deadline_event_post(&efr32_radio_completion_event, efr32_radio_completion_work.deadline);
+	k_deadline_event_post(&efr32_radio_completion_event, efr32_ll_start_by_now());
 }
 
 static void efr32_radio_completion_job(void *a, void *b, void *c)
@@ -1837,8 +1850,6 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			callback = efr32_radio_completion_work.callback;
 			param = efr32_radio_completion_work.param;
 			abort = efr32_radio_completion_work.abort;
-			efr32_radio_deadline_check(efr32_radio_completion_work.deadline,
-						   "completion");
 		}
 		irq_unlock(key);
 
@@ -2839,10 +2850,14 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 	}
 }
 
+/*
+ * The drain is bulk copying, below the radio jobs: a TIFS turn-around or launch due meanwhile
+ * preempts it, and it shares the ULL worker's priority, ordered with it by deadline.
+ */
 K_THREAD_DEFINE(efr32_qemu_rx_descriptor_thread,
 		CONFIG_EFR32_RADIO_COMPLETION_STACK_SIZE,
 		efr32_radio_qemu_rx_descriptor_job, NULL, NULL, NULL,
-		EFR32_LL_THREAD_PRIO, 0, 0);
+		EFR32_ULL_THREAD_PRIO, 0, 0);
 
 /* BUFC IRQ work is scheduler-owned; this ISR only masks and wakes. */
 static void efr32_radio_qemu_rx_descriptor_isr(void *arg)
@@ -3868,3 +3883,164 @@ uint32_t radio_is_off(void)
 {
 	return atomic_get(&efr32_radio_power_ref) == 0;
 }
+
+#if defined(CONFIG_SCHED_DEADLINE_MISS_CUSTOM)
+/*
+ * Safe shutdown on a missed or infeasible deadline (include/zephyr/kernel/deadline_miss.h).
+ *
+ * Radio state first, from whatever context detected the failure: the PA is switched off at its
+ * enables, the receive source and both directions are withdrawn, the RAC is forced off and the
+ * M0+ reset, so no sequencer handler can restart the PA or a frame. CTRL reads back without
+ * SEQRESET on silicon and in QEMU; with the RAC forced off the restarted M0+ gets no state
+ * event, and on silicon its TX counters stop. Then the controller stops: its clock events are
+ * cancelled, every wake path is closed, its interrupts are masked and its threads are
+ * suspended, the current one last. The rest of the system runs on; the Bluetooth host sees a
+ * controller that no longer answers.
+ */
+#define EFR32_RAC_TX_OFFSET 0x148U
+#define EFR32_RAC_PAENCTRL_PARAMP BIT(8)
+/*
+ * RAC.TX power-amplifier enables cleared by the M0+'s efr32_seq_pa_stop (radio_seq.S):
+ * TX0DBMENPREDRV, TX0DBMENBIAS, TX6DBMENRAMPCLK, TX6DBMENPACORE, TX6DBMENPAOUT, ENPAPOWER,
+ * ENPASELSLICE.
+ */
+#define EFR32_RAC_TX_PA_ENABLES \
+	(BIT(2) | BIT(5) | BIT(22) | BIT(24) | BIT(25) | BIT(30) | BIT(31))
+
+static void efr32_radio_pa_off(void)
+{
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_PAENCTRL_OFFSET) = EFR32_RAC_PAENCTRL_PARAMP;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_TX_OFFSET) = EFR32_RAC_TX_PA_ENABLES;
+}
+
+static void efr32_radio_force_safe(void)
+{
+	efr32_radio_pa_off();
+	/* As radio_disable(): the software RX source first, then RXDIS before TXDIS. */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	/* Base-register write, as radio_reset() resets the M0+ before copying its image. */
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH | EFR32_RAC_CTRL_SEQRESET |
+		EFR32_RAC_CTRL_FORCEDISABLE;
+	__DSB();
+	/* A sequencer handler may have restarted the PA before its reset took hold. */
+	efr32_radio_pa_off();
+}
+
+/*
+ * The report is printed from the system work queue: the failure may be detected on a radio job's
+ * small stack or in an interrupt, and the rest of the system keeps running.
+ */
+static struct k_deadline_miss efr32_radio_miss;
+static struct k_deadline_miss_run efr32_radio_miss_ran[CONFIG_SCHED_DEADLINE_MISS_HISTORY];
+
+static void efr32_radio_miss_report(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	printk("efr32-radio: SAFE SHUTDOWN: PA off, RAC forced off, M0+ reset, "
+	       "controller stopped\n");
+	k_deadline_miss_print(&efr32_radio_miss);
+	printk("  RAC.STATUS 0x%08x CTRL 0x%08x TX 0x%08x PAENCTRL 0x%08x\n",
+	       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET),
+	       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET),
+	       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_TX_OFFSET),
+	       *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PAENCTRL_OFFSET));
+}
+
+static K_WORK_DEFINE(efr32_radio_miss_work, efr32_radio_miss_report);
+
+void k_deadline_miss_handler(const struct k_deadline_miss *miss)
+{
+	const k_tid_t jobs[] = {
+		efr32_radio_tx_job_thread,
+		efr32_radio_rx_job_thread,
+		efr32_radio_completion_job_thread,
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+		efr32_qemu_tifs_job_thread,
+#endif
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+		efr32_qemu_rx_descriptor_thread,
+#endif
+	};
+	bool suspend_self;
+	bool first;
+	unsigned int key = irq_lock();
+
+	first = atomic_cas(&efr32_radio_halted, 0, 1);
+	efr32_radio_force_safe();
+	irq_disable(LL_RADIO_IRQn);
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	irq_disable(BUFC_IRQn);
+#endif
+	irq_unlock(key);
+	if (!first) {
+		return;
+	}
+
+	cntr_shutdown();
+	atomic_set(&efr32_radio_launch_active, 0);
+	k_deadline_event_reset(&efr32_radio_tx_event);
+	k_deadline_event_reset(&efr32_radio_rx_event);
+	k_deadline_event_reset(&efr32_radio_completion_event);
+	suspend_self = efr32_ll_threads_stop();
+	ARRAY_FOR_EACH(jobs, i) {
+		if (jobs[i] == k_current_get() && !k_is_in_isr()) {
+			suspend_self = true;
+		} else {
+			k_thread_suspend(jobs[i]);
+		}
+	}
+
+	efr32_radio_miss = *miss;
+	memcpy(efr32_radio_miss_ran, miss->ran, miss->ran_count * sizeof(miss->ran[0]));
+	efr32_radio_miss.ran = efr32_radio_miss_ran;
+	(void)k_work_submit(&efr32_radio_miss_work);
+	if (suspend_self) {
+		k_thread_suspend(k_current_get());
+	}
+}
+#endif /* CONFIG_SCHED_DEADLINE_MISS_CUSTOM */
+
+struct k_deadline_event *efr32_radio_launch_event(uint8_t trx)
+{
+	return trx ? &efr32_radio_tx_event : &efr32_radio_rx_event;
+}
+
+struct k_deadline_event *efr32_radio_tifs_event(void)
+{
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	return &efr32_qemu_tifs_event;
+#else
+	return NULL;
+#endif
+}
+
+#if defined(CONFIG_EFR32_RADIO_ADMISSION)
+/* Execution budgets of the radio's jobs (Kconfig EFR32_RADIO_WCET_*, measured or named). */
+static int efr32_radio_budgets_init(void)
+{
+	k_deadline_event_budget_set(&efr32_radio_tx_event,
+				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_TX_LAUNCH_NS));
+	k_deadline_event_budget_set(&efr32_radio_rx_event,
+				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_RX_LAUNCH_NS));
+	k_deadline_event_budget_set(&efr32_radio_completion_event,
+				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_COMPLETION_NS));
+#if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	k_deadline_event_budget_set(&efr32_qemu_tifs_event,
+				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_QEMU_TIFS_NS));
+#endif
+#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
+	k_deadline_event_budget_set(&efr32_qemu_rx_descriptor_event,
+				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS));
+#endif
+	return 0;
+}
+
+SYS_INIT(efr32_radio_budgets_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+#endif

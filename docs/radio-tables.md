@@ -6784,3 +6784,116 @@ M0+ code segments that contain no hardware wait now match silicon exactly.
   and radio only); RAC.STCTRL -> M0+ SysTick CALIB.
 - Snapshot/migration of per-CPU time; adaptive -icount (shift=auto) falls back to the
   shared rate with a warning.
+
+### 7.76 Scheduling: real priorities, one missed-deadline policy, admission control
+
+Tags: **[F]** measured on silicon, **[I]** inferred, **[P]** placeholder (unmeasured).
+Kernel: vendor/zephyr `kernel: sched: keep meta-IRQ threads cooperative within a priority`,
+`kernel: deadline: one policy for missed scheduling deadlines`, `kernel: deadline: admission
+control for deadline events`. Radio: modules/efr32-radio (hal/ll_threads.c, hal/cntr.c,
+hal/radio.c, Kconfig, CMakeLists.txt). Notes and tooling: `scratch/scheduler-findings.md`,
+`scratch/sched/`.
+
+**1. Priorities.** The LLL context and every radio job (TX/RX launch, completion, QEMU TIFS)
+run at meta-IRQ priority `K_HIGHEST_THREAD_PRIO + CONFIG_BT_CTLR_LLL_PRIO` (0), the ULL worker
+(ticker worker and job, ULL mayflies) and the QEMU RX-descriptor drain at
+`+ CONFIG_BT_CTLR_ULL_HIGH_PRIO` (1); `CONFIG_NUM_METAIRQ_PRIORITIES=2`. A due radio job
+preempts a running ULL body. `mayfly_prio_is_equal()` follows Nordic's glue, so ULL->LLL
+mayflies (the LLL prepares) are queued to the LLL context instead of running inline.
+
+- [F] Before this, equal-priority meta-IRQ threads preempted each other by EDF at IRQ exit
+  (kernel `should_preempt()`), against the documented meta-IRQ contract and the OpenISA LLL's
+  equal-priority-IRQ assumption. Fixed in the kernel; deadline suite case
+  `test_deadline_event_metairq_same_level_cooperative`.
+- [I] OpenISA's preempt timeout named its preemptor by MFIFO slot and asserted when restarting
+  an already scheduled timeout; with the LLL above the ULL an LLL-priority job due earlier can
+  run between the ticker callback and `preempt()`. Patched at configure time as in Nordic's
+  LLL (name by `prepare_param.param`, tolerate an already scheduled timeout).
+- EDF keys are the instant the work fell due plus `EFR32_LL_START_TOLERANCE_CYCLES` (61036 ns,
+  the existing clock-event miss tolerance): ticker compare -> compare time; mayfly and LLL
+  doorbells -> now (previously the next ticker compare and `cntr_launch_deadline()`).
+- Stacks [F]: LLL context 524 (adv) / 636 (scanner) bytes in QEMU, 820 on silicon with the
+  bring-up trace; ULL worker 464 QEMU / 796 silicon; main 1008 silicon.
+
+**2. Missed deadline -> safe shutdown.** The kernel checks every deadline-event job released
+from idle at its start, and routes late clock events through the same
+`SCHED_DEADLINE_MISS_POLICY`; the radio selects `SCHED_DEADLINE_MISS_CUSTOM`. Its handler
+clears the PA enables (RAC.TX PA bits, PAENCTRL.PARAMP), withdraws SWRXEN, issues RXDIS and
+TXDIS, writes CTRL with FORCEDISABLE and SEQRESET, clears the PA again, masks FRC/BUFC/
+doorbell IRQs, cancels the controller's clock events, closes every wake path, suspends the LL
+threads and prints the report from the system work queue.
+
+- [F] Silicon, injected 2 ms overrun in the TX launch job at 8 s: completion 1.7 ms late,
+  report names the TX job as running at release; afterwards M0+ TX counters +0 over 5 s,
+  RAC.STATUS state 13, RAC.TX 0x00030000 (bleed bits only), PAENCTRL 0x10000000, host
+  sightings 0 over 10 s (9 in 5 s before). CTRL reads back 0x381, without SEQRESET.
+- [F] The bring-up trace's synchronous printk (immediate logging) in `ticker_fire()` delayed
+  the first worker release 4.4 ms: `EFR32_RADIO_BRINGUP_TRACE=n` on hardware, TODO notices
+  silent under immediate logging.
+- [F] Stage 3 with the policy: 150 TX / 5 s, scan-response name received, miss_count 0 and
+  late_count 0 over ~105 s.
+
+**3. Admission control.** A budget (WCET per run) on a deadline event registers it; every
+release from idle and every armed timed release is checked by simulating the scheduler's
+policy (fixed priority, EDF within a priority, cooperative meta-IRQ levels, not-before
+spins) over the admitted work plus one blocking allowance. A late job is reported as
+`K_DEADLINE_MISS_UNSAT` before it runs, naming the job priority sacrifices. Timed releases
+use the scheduler clock's delivery plan (`k_clock_event_sched_plan()`: deep LF with HF
+start-up, running HF, an already armed expiry, or a spin; a spin is demand at its priority).
+
+Execution budgets [F] (`CONFIG_SCHED_DEADLINE_STATS`, BGM220, stage 3, scheduler clock
+33554432 Hz, host active scanning, four 60 s runs, one after zeroing at steady state):
+
+| job | longest run | longest release-to-start |
+|---|---|---|
+| TX launch | 12.4 us (415 cycles, all runs) | 16.3 us |
+| completion | 43.8-270.1 us | 17.7 us |
+| LLL context | 178.0-179.9 us | 13.2 us |
+| ULL worker | 344.8-346.6 us | 21.0 us |
+| RX launch | [P] 24.8 us, never released in stage 3 | - |
+| QEMU TIFS, QEMU RX drain | [P] 50 us each, QEMU-only | - |
+
+Interrupt durations [F] (DWT, 76.8 MHz, steady state): TIMER0 clock event 39.4 us (90.6 us
+only at boot), BURTC 34.2 us, FRC 20.1 us, LLL/worker doorbells 12.6/10.1 us. QEMU instruction
+counts agree: clock-event ISRs 884-937 instructions on average, up to 1249.
+
+[F] Result: with these budgets, the 39.4 us one-interrupt allowance and the 61 us start
+windows, the radio level is not schedulable by analysis. In QEMU the first completion is
+unsat (89.4 us of work ahead: the allowance and the 50 us TIFS placeholder); in the hwcfg
+scanner a completion released during an LLL prepare has 219 us ahead. Runs never miss in
+practice (0 misses on silicon, clean QEMU runs) because actual runs are far shorter than the
+budgets and prepares do not overlap completions in these workloads. `EFR32_RADIO_ADMISSION`
+is therefore off by default; it needs start-by deadlines derived from what each job must
+achieve rather than one tolerance for all.
+
+**4. Validation.** Kernel suites on native_sim/native/64: deadline 14/14 (also with
+admission and stats), deadline_admission 11/11, clock_event_sched 13/13, deferred_release
+5/5, clock_event 4/4, metairq, preempt, schedule_api. QEMU (`build/qemu-new`, per-core
+clocks, dual machine, virtual seconds from the scheduler clock):
+
+| configuration | shift 3 | shift 5 |
+|---|---|---|
+| QEMU-config adv + active scanner | 1135 s clean, 11338/11350 SCAN_RSP | 1139 s clean |
+| hwcfg adv + hwcfg scanner | scanner shuts down at 11.3 s: ULL worker 1.2 us late | same, 11.3 s |
+| hwcfg adv + QEMU-config scanner | scanner shuts down at 25.8 s: ULL worker 2.9 us late | - |
+| single device, both builds | 28-29 s clean, ~30 TX/s | - |
+
+The hwcfg failures are the policy working as specified: the ULL worker, now below the radio
+jobs, is released 25-28 us after its ticker compare (clock-event interrupt) and waits 37-49 us
+for completion and TIFS jobs, starting just past the 61 us window it has always had. With
+ULL releases given the controller's own prepare margin instead (EVENT_OVERHEAD_START_US 300 us
+[P in lll_vendor.h] less one ticker tick, 270 us; scratch experiment, not in the tree), the
+hwcfg pair runs 2844 s / 2840 s clean at shift 3 / 5; the mixed pair then stops at 27.9 s on a
+QEMU TIFS job that waited 34 us behind an LLL prepare at the same level, the conflict
+admission reports.
+
+Wrong turn: a release lead (arm early by the measured wake latency, then wait out the instant
+with `k_deadline_event_post_at()`) on the QEMU TIFS and launch jobs made things worse: the
+waits occupied the radio level for up to 56 us and pushed other jobs out of their windows.
+Moving the QEMU RX-descriptor drain below the radio jobs fixed the TIFS misses instead.
+
+Silicon (stage 3, `build-stage3-head`): 150 TX / 5 s, name received, 0 misses and 0 late
+deliveries over ~105 s; injected 2 ms overrun -> safe shutdown (section 2); deliberately
+infeasible build (`EFR32_RADIO_ADMISSION=y`, wake latency declared 100 us > 61 us window)
+-> unsat at the first TX launch arm, 1.5 ms before its release, then M0+ TX counters +0,
+RAC.TX 0, PAENCTRL 0x10000000, 0 host sightings over 10 s.

@@ -7,7 +7,7 @@
  * continuous across the service's switches between its active and deep-sleep clocks. The ticker
  * compare, the LLL launch and the QEMU TIFS wake are independent scheduler clock events: the
  * service, not this file, chooses which hardware compare delivers each. Their handlers only make
- * work runnable: the ticker one pends HAL_SWI_WORKER_IRQ, the others wake persistent jobs.
+ * work runnable: the ticker one releases the ULL worker, the others wake persistent jobs.
  *
  * UNVALIDATED ON HARDWARE.
  */
@@ -15,11 +15,13 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/kernel/clock_event.h>
+#include <zephyr/kernel/deferred_release.h>
 #include <zephyr/sys/atomic.h>
 
 #include "hal/cntr.h"
 #include "hal/swi.h"
 #include "hal/efr32/cntr_efr32.h"
+#include "hal/efr32/ll_threads.h"
 #include "hal/debug.h"
 
 #if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
@@ -42,7 +44,7 @@ BUILD_ASSERT(CONFIG_CLOCK_EVENT_SCHED_FREQUENCY % TICK_HZ == 0,
 
 static uint8_t refcount;
 static atomic_t cmp_fired;
-/* Start-by deadline of the ticker work, for the LL thread's lateness check. */
+/* Instant the armed ticker compare falls due: the worker run it releases is due then. */
 static atomic_t ticker_deadline;
 
 K_CLOCK_EVENT_DEFINE(ticker_event);
@@ -81,7 +83,7 @@ static void ticker_fire(void)
 {
 	EFR32_CNTR_TRACE_ONCE("ticker-fire now=%u", (uint32_t)k_clock_event_sched_now());
 	atomic_set(&cmp_fired, 1);
-	hal_swi_worker_pend();
+	efr32_ll_worker_release_due((uint32_t)atomic_get(&ticker_deadline));
 }
 
 static void ticker_expired(struct k_clock_event *event, uint32_t generation, void *user_data)
@@ -193,36 +195,61 @@ void cntr_cmp_set(uint8_t cmp, uint32_t value)
 	}
 }
 
-/* Start-by deadline of the ticker work the LL thread is about to run. */
-uint32_t cntr_ticker_deadline(void)
+/* A timed release arrives this long after its clock event falls due (Kconfig, measured). */
+#define WAKE_LATENCY ((uint32_t)k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WAKE_LATENCY_NS))
+
+/* Admit the run of @p event a clock event armed for @p arm_at starts at @p start, due at @p due. */
+static void cntr_admit(struct k_deadline_event *event, uint64_t arm_at, uint32_t start,
+		       uint32_t due)
 {
-	return (uint32_t)atomic_get(&ticker_deadline);
+#if defined(CONFIG_EFR32_RADIO_ADMISSION)
+	struct k_clock_event_sched_plan plan;
+
+	if (event != NULL && k_clock_event_sched_plan(arm_at, &plan) == 0) {
+		/* Infeasibility goes to the missed-deadline policy, which stops the radio. */
+		(void)k_deadline_event_admit_plan(event, &plan, (uint32_t)arm_at, start,
+						  efr32_ll_start_by(due));
+	}
+#else
+	ARG_UNUSED(event);
+	ARG_UNUSED(arm_at);
+	ARG_UNUSED(start);
+	ARG_UNUSED(due);
+#endif
 }
 
-/* Start-by deadline of the radio launch work the LLL context is about to run. */
-uint32_t cntr_launch_deadline(void)
+static void cntr_admit_cancel(struct k_deadline_event *event)
 {
-	uint32_t deadline;
-
-	K_SPINLOCK(&radio_event_lock) { deadline = radio_launch.deadline; }
-	return deadline;
+#if defined(CONFIG_EFR32_RADIO_ADMISSION)
+	if (event != NULL) {
+		k_deadline_event_admit_cancel(event);
+	}
+#else
+	ARG_UNUSED(event);
+#endif
 }
 
 void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
 {
-	uint64_t deadline = tick_to_logical(value);
+	uint64_t target = tick_to_logical(value);
+	uint64_t arm_at = target;
 	uint32_t event_generation;
-	unsigned int key = irq_lock();
+	unsigned int key;
 
+	/* Released when the wake path has run: admitted that late. */
+	cntr_admit(efr32_radio_launch_event(trx), arm_at,
+		   (uint32_t)target + WAKE_LATENCY,
+		   (uint32_t)target);
+	key = irq_lock();
 	/* Invalidate the old expiry before replacing the payload it would consume. */
 	k_clock_event_cancel(&radio_launch_event);
 	K_SPINLOCK(&radio_event_lock) { radio_launch.event_generation = 0U; }
 	/* A launch tick is a start-by deadline: run an unarmable one at once. */
-	if (too_close(&radio_launch_event, deadline) ||
-	    k_clock_event_arm_abs_with_generation(&radio_launch_event, (uint32_t)deadline,
+	if (too_close(&radio_launch_event, arm_at) ||
+	    k_clock_event_arm_abs_with_generation(&radio_launch_event, (uint32_t)arm_at,
 						  &event_generation) != 0) {
 		irq_unlock(key);
-		efr32_radio_launch_wake(trx, generation, (uint32_t)deadline);
+		efr32_radio_launch_wake(trx, generation, (uint32_t)target);
 		return;
 	}
 	/* IRQs remain locked: the handler cannot observe a half-published arm. */
@@ -230,7 +257,7 @@ void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
 		radio_launch.event_generation = event_generation;
 		radio_launch.trx = trx;
 		radio_launch.generation = generation;
-		radio_launch.deadline = (uint32_t)deadline;
+		radio_launch.deadline = (uint32_t)target;
 	}
 	irq_unlock(key);
 }
@@ -242,6 +269,8 @@ void cntr_radio_cmp_cancel(void)
 	k_clock_event_cancel(&radio_launch_event);
 	K_SPINLOCK(&radio_event_lock) { radio_launch.event_generation = 0U; }
 	irq_unlock(key);
+	cntr_admit_cancel(efr32_radio_launch_event(0U));
+	cntr_admit_cancel(efr32_radio_launch_event(1U));
 }
 
 /*
@@ -249,16 +278,17 @@ void cntr_radio_cmp_cancel(void)
  * handler calls only the wake mailbox hook; the persistent Zephyr job owns all RAC state changes.
  *
  * With @p exact, the expiry is a physical no-earlier-than boundary, unlike an LLL launch's
- * start-by deadline: a target inside the clock event's minimum arm lead is waited out by spinning
- * on the scheduler clock and then woken, neither released early nor stretched late. Without it,
- * the expiry is a timeout that may fire late, and such a target is stretched to the lead instead
- * of spinning the caller.
+ * start-by deadline: a target inside the clock event's minimum arm lead is released at once and
+ * the job waits it out at its own priority (k_deadline_event_post_at()), neither released early
+ * nor stretched late. Without it, the expiry is a timeout that may fire late, and such a target
+ * is stretched to the lead instead.
  */
 static void cntr_tifs_event_arm_after_us(uint32_t delay_us, uint32_t generation, bool exact)
 {
 	uint32_t event_generation;
 	uint32_t target = 0U;
-	bool wait = false;
+	uint64_t arm_at = 0U;
+	bool release_now = false;
 	int ret = -ETIME;
 	unsigned int key = irq_lock();
 
@@ -270,29 +300,31 @@ static void cntr_tifs_event_arm_after_us(uint32_t delay_us, uint32_t generation,
 					      USEC_PER_SEC);
 		uint64_t lead = (uint64_t)k_clock_event_min_arm_cycles(&qemu_tifs_event) + 1U;
 
+		target = (uint32_t)(now + delay);
+		arm_at = now;
 		if (exact && delay < lead) {
-			target = (uint32_t)(now + delay);
-			wait = true;
+			release_now = true;
 			ret = 0;
 			break;
 		}
 		delay = MAX(delay, lead);
+		arm_at = now + delay;
 		ret = k_clock_event_arm_abs_with_generation(&qemu_tifs_event, (uint32_t)(now + delay),
 							    &event_generation);
 		if (ret == 0) {
 			K_SPINLOCK(&radio_event_lock) {
 				qemu_tifs.event_generation = event_generation;
 				qemu_tifs.generation = generation;
-				qemu_tifs.deadline = (uint32_t)(now + delay);
+				qemu_tifs.deadline = exact ? target : (uint32_t)(now + delay);
 			}
 		}
 	}
 	irq_unlock(key);
 	LL_ASSERT(ret == 0);
-	if (wait) {
-		while ((int32_t)(target - (uint32_t)k_clock_event_sched_now()) > 0) {
-			arch_nop();
-		}
+	if (exact) {
+		cntr_admit(efr32_radio_tifs_event(), arm_at, target + WAKE_LATENCY, target);
+	}
+	if (release_now) {
 		efr32_radio_qemu_tifs_wake(generation, target);
 	}
 }
@@ -314,4 +346,16 @@ void cntr_qemu_tifs_cmp_cancel(void)
 	k_clock_event_cancel(&qemu_tifs_event);
 	K_SPINLOCK(&radio_event_lock) { qemu_tifs.event_generation = 0U; }
 	irq_unlock(key);
+	cntr_admit_cancel(efr32_radio_tifs_event());
+}
+
+void cntr_shutdown(void)
+{
+	unsigned int key = irq_lock();
+
+	k_clock_event_cancel(&ticker_event);
+	(void)atomic_set(&cmp_fired, 0);
+	irq_unlock(key);
+	cntr_radio_cmp_cancel();
+	cntr_qemu_tifs_cmp_cancel();
 }

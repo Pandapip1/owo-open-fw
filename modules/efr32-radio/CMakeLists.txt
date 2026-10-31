@@ -103,6 +103,23 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "static int init_reset(void)\n{\n\tmem_init(mem_pdu.pool, PDU_MEM_SIZE,\n\t\t (sizeof(mem_pdu.pool) / PDU_MEM_SIZE), &mem_pdu.free);\n\tMFIFO_INIT(pdu_free);\n\tk_sem_init(&sem_pdu_free, 0, PDU_MEM_FIFO_COUNT);\n\n\treturn 0;\n}"
             "OpenISA advertising PDU pool is declared but never initialized")
 
+  # OpenISA's preempt timeout assumes every LLL context shares one IRQ priority, so the ticker
+  # callback that enqueues preempt() runs it inline. Here the LLL runs above the ULL worker
+  # (hal/ll_threads.c), so preempt() runs later in the LLL context, and an LLL-priority radio job
+  # due earlier can finish an event first: the pipeline slot the ticker named may then be gone or
+  # reused, and a preempt timeout may already be scheduled for the next prepare. Name the
+  # preemptor by its LLL context, as the Nordic LLL does, and accept an already scheduled timeout
+  # when restarting it for the next prepare.
+  efr32_radio_patch(lll/lll.c "\t\t\t   preempt_ticker_cb, evt,\n"
+            "\t\t\t   preempt_ticker_cb, p->param,\n"
+            "preempt timeout named by pipeline slot")
+  efr32_radio_patch(lll/lll.c "\tif (next != param) {\n"
+            "\tif (next->prepare_param.param != param) {\n"
+            "preemptor compared by pipeline slot")
+  efr32_radio_patch(lll/lll.c "\t\tret = preempt_ticker_start(next, ticker_start_next_op_cb);\n"
+            "\t\tret = preempt_ticker_start(next, ticker_start_op_cb);\n"
+            "preempt timeout restart asserts it was not already scheduled")
+
   # The one RV32M1-specific spot in the LLL: the tick-counter ISR reads the LPTMR1 compare flag.
   # Replaced by a flag set from the counter alarm callback (hal/cntr.c).
   file(READ ${GEN}/lll/lll.c _c)

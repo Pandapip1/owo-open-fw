@@ -12,6 +12,9 @@ config BT_LLL_VENDOR_EFR32
 	# Kconfig.ll_sw_split, BT_LLL_VENDOR_OPENISA): legacy advertising/scanning, one-PHY connections,
 	# software AES (PSA) and software TIFS. Nothing here is a claim about what the radio can do.
 	select BT_HAS_HCI_VS
+	# The LLL context and radio jobs run at a higher meta-IRQ priority than the ULL worker
+	# (hal/ll_threads.c), so the controller's LLL and ULL priorities are settable and distinct.
+	select BT_CTLR_ULL_LLL_PRIO_SUPPORT
 	# The ticker, launch and QEMU TIFS wake-ups are scheduler clock events, and the
 	# ticker count is derived from the scheduler clock's logical timebase.
 	select CLOCK_EVENT_SCHED
@@ -44,24 +47,28 @@ config EFR32_RADIO_STUB_REGISTERS
 
 config EFR32_RADIO_ULL_STACK_SIZE
 	int "Upper link layer worker thread stack size"
-	default 800
+	default 640
 	help
 	  Stack of the persistent thread that runs the ticker and ULL mayflies
 	  (hal/ll_threads.c), work Zephyr's split controller otherwise runs in a
-	  software interrupt. In the QEMU active-scan workload this context peaked
-	  at 632 bytes (thread analyzer), so 800 leaves 32 bytes after reserving up
-	  to 136 bytes for exception context. It shares one meta-IRQ priority with
-	  the LLL and radio's other persistent jobs (EFR32_LL_THREAD_PRIO).
+	  software interrupt. In the QEMU active-scan workload (dual machine, 90 s)
+	  this context peaked at 464 bytes (CONFIG_INIT_STACKS high-water mark), so
+	  640 leaves 40 bytes after reserving up to 136 bytes for exception
+	  context. LLL prepares run in the LLL context, not inline here. It runs
+	  at the ULL meta-IRQ priority (EFR32_ULL_THREAD_PRIO), below the LLL and
+	  the radio's persistent jobs.
 
 config EFR32_RADIO_LLL_STACK_SIZE
 	int "Lower link layer thread stack size"
-	default 288
+	default 768
 	help
-	  Stack of the separate persistent LLL mayfly thread. Keeping it separate
-	  lets Zephyr's scheduler order ready LLL and ULL work instead of imposing
-	  an order in radio glue. The QEMU active-scan workload peaked at 136 bytes;
-	  288 leaves 48 bytes after reserving up to 104 bytes of FP exception
-	  context. Revisit both measured budgets when hardware thread analysis is
+	  Stack of the separate persistent LLL mayfly thread, which runs at the
+	  LLL meta-IRQ priority with the radio's persistent jobs, above the ULL
+	  worker. It runs the LLL prepares (lll_scan_prepare(), lll_adv_prepare()):
+	  in the QEMU active-scan workload (dual machine, 90 s) it peaked at 636
+	  bytes (CONFIG_INIT_STACKS high-water mark; the advertiser 524), so 768
+	  leaves 28 bytes after reserving up to 104 bytes of FP exception context.
+	  Revisit both measured budgets when hardware thread analysis is
 	  available; they are resource bounds, not radio timing policy.
 
 config EFR32_RADIO_LAUNCH_STACK_SIZE
@@ -121,9 +128,121 @@ config EFR32_RADIO_QEMU_TIFS
 		vendor LLL's generic deadline scheduling support; deadline ordering is not
 		a hardware timing claim.
 
+config EFR32_RADIO_ADMISSION
+	bool "Admit radio work against its execution budgets"
+	select SCHED_DEADLINE_ADMISSION
+	help
+	  Declare the worst-case execution time of each radio job and of the
+	  LLL context (k_deadline_event_budget_set()), admit every timed release
+	  when it is armed (k_deadline_event_admit_plan()) and let the kernel
+	  check every other release when it is posted. An infeasible release is
+	  reported as K_DEADLINE_MISS_UNSAT and shuts the radio down like a
+	  missed deadline (hal/radio.c).
+
+	  Off by default: with the measured budgets, the one-interrupt allowance
+	  and the start-by deadlines of EFR32_LL_START_TOLERANCE_CYCLES (61 us
+	  after a job falls due), the first radio completion is already
+	  infeasible: in QEMU 89.4 us of work is ahead of a 61 us window (the
+	  39.4 us interrupt allowance and the 50 us QEMU TIFS placeholder), and
+	  a completion released while an LLL prepare runs has up to 219 us ahead.
+	  Admission needs start-by deadlines derived from what each job must
+	  achieve, not one tolerance for all.
+
+if EFR32_RADIO_ADMISSION
+
+# Budgets: the longest run (k_deadline_event_wait() to the next wait) of each
+# job, CONFIG_SCHED_DEADLINE_STATS on silicon (BGM220 explorer kit, stage 3,
+# scheduler clock 33554432 Hz from HFXO via TIMER0), host active scanning, four
+# runs of 60 s (three from boot, one after zeroing the maxima at steady state).
+
+config EFR32_RADIO_WCET_TX_LAUNCH_NS
+	int "TX launch job budget (ns)"
+	default 12400
+	help
+	  Measured: 415 cycles (12.4 us) in all four runs.
+
+config EFR32_RADIO_WCET_RX_LAUNCH_NS
+	int "RX launch job budget (ns)"
+	default 24800
+	help
+	  PLACEHOLDER, unmeasured: stage 3 never releases the RX launch job.
+	  Twice the measured TX launch run; the RX path writes fewer registers.
+
+config EFR32_RADIO_WCET_COMPLETION_NS
+	int "Completion job budget (ns)"
+	default 270100
+	help
+	  Measured: run maxima 1469 to 9063 cycles (43.8 to 270.1 us) over the
+	  four runs; the budget is the largest.
+
+config EFR32_RADIO_WCET_LLL_NS
+	int "LLL context budget (ns)"
+	default 179900
+	help
+	  Measured: run maxima 5974 to 6038 cycles (178.0 to 179.9 us); the LLL
+	  prepares (lll_adv_prepare()) dominate.
+
+config EFR32_RADIO_WCET_QEMU_TIFS_NS
+	int "QEMU TIFS job budget (ns)"
+	depends on EFR32_RADIO_QEMU_TIFS
+	default 50000
+	help
+	  PLACEHOLDER, unmeasured on silicon: the job exists only in QEMU
+	  builds.
+
+config EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS
+	int "QEMU RX descriptor drain budget (ns)"
+	depends on EFR32_RADIO_QEMU_RX_DESCRIPTOR
+	default 50000
+	help
+	  PLACEHOLDER, unmeasured on silicon: the job exists only in QEMU
+	  builds.
+
+endif # EFR32_RADIO_ADMISSION
+
+config EFR32_RADIO_WAKE_LATENCY_NS
+	int "Clock-event wake to job dispatch (ns)"
+	default 55700
+	help
+	  Longest time from a scheduler clock event falling due to the dispatch
+	  of the job it releases. Measured bounds, summed: the longest
+	  steady-state clock-event interrupt on silicon (TIMER0, 3029 DWT cycles
+	  at 76.8 MHz, 39.4 us) and the longest release-to-start delay of the TX
+	  launch job (546 scheduler clock cycles, 16.3 us). Admission models a
+	  timed release (launch, QEMU TIFS) as starting this late.
+
+config EFR32_RADIO_TEST_OVERRUN_US
+	int "Test only: one injected TX launch job overrun (us)"
+	default 0
+	help
+	  When nonzero, the first TX launch job that runs after
+	  EFR32_RADIO_TEST_OVERRUN_AFTER_MS of uptime busy-waits this long after
+	  starting the transmission, at the LLL priority, so that the frame's
+	  completion job starts late and the missed-deadline policy runs. Leave
+	  0 outside that test.
+
+config EFR32_RADIO_TEST_OVERRUN_AFTER_MS
+	int "Test only: uptime before the injected overrun (ms)"
+	default 2000
+	depends on EFR32_RADIO_TEST_OVERRUN_US > 0
+
 endif # BT_LLL_VENDOR_EFR32
 
 # Starting a kernel timeout runs the scheduler clock arm path on the caller's stack: the
 # controller's priority RX thread peaks at 376 of its default 448 bytes (thread analyzer).
 configdefault BT_CTLR_RX_PRIO_STACK_SIZE
 	default 640 if BT_LLL_VENDOR_EFR32
+
+# A missed or infeasible scheduling deadline puts the radio in a safe state and stops the
+# controller (hal/radio.c, k_deadline_miss_handler()), in QEMU and hardware builds alike.
+choice SCHED_DEADLINE_MISS_POLICY
+	default SCHED_DEADLINE_MISS_CUSTOM if BT_LLL_VENDOR_EFR32
+endchoice
+
+# Interference ahead of every admitted job: one interrupt. The longest measured in steady
+# state on silicon is the TIMER0 scheduler clock-event interrupt, 3029 DWT cycles at 76.8 MHz
+# (39.4 us; BURTC 34.2, FRC 20.1, doorbells 13.3). The 90.6 us TIMER0 maximum occurs only
+# during boot. Lower-priority non-preemptible sections cannot delay a meta-IRQ job released
+# from an interrupt or from a running thread: the release itself runs after them.
+configdefault SCHED_DEADLINE_ADMISSION_BLOCKING_NS
+	default 39400 if EFR32_RADIO_ADMISSION
