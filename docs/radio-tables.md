@@ -6082,3 +6082,166 @@ the PA ramp times. Model check: EOF -> SCAN_RSP SYNCSENT is 180.6 us
 - **Not measured, so left as [I] or unmodelled:** command latencies,
   RX2RX's STATUS and hold, TXEN-in-TX semantics, and the d_tx/d_rx split.
 - **Unidentified SEQRAM `0x4000` user.**
+
+### 7.73 Timer and oscillator timing on silicon; the QEMU model follows it
+
+Tags: **[F]** measured on silicon, **[I]** inferred from measured rules,
+**[P]** placeholder (unmeasured; the model uses the named value).
+
+QEMU: vendor/qemu commit `a10ac495f2`. Firmware consequence: stage 3 delivers
+clock events >61 us late on silicon (152 per 10 s); see the BURTC section
+below. Both QEMU firmware builds now panic on it, as silicon would with
+`CLOCK_EVENT_SCHED_PANIC_ON_LATE`. The fix is open.
+
+**Setup and method.**
+
+- Board: BGM220 explorer kit (BG22), J-Link. Stage 3 left in flash; probes ran
+  from SRAM after halting stage 3 (its clock tree configured), so no reflash.
+  Board restored and checked afterwards: 150 / 152 per 5 s, "Name:
+  efr32-radio-port".
+- Live stage 3 clocks (debugger read): `CMU.SYSCLKCTRL = 0x00010402`
+  (HFRCODPLL, HCLK /1, PCLK = HCLK/2), `EM01GRPACLKCTRL = 1` (HFRCODPLL),
+  `DPLLREFCLKCTRL = 1` (HFXO), `DPLL.CFG1 = 0x0eff077f` (76.8 MHz),
+  `EM23GRPACLKCTRL = 2` (LFXO), `EM4GRPACLKCTRL` = LFXO (BURTC on LFXO),
+  `HFXO.STATUS = 0x40030003`, `LFXO.STATUS = 0x00010001`, `LFXO.CFG = 0x401`
+  (TIMEOUT 4K), `DPLL.STATUS = 0x3`, BURTC EN=1 CFG=0 running,
+  TIMER0 CFG=0 (PRESC 0) running, `PROTIMER EN=1, CTRL=0, COUNTER` static at 0
+  over 100 ms.
+- Timebases: DWT.CYCCNT at HCLK = 76.8 MHz (HFRCODPLL locked to HFXO), or at
+  HFXO/FSRCO where stated; PRS async channels 9/10 (SWPULSE or a timer event,
+  INSEL=PRSASYNCPULSE) captured by TIMER1 at 76.8 MHz. Cross-check:
+  4096 BURTC ticks = 9598940-9598948 HCLK cycles (n = 4): 2343.49 cycles/tick,
+  i.e. LFXO = 32771.6 Hz against the HFXO-derived clock (+110 ppm, crystal
+  tolerance). P below = one LF period = 2343.5 HCLK cycles = 30.52 us.
+- Probe source: a scratch probe (probe.c plus OpenOCD scripts; not committed),
+  with raw logs kept outside the repo.
+
+**BURTC (LFXO, CFG.CNTPRESC = DIV1).**
+
+| Rule | Value | n | Method |
+|---|---|---|---|
+| [F] COMP write -> SYNCBUSY.COMP clear | 4743-7033 cycles = 2.02-3.00 P; completes at a fixed LF phase: the 3rd LF edge after the write (phase + busy = 7016-7028 for 63/64; the 64th landed after the edge, 9368 = 4 P) | 64, phase swept over the whole period | CYCCNT, edge-synced to CNT change |
+| [F] COMP readback during sync | old value until SYNCBUSY clears, new after | 64 | same |
+| [F] CNT write -> new value readable / SYNCBUSY.CNT clear | 4738-7004 / 4755-7021 cycles: the 3rd edge; reads the old count until then, then exactly the written value (no increment at that edge) | 32 | same |
+| [F] CMD.STOP -> SYNCBUSY.STOP clear, STATUS.RUNNING clear, last increment | 4770-7006 cycles (3rd edge); CNT advanced exactly 3 after the write (the effective edge still counts) | 32 | same |
+| [F] CMD.START -> SYNCBUSY.START clear / RUNNING set | 4786-7080 cycles (3rd edge); first increment one edge later (4th edge) | 32 | LF phase extrapolated from the last edge before STOP |
+| [F] Compare match | IF.COMP sets on the edge where CNT advances from COMP to COMP+1 (CNT reads COMP+1 in the first poll that sees IF; IF 1.0 P after CNT first reads COMP) | 72 | CYCCNT poll of IF and CNT |
+| [F] Compare lead | COMP = CNT + d (CNT read just before the write): d = -1, 0, 1, 2 never fire (wait for the 2^32 wrap); d = 3, 4, 5, 6, 8 always fire, at 4.0, 5.0, 6.0, 7.0, 9.0 P after the pre-write edge (phase + t_IF = 9377-9413, 11733-11773, 14069-14109, 16407-16465, 21101-21147 cycles) | 8 phases x 9 d | same |
+| [F] Disarm / retarget an imminent match | Rewrite COMP while CNT reads COMP-k: old match still fires for k = 0, 1, 2; cancelled for k = 3, 4, 5 | 8 phases per k | same |
+| [I] Unifying rule (modelled) | each of COMP/CNT/START/STOP takes effect at the 3rd LF edge after the write; the increment and compare on an edge use the state effective before that edge | - | fits every row above |
+| [F] IF -> NVIC pending (IRQ 18) | same poll or one poll earlier (read order): within 46 cycles = 0.6 us | 40 fired | NVIC ISPR polled with IF |
+| [F] EN clear (after STOP synced) -> SYNCBUSY clear | 8210-8220 cycles = 3.50 P | 8 (one phase) | CYCCNT |
+| [F] EN set -> SYNCBUSY clear | 12008-13758 cycles = 5.12-5.87 P, completing at a fixed LF phase | 8, phase swept | CYCCNT |
+| [I] EN completion grid | modelled at the 6th (set) / 4th (clear) falling LF edge after the write: no LF reference was available while BURTC was stopped, so the half-period offset is inferred from 3.50 P | - | - |
+| [F] EN 0 -> 1 | CNT preserved; STATUS.RUNNING stays 0 until START | 8 | - |
+| [F] Counting with CLKEN0.BURTC cleared | keeps counting: 100 of 100 ticks over 100 P | 3 | CNT before/after |
+| [F] Bus access with CLKEN0.BURTC cleared | read: bus error; write: bus error (sticky error on the next transaction) | 1 read; see TIMER rows for writes | debugger AP |
+| [I] CFG.CNTPRESC | counter divides by 2^n, synchronizers keep the undivided edges | - | header field meaning only |
+| [P] PRECNT, a second write while a sync is pending (later write replaces it), writes while EN = 0 (synced the same way), counting before the source oscillator is RDY (not gated) | - | - | - |
+
+Rate: [F] LFXO 32771.6 Hz vs HFXO-derived HCLK (n = 4); the model keeps the
+32.768 kHz nominal. ULFRCO 1 kHz is the xg22.dtsi nominal [P].
+
+**Consequence for the firmware (contradicts its assumptions).**
+
+1. **COMP fires one LF tick after CNT reaches COMP.** The BURTC clock-event
+   driver (`vendor/zephyr/drivers/timer/silabs_burtc_clock_event.c`) writes
+   COMP = deadline and treats CNT >= deadline as due, so its interrupt comes
+   one tick (30.5 us) after the deadline tick. Its `MIN_DELAY_CYC = 6` is
+   safely above the measured minimum lead of 3 (d >= 3 fires); with the +1
+   rule it could program COMP = deadline - 1 with a lead of >= 4.
+2. **`sl_hal_burtc_set_compare()` spins on SYNCBUSY.COMP before and after the
+   write**, i.e. 2.0-3.0 P (61-92 us) per COMP write, up to ~6 P (183 us)
+   back to back, inside the clock-event spinlock. On silicon, stage 3's
+   `late_count` (clock_event_sched.c, 0x20002da0) read 0x4c30 then 0x4cc8 10.0
+   s later: **152 late deliveries (> 61036 ns tolerance) in 10 s on silicon**
+   (stage 3 builds without PANIC_ON_LATE, so nothing is printed). TODO.md's
+   "Missed deadline" item is reproduced on hardware.
+3. QEMU regression (6 s, -icount shift=5): the radio-port-qemu-new and
+   radio-port-qemu-hwcfg builds now panic at ~18 ms virtual:
+   `clock event ... delivered 63270 ns late (tolerance 61036 ns): stage 2,
+   servicing D` (hwcfg: 63180 ns), 0 TXWARM->TX (baseline 2707a58585: 153,
+   no late). Isolation runs: keeping the silicon effect timing and the +1
+   match but hiding SYNCBUSY from the CPU gives 153 TXWARM->TX and no late,
+   so the CPU-side SYNCBUSY spin is what breaks the 61 us tolerance; using the
+   old match edge with SYNCBUSY visible still fails ("radio job qemu tifs ran
+   140577 ns late").
+
+**TIMER0-4 (TIMER0 and TIMER1 measured; all five share the IP).**
+
+| Rule | Value | n | Method |
+|---|---|---|---|
+| [F] Rate | PRESC 0, 1, 3, 9: CNT advanced 100004 / 50002 / 25001 / 10000 over 100000 HCLK cycles with EM01GRPACLK = HCLK | 1 each | CYCCNT |
+| [F] Bus store spacing | two consecutive PRS SWPULSE stores: TIMER1 stamps 10 ticks apart (16/16); one store pulsing both channels: 0 apart (16/16) | 32 | PRS -> TIMER1 |
+| [F] CMD.START -> counting | SWPULSE then START in consecutive stores, TOP = K: OF stamp - SWPULSE stamp = K + 10 for K = 4, 8, 16, 32 (all 32): START acts at the bus write within +-1 timer cycle (OF path vs SW path assumed equal) | 32 | PRS -> TIMER1 |
+| [F] CMD.STOP | START...STOP pair, each preceded by SWPULSE: final CNT = stamp difference exactly (16/16): STOP latency = START latency | 16 | PRS -> TIMER1 |
+| [F] STATUS.SYNCBUSY after a CMD write | 38 HCLK cycles (0.49 us) (8/8); STATUS right after START reads 0x40 | 8 | CYCCNT |
+| [F] OC written equal to CNT (PRESC 1023) | fires at the end of the current tick (1026-1040 cycles after the tick edge) | 6 | CYCCNT |
+| [F] OC = CNT + 1 | one tick later (2050-2064 cycles after the edge) | 6 | same |
+| [F] START with CNT == OC | fires after one tick (1051 cycles) | 6 | same |
+| [F] OC = CNT - 1 (passed) | does not fire (waits for the wrap) | 4 | same |
+| [I] Compare rule (modelled) | CC and OF set IF on the tick where CNT advances out of OC / TOP | - | - |
+| [F] OC arming at full rate | read CNT c, write OC = c + d, read c2: c2 - c = 26 ticks; fires iff d >= 19 (4/4 each d = 0..24): the write takes effect inside the read/write/read window, no extra arming lead | 100 | CYCCNT |
+| [F] Match -> IF -> NVIC | NVIC pending seen in the same poll as IF (16/16); IF itself within the poll granularity (26 cycles) | 16 | CYCCNT poll |
+| [F] EN rules (TIMER1, debugger) | EN = 0: writes to CTRL, CMD, TOP, TOPB, CNT, CC0_CTRL, CC0_OC, CC0_OCB, DTCTRL are bus errors; their reads return 0 (no error) and values are retained across EN 0 -> 1 (TOP/CNT/OC); EN = 1: writes to CFG, CC0_CFG, DTCFG are bus errors; IEN, IF always writable | 1 per register | debugger AP, sticky error on the next transaction |
+| [F] EN rules (TIMER0, CPU) | CC0_CTRL write with EN = 0: precise BusFault, CFSR = 0x8200, BFAR = 0x50048064 (n = 2); CMD write with EN = 0: BusFault, BFAR = 0x5004800c (n = 1) | 3 | probe fault handler |
+| [F] EN_SET -> START in the next store | starts (CNT 219 after 200 cycles, 8/8) | 8 | CYCCNT |
+| [F] Counting with CLKEN0.TIMER0 cleared | keeps counting: 100040 counts over 100061 cycles gated | 3 | CNT before/after |
+| [F] Bus access, clock gated | read error for TIMER0-4, BURTC, RTCC, PRS, PROTIMER, LETIMER0 (1 each); write error for TIMER1 CFG, TIMER1 IPVERSION, TIMER2 CFG, PRS SWLEVEL (5/5 each) | 30 | debugger AP |
+| [F] CLKEN set -> accessible | CPU load in the store right after CLKEN_SET: no fault for TIMER2, TIMER3, TIMER4, RTCC, LETIMER0 (4 x 5) | 20 | probe |
+| [P] SYNCBUSY after writes other than CMD; EN = 0 on a running timer (kept running in the model); CFG.CLKSEL other than PRESCHFPERCLK; MODE other than UP | - | - | - |
+
+Note: the radio-block gating in 2707a58585 drops gated writes silently;
+for TIMER1/TIMER2/PRS every gated write left a sticky bus error. A debugger
+write reports the error only on the following transaction, which may be why
+the radio measurement saw "dropped". Radio windows were not re-measured here.
+
+TIMER0 clock-event minimum lead (TODO.md asks for evidence of 2000 ns): the
+hardware needs none (an OC equal to CNT fires on the next tick; a write lands
+within ~26 cycles = 0.34 us); any lead is for software latency only.
+
+**Oscillators.**
+
+| Rule | Value | n | Method |
+|---|---|---|---|
+| [F] FSRCO | 19.804-19.811 MHz (19818-19825 TIMER1 ticks per 38428 HFXO cycles) | 8 | CPU on HFXO, TIMER1 on FSRCO |
+| [F] HFXO cold start, stage 3 config (at `CMU_DPLLLock` entry, FORCEEN) | ENS 25, RDY 5455-5480, COREBIASOPTRDY 5663-5665 FSRCO cycles = 1.26 us, 275.4-276.7 us, 285.9-286.0 us; STATUS 0x40000000 -> 0x40010003 (no HWREQ with FORCEEN only) | 3 | CYCCNT on FSRCO, calibrated |
+| [F] HFXO STATUS while a hardware requester holds it | 0x40030003 (HWREQ set, ISWARM clear) | 1 | live stage 3 |
+| [P] HFXO warm restart | not measurable: the radio holds HWREQ; the model reuses the cold numbers | - | - |
+| [F] DPLL relock (HFXO ref running) | EN -> STATUS.RDY and IF.LOCK: 11588 HFXO cycles = 301.8 us every time | 16 | CYCCNT on HFXO |
+| [F] DPLL disable | EN = 0 -> STATUS.ENS clear: 38-41 HFXO cycles (1.0-1.07 us) | 16 | same |
+| [F] DPLL STATUS bit 31 | 0 (it is the config LOCK bit; the old model set it) | 1 | live stage 3 |
+| [I] DPLL lock from a cold reference | counted from the reference's RDY | - | - |
+| [P] DPLL ENS after EN (immediate); LFXO-referenced lock (uses the HFXO figure) | - | - | - |
+| [F] LFXO cold start, stage 3 config (TIMEOUT 4K) | ENS -> RDY 124.6-125.4 ms (4096 LFXO cycles = 125.0 ms); ENS already set 0.41-0.54 ms after `CMU_LFXOInit` entry | 5 | host-timed debugger polling, ~0.45 ms resolution |
+| [P] LFXO ENS latency (< 0.5 ms, modelled immediate); LFXO restart (held on by another requester) | - | - | - |
+| [F] LFRCO FORCEEN | ENS 46-47, RDY 16048-16049 HCLK cycles (0.61 us, 209.0 us); FORCEEN clear -> ENS clear 51-65 cycles | 4 | CYCCNT |
+| [F] CLKEN -> peripheral live | next access succeeds (see TIMER rows) | 20 | probe |
+
+**What the model now does (commit a10ac495f2).**
+
+- BURTC on an LF edge grid (EM4GRPACLKCTRL source), all [F]/[I] rules above,
+  SYNCBUSY bits, old-value reads, IRQ 18 with IF.
+- TIMER0-4 as one model (TIMER1, TIMER3 new): EM01GRPACLK / (PRESC+1) for all
+  (TIMER2/4 were a fixed 38.4 MHz), immediate START/STOP/OC, CMD SYNCBUSY
+  495 ns, compare/overflow on the tick leaving OC/TOP, EN-state bus errors and
+  zero reads, IRQs 7-11.
+- TIMER0-4 and BURTC bus-fault every access with their CMU clock off.
+- HFXO, DPLL, LFXO, LFRCO STATUS timed from their request/enable.
+- qtests: efr32bg22-test 91/91 (84 + 7 net new: burtc-compare-lead,
+  burtc-retarget-window, burtc-en-sync, timer0-compare-equal-fires-next-tick,
+  timer-cmd-syncbusy, timer-sync-registers-read-zero-when-disabled,
+  timer-bus-faults, lfxo-ready-timeout; burtc-current-compare-waits-for-wrap
+  removed, it encoded the opposite of silicon), efr32bg22-rf-test 24/24. The
+  timing tests fail on 2707a58585.
+
+**Not modelled / not measured.**
+
+- PROTIMER: model still free-runs at 2 MHz; silicon stage 3 has EN=1, CTRL=0,
+  COUNTER static at 0. What starts it (CTRL/CMD encodings) is not public.
+- RTCC, LETIMER, SYSRTC: not modelled (RTCC/LETIMER only gate-tested).
+- PRS itself, TIMER input capture, DTI, PWM outputs.
+- M0+ SysTick / HCLKRADIO rate (TODO §7.72 cross-check) not measured.
+- HF timer IF latency below the 26-cycle poll granularity.
+- LF oscillator readiness gating the BURTC count; frequency of HFRCODPLL
+  while the DPLL is locking.
