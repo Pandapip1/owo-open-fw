@@ -216,6 +216,63 @@ config EFR32_RADIO_SPIN_EXIT_NS
 	  it was released before the bound (k_deadline_event_post_at()):
 	  silicon 5.8 us, QEMU 36.3 us.
 
+config EFR32_RADIO_RX_LAUNCH_PRE_NS
+	int "RX launch: start to SWRXEN hold (ns)"
+	default 7200
+	help
+	  Longest path from a held RX launch's start (a Peripheral's receive
+	  window) to its SWRXEN hold, the instant's mapping included (as the
+	  TX launch's PRE). QEMU 7.2 us (connection pair). Silicon: not
+	  measured; the QEMU figure is PROVISIONAL there.
+
+config EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS
+	int "RX launch: instant to SWRXEN (ns)"
+	default 1250
+	help
+	  Longest time from the held instant to just after the SWRXEN store,
+	  TIMER0 read after the store: QEMU 48 counts at 38.4 MHz = 1.25 us
+	  (holds that waited). Silicon: not measured; the QEMU figure is
+	  PROVISIONAL there (the TX launch's same loop measured 0.89 us).
+
+config EFR32_RADIO_RX_READY_NS
+	int "SWRXEN to RXSEARCH (ns)"
+	default 3121
+	help
+	  RX ready delay: from SWRXEN with the RAC in OFF to the receiver
+	  searching (RXWARM, then RXSEARCH on the sequencer's
+	  acknowledgement). QEMU 3.121 us in all 2003 launches of a
+	  connection pair (RAC state trace). Silicon: not measured (the open
+	  sequencer does not yet tune the receiver in RXWARM); the QEMU
+	  figure is PROVISIONAL there.
+
+config EFR32_RADIO_TX_READY_NS
+	int "TXEN to the first preamble bit (ns)"
+	default 87080 if EFR32_RADIO_TIMING_QEMU
+	default 91650
+	help
+	  TX ready delay: silicon RACL.ACTIVE rise (TXEN) to RACL.TX rise
+	  91.0 us, TX entry to the first preamble bit 40.65 - 40 = 0.65 us
+	  (SYNCSENT 40.6-40.7 us after TX entry less the 40 us preamble and
+	  access address), docs/radio-tables.md 7.72. QEMU: TXEN to TX entry
+	  85.65-86.43 us (2004 launches, RAC trace) + 0.65 us = 87.08 us.
+
+config EFR32_RADIO_RX_EOF_TO_EXIT_NS
+	int "Received frame's EOF to the RAC leaving RXFRAME (ns)"
+	default 3300
+	help
+	  Silicon: MODEMH.EOF to the RACL.RX fall 3.2-3.4 us (PRS into
+	  TIMER1, docs/radio-tables.md 7.72); the QEMU model uses 3.3 us.
+	  RAC.STIMER counts from that exit, so the HAL dates a received
+	  frame's end from it.
+
+config EFR32_RADIO_RX_EOF_TO_EXIT_NS_MAX
+	int "Received frame's EOF to the RAC leaving RXFRAME, longest (ns)"
+	default 3400
+	help
+	  The longest of the same interval, 3.4 us on silicon (7.72): RXDONE
+	  is raised at the EOF, so the RX completion interrupt waits at most
+	  this for the RAC to leave RXFRAME before dating the frame.
+
 config EFR32_RADIO_WCET_RX_LAUNCH_NS
 	int "RX launch job budget (ns)"
 	default 5100 if EFR32_RADIO_TIMING_QEMU
@@ -270,6 +327,57 @@ config EFR32_RADIO_WCET_COMPLETION_ABORT_NS
 	  Cleanup callback of a radio_disable() (no-response timeout, scan
 	  window end, event close): silicon 267.5 us, QEMU 91.8 us.
 
+# Connection events (docs/radio-tables.md 7.79) are measured in QEMU only: the hardware-
+# configuration Peripheral (tests/radio-port, prj-connection.conf) against the hardware-
+# configuration Central (tests/radio-rx-port, prj-central.conf), efr32bg22-dual, -icount shift=3,
+# 120 s wall (~1200 s virtual), CONFIG_EFR32_RADIO_TIMING_PROBE maxima over both devices. Silicon
+# has no connection yet, so its defaults are these QEMU figures: PROVISIONAL, to be replaced by
+# the silicon measurements 7.79 lists.
+
+config EFR32_RADIO_WCET_RX_WINDOW_LAUNCH_NS
+	int "RX launch budget, held (a Peripheral's receive window) (ns)"
+	depends on BT_PERIPHERAL
+	default 69600
+	help
+	  Longest run of a held RX launch, its SWRXEN hold included: QEMU
+	  69.6 us. PROVISIONAL on silicon.
+
+config EFR32_RADIO_WCET_CONN_COMPLETION_TX_RX_NS
+	int "Completion budget, connection event: TX followed by RX (ns)"
+	default 125300
+	help
+	  lll_conn_isr_tx after a packet answered in turn: QEMU 125.3 us.
+	  PROVISIONAL on silicon.
+
+config EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS
+	int "Completion budget, connection event: RX with a response armed (ns)"
+	default 136600
+	help
+	  lll_conn_isr_rx: QEMU 136.6 us (Peripheral; Central 134.6 us).
+	  PROVISIONAL on silicon.
+
+config EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS
+	int "Completion budget, connection event: close (ns)"
+	default 241700
+	help
+	  isr_done and lll_done after the last TX (53.1 us) or an abort
+	  (241.7 us Peripheral, 217.1 us Central): QEMU 241.7 us.
+	  PROVISIONAL on silicon.
+
+config EFR32_RADIO_CONN_COMPLETION_TO_PENDING_NS
+	int "Connection completion: start to RX->TX PENDING (ns)"
+	default 99200
+	help
+	  lll_conn_isr_tx's path to radio_tmr_hcto_configure()'s PENDING
+	  store: QEMU 99.2 us. PROVISIONAL on silicon.
+
+config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
+	int "Connection completion: start to RESPOND (ns)"
+	default 133000
+	help
+	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store: QEMU
+	  133.0 us (Peripheral; Central 121.2 us). PROVISIONAL on silicon.
+
 config EFR32_RADIO_WCET_LLL_NS
 	int "LLL context budget (ns)"
 	default 266900 if EFR32_RADIO_TIMING_QEMU
@@ -280,10 +388,11 @@ config EFR32_RADIO_WCET_LLL_NS
 
 config EFR32_RADIO_WCET_ULL_NS
 	int "ULL worker budget (ns)"
-	default 439600 if EFR32_RADIO_TIMING_QEMU
+	default 485600 if EFR32_RADIO_TIMING_QEMU
 	default 487800
 	help
-	  Silicon 487.8 us, QEMU 439.6 us (wall time, preemption by the
+	  Silicon 487.8 us (advertising), QEMU 485.6 us (connection pair, 7.79;
+	  439.6 us advertising and scanning) (wall time, preemption by the
 	  radio level included). Bounds the prepare chain's ULL step; not an
 	  admission budget (hal/ll_threads.c).
 
@@ -399,6 +508,16 @@ config EFR32_RADIO_WAKE_LATENCY_NS
 	  launch on silicon (and in QEMU) was dispatched before its bound: the
 	  expiry is delivered within 18.3 us (QEMU 31.9 us) and the job starts
 	  at most EFR32_RADIO_SPIN_EXIT_NS after the bound.
+
+config EFR32_RADIO_TIMING_PROBE
+	bool "Record the longest radio job paths for a debugger"
+	help
+	  Keep the longest completion run per kind (advertising/scanning and
+	  connection events apart), the completion paths to the PENDING and
+	  RESPOND stores, and the held RX launch's paths in struct
+	  efr32_radio_probe, in scheduler-clock cycles (the RX hold lateness
+	  in TIMER0 counts), for a debugger or the QEMU monitor to read.
+	  Measurement builds only (docs/radio-tables.md 7.79).
 
 config EFR32_RADIO_TEST_OVERRUN_US
 	int "Test only: one injected TX launch job overrun (us)"

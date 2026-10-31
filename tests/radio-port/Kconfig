@@ -1,0 +1,16 @@
+# Test-only configuration for the EFR32 radio-port advertiser.
+
+menu "EFR32 radio-port test"
+
+config RADIO_PORT_GATT_TEST
+	bool "Serve a read/write test characteristic to the QEMU Central"
+	depends on BT_PERIPHERAL
+	default n
+	help
+	  One 4-octet characteristic (src/gatt.c) that the QEMU connection
+	  workload's Central writes and reads back to check the link end to
+	  end. QEMU connection profile only.
+
+endmenu
+
+source "Kconfig.zephyr"

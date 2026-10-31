@@ -7157,3 +7157,193 @@ it was is unproven (no capture of that advertisement).
   the AppLoader OTA of `stock-from-backup.gbl` could not be run in simulation. The blocker is
   the same Bluetooth stack start-up as in the application. (Before items 6-7 the AppLoader sat
   in SHUTDOWN, waiting for OFF, with the M0+ in HardFault.)
+
+### 7.79 Connection roles: anchors from received frames, spec-derived deadlines
+
+Tags as in 7.77 ([F] silicon, [Q] QEMU, [S] Core v6.1, [D] design value, [P] provisional: a
+QEMU figure standing in for an unmeasured silicon one). Code: `hal/radio.c`, `hal/cntr.c`,
+`include/hal/efr32/ll_deadlines.h`, `include/hal/efr32/radio_conn.h` (new: what a connection
+event tells the HAL), `CMakeLists.txt` (two LLL patches), `Kconfig`, `sequencer/radio_seq.S`;
+tests `tests/radio-port` (`src/gatt.c`, `Kconfig`, `prj-connection.conf`), `tests/radio-rx-port`
+(`src/central.c`, `prj-central.conf`, `run-qemu-connection-e2e.sh`). No kernel or QEMU change.
+Tooling and logs: `scratch/conn/` (build.sh, dual.sh, meas.sh, tally.sh, ktest.sh).
+
+**Why connections never held.** `radio_tmr_aa_get()`, `radio_tmr_ready_get()` and
+`radio_tmr_end_get()` returned 0. The Peripheral's ULL resynchronises its anchor from
+`aa - ready` against `EVENT_JITTER_US + EVENT_TICKER_RES_MARGIN_US + windowWidening + 40`
+(`ull_drift_ticks_get()`), so every received event moved its anchor ~90 us early, and the first
+transmit window was placed from a CONNECT_IND end of 0. Three further faults sat behind it, each
+seen in the QEMU RAC trace of the hardware-configuration pair:
+- The launch instant dropped the ticker remainder (`cntr_radio_cmp_set()` used the tick only):
+  anchors moved by up to one tick (30.5 us) from event to event, against the sleep clock's
+  16 us (4.2.2).
+- An RX window opened from OFF (a Peripheral's anchor, an initiator's scan) was never marked
+  PENDING, so the RAC went RX2RX and no response (CONNECT_IND, the Peripheral's reply) could
+  follow; and its RX2TX had no synthesizer: the open sequencer powered it only in TXWARM, so the
+  TX after such a window never ended (FRC stalls without a started synthesizer, 7.60) until the
+  next prepare forced the RAC off.
+- A cancelled RX2TX (the advertiser declining a CONNECT_IND) left the TXPD handler waiting out
+  its PA ramp-down bound for a PA that never ramped: the RAC sat in TXPD ~18 ms in QEMU and the
+  first connection event's prepare waited behind it.
+
+**Frame timing from RAC.STIMER [F mechanism].** Every receive in a connection event, and an
+advertiser's CONNECT_IND, is armed for a response, so at the frame's end the RAC enters RX2TX and
+holds it until the sequencer acknowledges (7.65). RAC.STIMER restarts at every state change and
+counts 4.8 ticks/us (7.66, 7.68); the RAC leaves RXFRAME 3.2-3.4 us after MODEM EOF (7.72,
+`EFR32_RADIO_RX_EOF_TO_EXIT_NS` 3.3 us, `_MAX` 3.4 us). The FRC interrupt therefore dates the
+frame: EOF = now - STIMER - 3.3 us, read with RAC.STATUS before and after (both RX2TX). RXDONE is
+raised at the EOF, so the interrupt first waits, bounded by the 3.4 us, for the RAC to leave
+RXFRAME (without that wait the capture missed every connection frame in QEMU and the anchor
+drifted again). The access address ended (PDU + CRC) x 8 us earlier (2.1). Event-timer
+microseconds count from the start tick of `radio_tmr_start()` (`efr32_radio_start_cyc`), as
+OpenISA's EVENT_TMR does; `radio_tmr_ready_get()` is the planned ready time (instant + ready
+delay: the launch is held to its instant). All receive-side times are the MODEM's: d_rx is not
+separated from d_tx (7.71), and it delays the derived anchor and the opened window alike. No QEMU
+change was needed: RAC.STIMER, its restart and the 3.3 us exit are modelled from these silicon
+measurements; PROTIMER captures are not used. Measured result in QEMU: aa - ready 128-148 us per
+event against the ULL's expected 16 + 32 + ww + 40 = ~138 us.
+
+**Ready delays.** TX: TXEN to the first preamble bit, silicon 91.0 + 0.65 = 91.65 us [F, 7.72],
+QEMU 85.65-86.43 + 0.65 = 87.08 us [Q, 2004 launches]. RX: SWRXEN (RAC in OFF) to RXSEARCH, QEMU
+3.121 us in all 2003 launches [Q]; silicon unmeasured [P]. The Central's ULL schedules its anchor
+TXEN the TX delay early and the Peripheral opens its window the RX delay early. Chain delays stay
+0 (unmeasured split, see above).
+
+**Spec quantities added [S].**
+
+| name | value | source |
+|---|---|---|
+| T_MCES | 150 us, end of the Peripheral's last packet to the next anchor; no Frame Space Update here, so T_IFS_ACL_CP/PC = 150 | Vol 6 Part B 4.1.5, 4.1.1 |
+| windowWidening | transmitterAllowance (txCA x (windowEnd - lastSync) + J, J = 16 us sleep clock) + receiverAllowance; listen from ww before receiveWindowStart until ww after receiveWindowEnd; ww < connInterval/2 - T_MCES | 4.2.4, 4.5.7 |
+| transmit window | starts 1.25 ms (CONNECT_IND) + WinOffset after the CONNECT_IND's end, lasts WinSize (1.25 ms .. min(10 ms, connInterval - 1.25 ms)) | 4.5.3, 4.5.5 |
+| anchor | the Central transmits at the anchor (sleep clock, 16 us); events connInterval apart (7.5 ms .. 4 s); the Central closes events T_MCES before the next anchor | 4.5.1, 4.2.2 |
+| packets in an event | T_IFS apart, active clock 2 us | 4.2.1, 4.5.1 |
+| closing | MD bits; two invalid CRCs or a missed packet close the event | 4.5.6 |
+| supervision | connSupervisionTimeout 100 ms .. 32 s, > 2 x (1 + latency) x connInterval; 6 events to establish | 4.5.2 |
+| instants | connection update, channel map, PHY update apply at connEventCount == Instant; the Central allows >= 6 events | 5.5 |
+
+**Derivation (connection jobs).** T: a launch instant (start tick + remainder); post: the
+completion's publication; at: the RAC.STIMER read.
+
+| job | serves | constraint | start-by | QEMU | silicon [P unless F] |
+|---|---|---|---|---|---|
+| Peripheral RX window launch (timed; `efr32_dl_rx_window_*`) | receiver searching before the earliest Central packet | searching by receiveWindowStart - windowWidening [4.2.4, 4.5.7]; ull_peripheral/ull_conn place SWRXEN EVENT_TICKER_RES_MARGIN_US + EVENT_JITTER_US + window_widening_event_us + ready delay before the window start, and ww = window_widening_event_us + J, so the tolerance is EVENT_TICKER_RES_MARGIN_US (`efr32_radio_rx_window_set()`, patched into lll_peripheral.c) | not_before T - RX_PRE - SPIN_EXIT; start-by T - RX_PRE + 32 us - RX_HOLD_LATE; SWRXEN held to T | T - 43.5 / T + 23.55 us | T - 13.0 / T + 23.55 us |
+| Central anchor TX launch | anchor | 16 us sleep clock [4.2.2] | as 7.77, instant now with the remainder | 7.77 | 7.77 [F] |
+| RX->TX completion (`lll_conn_isr_rx`, both roles, every receive) | RESPOND before the sequencer's T_IFS hold | 2 us active clock [4.2.1] | at + (513 - STIMER)/4.8 us - CONN_TO_RESPOND (133.0 us) | always before `at`: infeasible | infeasible by analysis with the QEMU path |
+| TX->RX completion (`lll_conn_isr_tx`: Central after its anchor packet, Peripheral after an MD reply) | PENDING before the reply is recognised | T_IFS - 2 + 40 us [4.1.1, 4.2.1, 2.1] | post + 188 - 11.54 - one interrupt - CONN_TO_PENDING (99.2 us) | post + 4.9 us | post + 19.2 us, then admission's 58.1 us allowance: unsat |
+| closing completion (last TX, abort) | the connection's next event | its prepare must start by the LLL window; the next event's launch is at least connInterval/2 + T_MCES - J after this one's [4.2.4] | T + connInterval/2 + 134 us - LEAD_MAX + LLL window - close run (241.7 us) | T + connInterval/2 - 436.9 us | T + connInterval/2 - 414.7 us |
+| window close (HCTO, initial window) | listen until ww after the window's end | the latest packet (End + ww + 16) is detected 40 + d_rx + 3.5 us later, d_rx <= 9.45 [F 7.71]: by End + ww + 69 us | OpenISA's HCTO is End + ww + 72 us on the event timer; armed absolute (`cntr_rx_timeout_arm_at()`); it can only fire late and never ends a frame being received | - | - |
+| supervision, instants, channel map | ULL control flow at prepare and done | ms-scale timers and event counters [4.5.2, 5.5] | no radio job of their own: the prepare chain carries them; a connection update reopens a transmit window through the same Peripheral window rule | - | - |
+
+`connInterval` reaches the HAL from the patched prepares (`efr32_radio_conn_event_set()`);
+`radio_reset()` forgets it. LEAD_MAX is (XTAL + START + 1) ticks: the launch remainder after the
+borrowed tick is under a tick. The prepare chain's LLL window now takes the earlier of the TX
+launch's and the RX window's latest start (the TX launch's on both platforms: unchanged).
+
+**Prepare lead (EVENT_OVERHEAD_XTAL_US 1500 + START_US 300).** No spec quantity applies: it is
+how early the chain starts. Its minimum (launch at least (XTAL + START - 1) ticks = 1739.5 us
+after the expiry) must cover the chain: compare interrupt + worker release-to-start + ULL run +
+LLL doorbell + LLL run + the launch's wake latency + PRE + SPIN_EXIT:
+silicon 39.4 + 21.0 + 487.8 + 56.9 + 249.1 + 55.7 + 12.0 + 5.8 = 927.7 us [F, advertising];
+QEMU 72.4 + 38.7 + 485.6 + 130.2 + 266.9 + 55.7 + 16.6 + 36.3 = 1102.4 us [Q, connection pair].
+From deep sleep the HFXO (276 us) and DPLL (302 us) restarts [F 7.73] would add 578 us: 1505.7 us
+on silicon. The lead is therefore sufficient by analysis, by 234-812 us on silicon and 637 us in
+QEMU; it stays a design value [D], and admission checks each event against it. Missing to set it
+from measurement: whether the HF restart sits on the radio's chain at all (an LF wake to TXEN
+measured in a deep-sleep build), and silicon ULL/LLL runs in connection events.
+
+**Sequencer changes.** RX2TX after a window opened from OFF (RADIOEN.PREEN clear: the synthesizer
+was powered down by the last TXPD/RXPD) now powers up, calibrates (and caches) and starts the
+synthesizer as TXWARM does, PA still off until RESPOND (`efr32_seq_synth_power_up`, split from
+`efr32_seq_synth_start`, which TXWARM still calls); after a TX->RX turnaround the retune with the
+cached calibration is unchanged. `efr32_seq_pa_stop` skips the ramp-down wait when PARAMP was
+never set. Both are QEMU-verified only; on silicon the RX side of a window opened from OFF is
+still not tuned (the hardware scanner receives nothing, 7.77), so a silicon Peripheral cannot
+receive at its anchor yet.
+
+**Measurements [Q]** (`EFR32_RADIO_TIMING_PROBE` + `SCHED_DEADLINE_STATS`, hardware-configuration
+Peripheral + Central, shift 3, 120 s wall; maxima over both devices): completion runs in
+connection events TX->RX 125.3, RX->TX 136.6 (Central 134.6), last TX 53.1, abort 241.7 (Central
+217.1) us; paths to PENDING 99.2, to RESPOND 133.0 (Central 121.2) us; held RX launch PRE 7.2 us,
+run 69.6 us, hold lateness 48 TIMER0 counts at 38.4 MHz = 1.25 us (from a run without the PRE
+probe's extra clock read, which inflates it); LLL 222.5 us, ULL worker 485.6 us, completion
+release-to-start 61.8 us. Advertising kinds in the same images are within 7.77's. Silicon
+defaults for every connection figure are these, marked PROVISIONAL in Kconfig.
+
+**Feasibility.** In QEMU every connection-event turnaround misses its spec-derived start-by: the
+model's M33 runs `lll_conn_isr_rx` to RESPOND in 133 us, past the ~100 us the sequencer's T_IFS
+hold leaves after the interrupt, and `lll_conn_isr_tx` to PENDING in 99.2 us against 4.9 us of
+slack after one 72.4 us interrupt. Priorities cannot help: the work is the callback itself. The
+connection still holds because the sequencer waits up to 120 us for the decision (the reply then
+goes out up to ~40 us late: T_IFS ~190 us on air in QEMU, a spec violation the deadlines report).
+With the provisional figures silicon is infeasible by analysis too, so a silicon Peripheral with
+admission on (the silicon default) would stop at its first connection event: the real silicon
+paths decide it (advertising ran 1.2-4x faster on silicon than in QEMU, 7.77). If they do not fit,
+the fix is architectural (stage the reply before the frame ends and complete SN/NESN in the
+sequencer, or run the RX callback from the interrupt), not a wider tolerance.
+
+**Verification.**
+- Kernel (native_sim/native/64, unchanged kernel): deadline 14/14 (also with admission and
+  stats), deadline_admission 13/13, clock_event_sched 13/13, deferred_release 5/5, clock_event 4/4.
+- QEMU connection pair (hardware configuration, `prj-connection.conf` + `prj-central.conf`; GATT
+  write and read-back of a 4-octet characteristic once a second; misses counted, and attributed by
+  a scratch tally in the missed-deadline handler, `scratch/conn/radio.c.with-tally`), 900 s wall:
+
+| | shift 3 | shift 5 |
+|---|---|---|
+| virtual time / connection events (50 ms) | 3882 s / 77 636 | 3896 s / 77 923 |
+| disconnections | 0 | 0 |
+| GATT rounds ok / failed | 3210 / 0 | 3240 / 0 |
+| Peripheral misses: RX->TX / TX->RX / close | 77 637 / 6 475 / 9 | 77 924 / 6 499 / 9 |
+| Central misses: RX->TX / TX->RX | 77 628 / 77 638 | 77 915 / 77 925 |
+| launch misses (TX, RX window), unsat | 0, 0 (admission off, the QEMU default) | 0, 0 |
+
+  Every miss is one of the two turnarounds above (worst: Peripheral RESPOND 99.5 us late, Central
+  PENDING 33.8 us late) or a close behind them: when RESPOND comes after the sequencer's 120 us
+  decision bound, the reply is dropped and the event stays open until the next prepare aborts it,
+  whose close is then ~25 ms past its start-by (9 times; under the safe-shutdown policy the RESPOND
+  miss would stop the radio first). No launch missed: the Peripheral's held windows and the
+  Central's anchors all started in time. Before these changes every connection dropped with
+  0x08/0x3E within 0.5-6 s.
+- `run-qemu-connection-e2e.sh` (now asserts a sustained link and GATT): pass at shift 3 (20 s wall,
+  30/30 GATT rounds) and shift 5 (40 s wall, 90/90).
+- Injected infeasibility: Peripheral with `EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS` declared 80 us
+  (beyond the window's 32 us tolerance), safe-shutdown policy: the first Peripheral window launch
+  started 15.5 us past its start-by, safe shutdown (RAC 0x1d000000, PA off), the Peripheral silent
+  afterwards, the Central reports 0x3E. With admission on, QEMU reports the first ADV_IND
+  completion unsat as in 7.77 (44.7 us window, 72.4 us allowance), before any connection exists.
+- Advertising regressions (QEMU): hardware-configuration advertiser + QEMU-configuration scanner
+  clean (shift 3, 120 s wall, 7112/7112 SCAN_RSP; shift 5, 4704/4704); the QEMU-configuration
+  pair stops at 69.5 s (7.77: ~68 s on a TIFS turnaround), now on an advertiser completion 5.9 us
+  past its next-ADV_IND start-by, posted ~10 ms after the event's last ADV_IND (696/696 SCAN_RSP
+  before; not root-caused here: that configuration's seam is not spec-timed, 7.77); hardware
+  advertiser + hardware
+  scanner: the hardware scanner now sends SCAN_REQs (its windows are armed for a response), so
+  this pair now exercises the advertiser's SCAN_REQ RESPOND against a spec-timed scanner, which
+  QEMU cannot meet (7.77): the advertiser stopped after 54 s on a RESPOND completion 1.8 us past
+  its start-by, released 39 us earlier behind interrupts (540 of 541 SCAN_REQs answered). The
+  stage-3 silicon image builds at 99.80% RAM.
+
+**Silicon measurements needed** (no hardware now; procedures as `scratch/sched/`):
+1. RX ready delay: SWRXEN to RXSEARCH, PRS RACL.ACTIVE rise and RACL.RX rise into TIMER1
+   (`scripts/bg22-tifs-probe.tcl` generalised, 7.72 method d), once the sequencer tunes the
+   receiver for a window opened from OFF (prerequisite: such a window receives on silicon).
+2. Connection-event paths: an `EFR32_RADIO_TIMING_PROBE` + `SCHED_DEADLINE_STATS` +
+   `SCHED_DEADLINE_MISS_COUNT` build of the Peripheral, a host Central connected for 120 s,
+   `efr32_radio_probe`, the LL contexts' stats and `miss_count` read over OpenOCD (as
+   `scratch/sched/wcet*.tcl`): completion runs per connection kind, CONN_TO_PENDING/RESPOND, held
+   RX launch PRE/run/hold lateness (TIMER0 counts).
+3. Frame dating error: MODEMH.EOF captured by PRS into TIMER1 against the HAL's
+   `efr32_radio_rx_eof_cyc`, per connection event.
+4. Peripheral window margin: its MODEML.FRAMEDET against its RACL.RX rise, per event, versus
+   windowWidening.
+5. Connection T_IFS: EOF -> SYNCSENT of the Peripheral's reply (`bg22-tifs-probe.tcl`).
+6. The sequencer's RX2TX power-up: SysTick probe (7.72 method e) from RX2TX entry to lock, against
+   the 650-tick hold; TXPD after a cancel no longer waiting.
+7. Prepare lead: LF wake to TXEN in a deep-sleep build (HF restart on the chain or not).
+
+**Open.** Turnaround callbacks too slow for T_IFS in QEMU and (provisionally) on silicon; silicon
+RX from OFF untuned; chain delays (d_rx/d_tx split) unmeasured; T_MCES and the Central's event
+length are not enforced by the OpenISA LLL beyond its slot reservation; 2M/Coded PHYs not
+supported (PHY update stays on 1M); the QEMU-configuration seams cannot run a spec-timed
+connection (no air time; T_IFS from the callback).

@@ -59,6 +59,7 @@ static struct {
 	uint32_t not_before;
 	int deadline;
 	uint8_t trx;
+	bool hold;
 } radio_launch;
 static struct {
 	uint32_t event_generation;
@@ -107,6 +108,7 @@ static void radio_launch_expired(struct k_clock_event *event, uint32_t event_gen
 	uint32_t not_before;
 	int deadline;
 	uint8_t trx;
+	bool hold;
 
 	ARG_UNUSED(event);
 	ARG_UNUSED(user_data);
@@ -117,9 +119,10 @@ static void radio_launch_expired(struct k_clock_event *event, uint32_t event_gen
 		not_before = radio_launch.not_before;
 		deadline = radio_launch.deadline;
 		trx = radio_launch.trx;
+		hold = radio_launch.hold;
 	}
 	if (armed_generation == event_generation) {
-		efr32_radio_launch_wake(trx, generation, instant, not_before, deadline);
+		efr32_radio_launch_wake(trx, hold, generation, instant, not_before, deadline);
 	}
 }
 
@@ -239,24 +242,38 @@ static void cntr_admit_cancel(struct k_deadline_event *event)
 #endif
 }
 
-/*
- * A TX launch is a timed command (hal/efr32/ll_deadlines.h): its job is released the measured
- * wake latency before its not-before bound, waits that bound out at its priority and holds TXEN
- * to the instant. An RX launch has no instant to hold: it is released at the tick and may start
- * anywhere in its window. Both are admitted when armed.
- */
-void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
+uint32_t cntr_tick_cycles(uint32_t tick)
 {
-	uint64_t target = tick_to_logical(value);
+	return (uint32_t)tick_to_logical(tick);
+}
+
+/*
+ * A TX launch, and the RX launch of a Peripheral's receive window (@p tolerance_us nonzero), is
+ * a timed command (hal/efr32/ll_deadlines.h): its job is released the measured wake latency
+ * before its not-before bound, waits that bound out at its priority and holds TXEN or SWRXEN to
+ * the instant. A scan window's RX launch has no instant to hold: it is released at the instant
+ * and may start anywhere in its window. All are admitted when armed.
+ */
+void cntr_radio_cmp_set(uint8_t trx, uint32_t instant, uint32_t tolerance_us,
+			uint32_t generation)
+{
+	uint64_t now = k_clock_event_sched_now();
+	uint64_t target = now + (uint64_t)(int64_t)(int32_t)(instant - (uint32_t)now);
 	uint64_t arm_at;
 	uint32_t not_before;
 	uint32_t event_generation;
 	int deadline;
+	bool hold = trx != 0U || tolerance_us != 0U;
 	unsigned int key;
 
 	if (trx) {
 		not_before = efr32_dl_tx_launch_not_before((uint32_t)target);
 		deadline = efr32_dl_tx_launch_start_by((uint32_t)target);
+		arm_at = target - ((uint32_t)target - not_before) - EFR32_DL_WAKE_CYC;
+		cntr_admit(efr32_radio_launch_event(trx), arm_at, not_before, deadline);
+	} else if (hold) {
+		not_before = efr32_dl_rx_window_not_before((uint32_t)target);
+		deadline = efr32_dl_rx_window_start_by((uint32_t)target, tolerance_us);
 		arm_at = target - ((uint32_t)target - not_before) - EFR32_DL_WAKE_CYC;
 		cntr_admit(efr32_radio_launch_event(trx), arm_at, not_before, deadline);
 	} else {
@@ -276,13 +293,15 @@ void cntr_radio_cmp_set(uint8_t trx, uint32_t value, uint32_t generation)
 	    k_clock_event_arm_abs_with_generation(&radio_launch_event, (uint32_t)arm_at,
 						  &event_generation) != 0) {
 		irq_unlock(key);
-		efr32_radio_launch_wake(trx, generation, (uint32_t)target, not_before, deadline);
+		efr32_radio_launch_wake(trx, hold, generation, (uint32_t)target, not_before,
+					deadline);
 		return;
 	}
 	/* IRQs remain locked: the handler cannot observe a half-published arm. */
 	K_SPINLOCK(&radio_event_lock) {
 		radio_launch.event_generation = event_generation;
 		radio_launch.trx = trx;
+		radio_launch.hold = hold;
 		radio_launch.generation = generation;
 		radio_launch.instant = (uint32_t)target;
 		radio_launch.not_before = not_before;
@@ -373,6 +392,16 @@ void cntr_rx_timeout_arm_after_us(uint32_t delay_us, uint32_t generation)
 	}
 	irq_unlock(key);
 	LL_ASSERT(ret == 0);
+}
+
+void cntr_rx_timeout_arm_at(uint32_t at, uint32_t generation)
+{
+	uint64_t now = k_clock_event_sched_now();
+	int32_t ahead = (int32_t)(at - (uint32_t)now);
+	uint32_t delay_us = ahead > 0 ? k_cyc_to_us_ceil32((uint32_t)ahead) : 0U;
+
+	/* The same bound, from now: it may end late, never early. */
+	cntr_rx_timeout_arm_after_us(delay_us, generation);
 }
 
 void cntr_qemu_tifs_cmp_cancel(void)

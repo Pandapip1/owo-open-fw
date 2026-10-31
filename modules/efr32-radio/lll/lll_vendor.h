@@ -7,11 +7,16 @@
  * (docs/radio-tables.md, "timing").
  */
 
-#define EVENT_OVERHEAD_XTAL_US        1500 /* [I] HFXO start-up: measure */
+/*
+ * XTAL + START is the prepare lead, a design value: docs/radio-tables.md 7.79 shows it covers the
+ * measured expiry-to-launch chain (927.7 us silicon, 1505.7 us with an HFXO/DPLL restart; 1102.4
+ * us QEMU), and admission checks each event against it.
+ */
+#define EVENT_OVERHEAD_XTAL_US        1500 /* [D] with START: the prepare lead, 7.79 */
 #define EVENT_OVERHEAD_PREEMPT_US     0    /* if <= min, then dynamic preempt */
 #define EVENT_OVERHEAD_PREEMPT_MIN_US 150
 #define EVENT_OVERHEAD_PREEMPT_MAX_US EVENT_OVERHEAD_XTAL_US
-#define EVENT_OVERHEAD_START_US       300  /* [I] */
+#define EVENT_OVERHEAD_START_US       300  /* [D] with XTAL: the prepare lead, 7.79 */
 #define EVENT_OVERHEAD_END_US         40   /* [I] */
 #define EVENT_JITTER_US               16
 #define EVENT_TICKER_RES_MARGIN_US    32   /* about one tick of the 32768 Hz counter */

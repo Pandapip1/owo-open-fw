@@ -7,3 +7,6 @@ list(APPEND ZEPHYR_EXTRA_MODULES
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(efr32_radio_rx_port)
 rust_cargo_application()
+if(CONFIG_RADIO_RX_PORT_CENTRAL)
+  target_sources(app PRIVATE src/central.c)
+endif()

@@ -11,3 +11,6 @@ list(APPEND ZEPHYR_EXTRA_MODULES
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(efr32_radio_port)
 rust_cargo_application()
+if(CONFIG_RADIO_PORT_GATT_TEST)
+  target_sources(app PRIVATE src/gatt.c)
+endif()
