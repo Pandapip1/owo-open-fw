@@ -1,0 +1,130 @@
+/*
+ * The suit's output stage on its own control unit (-DOWO_HW=ON). Parts, buses and addresses come
+ * from reverse engineering the stock firmware (docs/stock-stim-path.md); the pin routes are in the
+ * board (boards/owo/owo_suit/owo_suit-pinctrl.dtsi), which also holds every output pin off from
+ * the GPIO driver's start (docs/suit-board.md). Nothing here is confirmed on hardware.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/silabs-adc.h>
+
+/*
+ * Channel switch: a 32-bit shift-register chain as a stock GPIO controller. The chip select is the
+ * chain's latch (PC3, idle high = latched), which is exactly how ti,sn74hc595 uses it. The
+ * chain's output is wired back to MISO, so the driver verifies each write by read-back.
+ */
+&usart0 {
+	compatible = "silabs,usart-spi";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpioc 3 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	suit_switch: switch@0 {
+		compatible = "ti,sn74hc595";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <32>;
+		verify-readback;
+	};
+};
+
+/* Amplitude DAC: USART1 as SPI mode 0, CS = PA5, /CLR on the expander. */
+&usart1 {
+	compatible = "silabs,usart-spi";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	cs-gpios = <&gpioa 5 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	suit_dac: dac@0 {
+		compatible = "lltc,ltc2634";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		#io-channel-cells = <1>;
+		reset-gpios = <&suit_expander 5 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/* PCF8575-class expander (8-bit write address 0x40 => 7-bit 0x20). */
+&i2c0 {
+	status = "okay";
+
+	suit_expander: gpio@20 {
+		compatible = "nxp,pcf857x";
+		reg = <0x20>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <16>;
+	};
+};
+
+/*
+ * Boost converter PWM on the 16-bit TIMER1, CC0 (PC7), as in the stock firmware. At 4 kHz from
+ * EM01GRPACLK (76.8 MHz) the period is 19200 counts: no prescaler needed.
+ */
+&timer1 {
+	status = "okay";
+
+	suit_boost_pwm: pwm {
+		status = "okay";
+		pinctrl-0 = <&timer1_suit_boost>;
+		pinctrl-names = "default";
+	};
+};
+
+&adc0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	/* Feedback on PD3. Gain 1, VDD reference (3.3 V), 12 bit, like the stock firmware. */
+	channel@0 {
+		reg = <0>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,input-positive = <IADC_INPUT_PD3>;
+		zephyr,reference = "ADC_REF_VDD_1";
+		zephyr,resolution = <12>;
+		zephyr,vref-mv = <3300>;
+	};
+};
+
+/* Supply enables behind the expander (P2, P3): plain regulators. */
+/ {
+	suit_supply_a: suit-supply-a {
+		compatible = "regulator-fixed";
+		regulator-name = "suit-supply-a";
+		enable-gpios = <&suit_expander 2 GPIO_ACTIVE_HIGH>;
+	};
+
+	suit_supply_b: suit-supply-b {
+		compatible = "regulator-fixed";
+		regulator-name = "suit-supply-b";
+		enable-gpios = <&suit_expander 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	suit_output: suit-output {
+		compatible = "owo,suit-output";
+		/* PB0..PB3: high side A, high side B, low side A, low side B */
+		bridge-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>, <&gpiob 1 GPIO_ACTIVE_HIGH>,
+			       <&gpiob 2 GPIO_ACTIVE_HIGH>, <&gpiob 3 GPIO_ACTIVE_HIGH>;
+		supplies = <&suit_supply_a>, <&suit_supply_b>;
+		switch = <&suit_switch>;
+		/* One word per electrode channel 0..10 (stock table, recovered by emulation). */
+		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
+				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
+		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
+		boost-duty-percent = <50>;
+		io-channels = <&suit_dac 15>, <&adc0 0>;
+		io-channel-names = "amplitude", "sense";
+		amplitude-resolution = <12>;
+		amplitude-scale = <0x12FED 0x9C4>;
+		max-level = <126>;
+		sense-uv-per-level = <19150>;
+		sense-offset = <3>;
+	};
+};

@@ -1,0 +1,8 @@
+# The stand-in explorer kit's board defaults (Zephyr boards/silabs/explorer_kits/xg22), so both
+# builds of the product start from the same configuration.
+if BOARD_OWO_SUIT
+
+config FPU
+	default y if SOC_GECKO_USE_RAIL || BT
+
+endif # BOARD_OWO_SUIT

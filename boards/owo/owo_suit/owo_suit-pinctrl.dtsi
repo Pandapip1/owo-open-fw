@@ -1,0 +1,63 @@
+/*
+ * Pin routes of the suit's output stage, as the stock firmware programs them
+ * (docs/stock-stim-path.md). The peripherals that use them stay disabled in the board:
+ * boards/owo_suit_hw.overlay (-DOWO_HW=ON) enables them.
+ */
+#include <zephyr/dt-bindings/pinctrl/silabs/xg22-pinctrl.h>
+
+&pinctrl {
+	/* Channel switch chain: USART0 as SPI. PC3 (latch) is a GPIO chip select. */
+	usart0_suit_switch: usart0_suit_switch {
+		group0 {
+			pins = <USART0_TX_PC0>, <USART0_CLK_PC2>;
+			drive-push-pull;
+			output-low;
+		};
+
+		group1 {
+			pins = <USART0_RX_PC1>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+
+	/* Amplitude DAC: USART1 as SPI. PA5 (chip select) is a GPIO. */
+	usart1_suit_dac: usart1_suit_dac {
+		group0 {
+			pins = <USART1_TX_PA0>, <USART1_CLK_PA8>;
+			drive-push-pull;
+			output-low;
+		};
+
+		group1 {
+			pins = <USART1_RX_PA4>;
+			input-enable;
+			silabs,input-filter;
+		};
+	};
+
+	/* PCF8575-class expander. */
+	i2c0_suit_expander: i2c0_suit_expander {
+		group0 {
+			pins = <I2C0_SCL_PA7>, <I2C0_SDA_PB4>;
+			bias-pull-up;
+			drive-open-drain;
+		};
+	};
+
+	/* Boost converter PWM: TIMER1 CC0 on PC7, the route the stock firmware uses. */
+	timer1_suit_boost: timer1_suit_boost {
+		group0 {
+			pins = <TIMER1_CC0_PC7>;
+			drive-push-pull;
+			output-low;
+		};
+	};
+
+	/* Sense input PD3 (feedback) is an odd pin of ports C/D: the CD odd analog bus. */
+	iadc0_suit_sense: iadc0_suit_sense {
+		group0 {
+			silabs,analog-bus = <ABUS_CDODD0_IADC0>;
+		};
+	};
+};

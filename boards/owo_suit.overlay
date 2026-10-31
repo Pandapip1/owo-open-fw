@@ -1,0 +1,5 @@
+/*
+ * The suit control unit (board in boards/owo/owo_suit). Its flash map, with the partition the
+ * product links into, is part of the board; the product adds only what every board gets.
+ */
+#include "owo_product.dtsi"

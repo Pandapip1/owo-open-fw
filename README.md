@@ -18,6 +18,8 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `src/ble.rs` | GATT table built at run time, pairing (passkey), advertising, connection handling |
 | `src/hal.rs` | `Output`: dry-run log, or (opt-in) the `owo-stim` supervisor + `owo-suit` |
 | `modules/owo-stim/` | **Reusable Zephyr module**: per-part Rust crates, a Rust DAC driver, bindings, shim. See below |
+| `boards/owo/owo_suit/` | The suit's control unit as an out-of-tree Zephyr board (`docs/suit-board.md`) |
+| `boards/<board>.overlay`, `boards/owo_product.dtsi` | What the product needs from a board: OTA hand-over word, open controller, scheduler clock, watchdog (plus the kit's flash map) |
 | `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
 | `vendor/zephyr/` | Pinned patched Zephyr submodule: Counter-backed timing backend and read-back verification for `ti,sn74hc595` |
 | `docs/ota.md`, `scripts/make-gbl.py` | Keeping the Silicon Labs OTA update working (flash map and boot-mode request in devicetree, OTA service in `src/ble.rs`) and packaging a GBL |
@@ -41,8 +43,11 @@ cargo test --manifest-path crates/owo-core/Cargo.toml      # protocol + schedule
 cargo test --manifest-path modules/owo-stim/rust/Cargo.toml --workspace   # supervisor + part crates; or: nix flake check
 ```
 `flake.lock` is tracked and pins the development-shell inputs used by this project.
-`bg22_ek4108a` is a stand-in dev kit (EFR32BG22, the same family as the suit; the firmware's peripheral
-addresses and vector table match xG22). The suit's exact part number is unknown.
+`bg22_ek4108a` is a stand-in dev kit (EFR32BG22, the same family as the suit). The suit's own control
+unit is the board `owo_suit` (`-b owo_suit`, defined in this repository under `boards/owo/owo_suit/`):
+a BGM220PC22WGA module (EFR32BG22C222F352GM40 die, 352 KiB flash), with the unit's flash map, clocks
+and output-stage pins read from a unit (`docs/suit-board.md`). It builds; it has not run on a suit,
+and an image needs an ApplicationProperties_t before the suit's AppLoader will start it (`docs/ota.md`).
 
 ## The `owo-stim` module (output stage)
 `modules/owo-stim/` is a Zephyr module (Kconfig, devicetree bindings, C glue) with a Cargo workspace of
@@ -75,7 +80,7 @@ switch, regulators, a PWM, a DAC channel, an ADC channel) plus one `owo,suit-out
 them and carries the scaling numbers. The ADC driver must support `adc_read_async` with a sequence
 callback, and Zephyr's timing API needs a source (CPU cycle counter, or `zephyr,timing-counter`). If a
 part has no Zephyr driver yet, write that driver (one crate, one binding) and nothing else changes.
-The only board verified to build is `bg22_ek4108a`; no second MCU family has been tried.
+The boards verified to build are `bg22_ek4108a` and `owo_suit`; no second MCU family has been tried.
 
 Idle power: the ADC sampler and the timing counter run only while the supply is on. The timing backend never
 blocks sleep: it needs a counter that keeps counting in the sleep states in use, and arms an alarm half a
@@ -175,7 +180,7 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
   accept it. Attribute handles differ from stock (apps look up by UUID).
 - The `BINDGEN_EXTRA_CLANG_ARGS` workaround in `flake.nix` (skip GCC's `arm_acle.h`, which clang
   rejects) was needed with both toolchains tried; it is a workaround, not a fix.
-- **The output stage (`owo-suit`, the overlay and the Rust DAC driver) is unvalidated on hardware.** The overlay targets the stand-in explorer kit, not the suit's board; the SPI clock for the channel switch is the Zephyr USART driver's, not the stock bit rate. Open issues: expander P2/P3 and PA6 purpose; whether the SPI switch tolerates the slower bit-banged clock; sense calibration; the real pulse width (2x question); pin states between reset and `Suit::new`; whether `critical()` (PRIMASK off for <= ~0.5 ms) disturbs the BLE controller.
+- **The output stage (`owo-suit`, the overlay and the Rust DAC driver) is unvalidated on hardware.** `boards/owo_suit_hw.overlay` targets the suit's own board, `boards/bg22_ek4108a_hw.overlay` the stand-in kit; the SPI clock for the channel switch is the Zephyr USART driver's, not the stock bit rate. Open issues: expander P2/P3 and PA6 purpose; whether the SPI switch tolerates the slower bit-banged clock; sense calibration; the real pulse width (2x question); pin states between reset and `Suit::new`; whether `critical()` (PRIMASK off for <= ~0.5 ms) disturbs the BLE controller.
 - Idle power: nothing was measured.
 - Placeholders: battery level fixed at 100 (Zephyr's BAS default); channel status always "all open";
   the Extra 2 record after 0x25 is from the app decode; the config packet is parsed and stored but

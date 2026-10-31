@@ -1,8 +1,9 @@
 /*
- * Board-level facts that make the Silicon Labs OTA update keep working with this firmware
- * (docs/ota.md). Nothing here is code: it is the flash map the suit's bootloader expects and the
- * RAM word the bootloader reads to decide whether to enter its OTA mode.
+ * The stand-in explorer kit. Board-level facts that make the Silicon Labs OTA update keep working
+ * with this firmware (docs/ota.md): here the flash map the suit's bootloader expects; the RAM word
+ * the bootloader reads, and the rest of what the product needs, are in owo_product.dtsi.
  */
+#include "owo_product.dtsi"
 
 /*
  * Flash map. The stock images (GBL, ERASEPROG tag) are written at 0x16000, after the
@@ -32,49 +33,7 @@
 	};
 };
 
-/*
- * "Reboot into the bootloader" request. The bootloader's application API
- * (bootloader_rebootAndInstall in btl_interface.c) writes a struct {u16 reason; u16 signature;}
- * at the very start of RAM and resets; reason 0x0202 = BOOTLOADER_RESET_REASON_BOOTLOAD,
- * signature 0xF00F = valid (btl_reset_info.h). Zephyr's boot-mode retention writes its prefix
- * and then one mode byte, so the prefix is those four bytes (little endian).
- */
-/*
- * Hardware watchdog. Zephyr's wdt_gecko driver (silabs,gecko-wdog) is selected for Series 2
- * (drivers/watchdog/Kconfig.gecko); it uses the 1 kHz ULFRCO. Fed from the pump (src/wdt.rs).
- */
-&wdog0 {
-	status = "okay";
-};
-
-/*
- * Use Zephyr's standard split-controller HCI device with the open EFR32
- * lower layer, not the board's Silicon Labs blob controller.  The vendor HCI
- * node would otherwise remain chosen without a linked driver.
- */
-&bt_hci_silabs {
-	status = "disabled";
-};
-
-&radio {
-	bt_hci_efr32: bt_hci_efr32 {
-		compatible = "zephyr,bt-hci-ll-sw-split";
-		status = "okay";
-	};
-};
-
-/* Scheduler clock providers: BURTC across deep sleep, TIMER0 (EM01GRPACLK) while running. */
-&burtc0 {
-	status = "okay";
-};
-
-/* TIMER0, the only 32-bit TIMER, belongs to the scheduler clock. */
-&timer0 {
-	counter {
-		status = "okay";
-	};
-};
-
+/* The kit's TIMER0 PWM (LED) gives way to the scheduler clock (owo_product.dtsi). */
 &timer0_pwm {
 	status = "disabled";
 };
@@ -106,37 +65,4 @@
 
 &pwm_led0 {
 	pwms = <&timer1_pwm 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
-};
-
-&sram0 {
-	reg = <0x20000008 (DT_SIZE_K(32) - 8)>;
-};
-
-/ {
-	btl_request: retained@20000000 {
-		compatible = "zephyr,memory-region", "mmio-sram";
-		reg = <0x20000000 8>;
-		zephyr,memory-region = "RetainedMem";
-
-		retainedmem {
-			compatible = "zephyr,retained-ram";
-			#address-cells = <1>;
-			#size-cells = <1>;
-
-			boot_mode0: retention@0 {
-				compatible = "zephyr,retention";
-				reg = <0x0 8>;
-				prefix = [02 02 0f f0];
-			};
-		};
-	};
-
-	chosen {
-		zephyr,boot-mode = &boot_mode0;
-		zephyr,bt-hci = &bt_hci_efr32;
-	};
-
-	aliases {
-		watchdog0 = &wdog0;
-	};
 };

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20.0)
 
+# Out-of-tree board definitions (boards/owo/owo_suit: the suit's control unit).
+list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR})
+
 # Reusable stimulation-output subsystem (Kconfig + Rust driver crate).
 # The EFR32 module provides the open split Bluetooth controller; it replaces
 # the board's blob-dependent Silicon Labs HCI driver.

@@ -10,7 +10,7 @@ supply regulators, then records each acknowledgement. Rust acquires and self-tes
 while shut down; only successful resources become `Ready`. BLE and monitored stimulation may not
 start while a required resource remains `Unknown` or becomes `Failed`.
 
-* Enabled with `&wdog0 { status = "okay"; }` and the `watchdog0` alias in `boards/bg22_ek4108a.overlay`,
+* Enabled with `&wdog0 { status = "okay"; }` and the `watchdog0` alias in `boards/owo_product.dtsi`,
   `CONFIG_WATCHDOG=y`. Zephyr's `drivers/watchdog/wdt_gecko.c` (`silabs,gecko-wdog`) is selected for
   Series 2 by `drivers/watchdog/Kconfig.gecko` (`select SILABS_SISDK_WDOG if SOC_FAMILY_SILABS_S2`).
 * A stimulation session holds a counted Rust watchdog lease. Acquiring its first lease calls `owo_wdt_start`

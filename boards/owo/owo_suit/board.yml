@@ -1,0 +1,5 @@
+board:
+  name: owo_suit
+  full_name: OWO suit control unit (BGM220PC22WGA module)
+  socs:
+    - name: bgm220pc22wga

@@ -1,0 +1,84 @@
+/*
+ * What the product needs from any EFR32BG22 board it runs on, included by each board's overlay
+ * (boards/<board>.overlay). Nothing here is code: the Silicon Labs OTA hand-over word in RAM
+ * (docs/ota.md), the open Bluetooth controller, the scheduler clock and the watchdog.
+ */
+
+/*
+ * Hardware watchdog. Zephyr's wdt_gecko driver (silabs,gecko-wdog) is selected for Series 2
+ * (drivers/watchdog/Kconfig.gecko); it uses the 1 kHz ULFRCO. Fed from the pump (src/wdt.rs).
+ */
+&wdog0 {
+	status = "okay";
+};
+
+/*
+ * Use Zephyr's standard split-controller HCI device with the open EFR32
+ * lower layer, not the board's Silicon Labs blob controller.  The vendor HCI
+ * node would otherwise remain chosen without a linked driver.
+ */
+&bt_hci_silabs {
+	status = "disabled";
+};
+
+&radio {
+	bt_hci_efr32: bt_hci_efr32 {
+		compatible = "zephyr,bt-hci-ll-sw-split";
+		status = "okay";
+	};
+};
+
+/* Scheduler clock providers: BURTC across deep sleep, TIMER0 (EM01GRPACLK) while running. */
+&burtc0 {
+	status = "okay";
+};
+
+/* TIMER0, the only 32-bit TIMER, belongs to the scheduler clock. */
+&timer0 {
+	status = "okay";
+
+	counter {
+		status = "okay";
+	};
+};
+
+/* RAM for Zephyr starts after the hand-over word. */
+&sram0 {
+	reg = <0x20000008 (DT_SIZE_K(32) - 8)>;
+};
+
+/*
+ * "Reboot into the bootloader" request. The bootloader's application API
+ * (bootloader_rebootAndInstall in btl_interface.c) writes a struct {u16 reason; u16 signature;}
+ * at the very start of RAM and resets; reason 0x0202 = BOOTLOADER_RESET_REASON_BOOTLOAD,
+ * signature 0xF00F = valid (btl_reset_info.h). Zephyr's boot-mode retention writes its prefix
+ * and then one mode byte, so the prefix is those four bytes (little endian).
+ */
+/ {
+	btl_request: retained@20000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x20000000 8>;
+		zephyr,memory-region = "RetainedMem";
+
+		retainedmem {
+			compatible = "zephyr,retained-ram";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			boot_mode0: retention@0 {
+				compatible = "zephyr,retention";
+				reg = <0x0 8>;
+				prefix = [02 02 0f f0];
+			};
+		};
+	};
+
+	chosen {
+		zephyr,boot-mode = &boot_mode0;
+		zephyr,bt-hci = &bt_hci_efr32;
+	};
+
+	aliases {
+		watchdog0 = &wdog0;
+	};
+};

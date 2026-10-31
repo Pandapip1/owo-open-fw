@@ -1,0 +1,15 @@
+identifier: owo_suit
+name: OWO suit control unit (BGM220PC22WGA)
+type: mcu
+arch: arm
+ram: 32
+flash: 352
+toolchain:
+  - zephyr
+  - gnuarmemb
+supported:
+  - gpio
+  - watchdog
+testing:
+  ignore_tags:
+    - pm

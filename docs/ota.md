@@ -17,9 +17,9 @@ installed open firmware can be replaced the same way (including by the stock fir
 
 | Need | How | Where |
 |------|-----|-------|
-| Be linked where the bootloader expects the app (0x16000, as in every stock GBL) | flash partitions in devicetree + `CONFIG_USE_DT_CODE_PARTITION` | `boards/bg22_ek4108a.overlay`, `.conf` |
+| Be linked where the bootloader expects the app (0x16000, as in every stock GBL) | flash partitions in devicetree + `CONFIG_USE_DT_CODE_PARTITION` | suit: the board (`boards/owo/owo_suit/owo_suit.dts`); kit: `boards/bg22_ek4108a.overlay`; both `boards/<board>.conf` |
 | Offer the OTA service with its Control point | GATT service, write-only, authenticated | `src/ble.rs` |
-| Reboot into the bootloader when told | Zephyr's **boot-mode retention** API; the board's devicetree places the retention area at the start of RAM with the bootloader's reset-reason word as its prefix (`0x0202` BOOTLOAD, `0xF00F` valid) | `boards/bg22_ek4108a.overlay`, `src/ota.rs` |
+| Reboot into the bootloader when told | Zephyr's **boot-mode retention** API; the board's devicetree places the retention area at the start of RAM with the bootloader's reset-reason word as its prefix (`0x0202` BOOTLOAD, `0xF00F` valid) | `boards/owo_product.dtsi` (included by every board overlay), `src/ota.rs` |
 
   The reset-reason word is what `bootloader_rebootAndInstall()` writes before resetting
   (`platform/bootloader/api/btl_interface.c`, `btl_reset_info.h`, Gecko SDK 4.5.1). Using the
@@ -39,11 +39,18 @@ by the script).
   distributes them to everybody, so an unsigned update is probably accepted **[I]**; the bootloader's
   configuration was never read, and application secure boot (set through OTP) would reject an
   unsigned application **[D]** (see `owo-open-firmware-feasibility.md` section 2).
-- Our image has no ApplicationProperties_t (the pointer in the vector table is 0). The bootloader
-  treats that as "assume valid" when secure boot is not enforced
-  (`btl_bootload.c`, `bootload_verifyApplication`).
+- **Our image has no ApplicationProperties_t (the pointer in vector-table word 13 is 0), and on the
+  suit that keeps it from starting [E].** In QEMU, running the unit's own bootloader and AppLoader
+  (flash read from the suit) with the `owo_suit` image at 0x16000, the AppLoader stays in its OTA
+  mode and the application never runs. The same image with an ApplicationProperties_t appended
+  (magic, struct version 1.1, no signature, type Bluetooth application) and word 13 pointing at
+  it boots: the bootloader hands over and the open firmware advertises. The stock application
+  carries exactly such a struct (unsigned, type Bluetooth application). So the earlier reading
+  ("assume valid" in `bootload_verifyApplication`) does not hold for this unit's AppLoader. The
+  product must carry the struct before it is installed on a suit (open item in `TODO.md`).
 - That the RAM word survives the reset into the bootloader exactly as in `bootloader_rebootAndInstall()`
   (the retention area is outside Zephyr's RAM, so the C runtime does not clear it).
-- The flash end of the suit's part and where its persistent storage is; the stand-in kit's 512 KB
-  map is used (`storage` at 0x7C000).
+- Solved: the suit's flash map (352 KiB: bootloader, AppLoader at 0x6000, application 0x16000 to
+  0x4C000, stock NVM3 0x4C000-0x56000, a free last page) was read from a unit; see
+  `suit-board.md`. The kit build keeps the kit's 512 KB map.
 - If an image without a working OTA trigger is installed, recovery needs SWD.

@@ -1,0 +1,4 @@
+# The control unit's DEVINFO names a BGM220PC22WGA module (an EFR32BG22C222F352GM40 die with its
+# own 38.4 MHz crystal), so the board is built on Zephyr's SoC for that module (docs/suit-board.md).
+config BOARD_OWO_SUIT
+	select SOC_BGM220PC22WGA

@@ -1,0 +1,212 @@
+/*
+ * OWO suit control unit. The facts below come from the unit's own DEVINFO and from static
+ * analysis of the stock firmware read from it; docs/suit-board.md gives the evidence for each.
+ *
+ * - SoC: a BGM220PC22WGA module (DEVINFO.MODULENAME), which is an EFR32BG22C222F352GM40 die
+ *   (DEVINFO.PART, MSIZE, PKGINFO) with its own 38.4 MHz crystal. The module dtsi supplies the
+ *   352 KiB flash, 32 KiB RAM and the HFXO.
+ * - HFXO CTUNE: DEVINFO.MODXOCAL, which the module's DEVINFO marks valid. Zephyr's clock manager
+ *   and the stock firmware use the same order (DEVINFO, then the USERDATA manufacturing token,
+ *   then the configured default), so the module's `ctune` below is only the last fallback.
+ * - No LFXO on the module (DEVINFO.MODULEINFO.LFXO = none): every low-frequency clock runs from
+ *   the LFRCO in precision mode, as in the stock firmware and the module dtsi.
+ * - DCDC: buck, Silicon Labs' default settings, as the stock firmware initialises it.
+ */
+
+/dts-v1/;
+#include <silabs/xg22/bgm220pc22wga.dtsi>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/regulator/silabs_dcdc.h>
+#include "owo_suit-pinctrl.dtsi"
+
+/ {
+	model = "OWO suit control unit (BGM220PC22WGA)";
+	compatible = "owo,suit", "silabs,bgm220pc22wga", "silabs,bgm22";
+
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+		zephyr,flash = &flash0;
+		zephyr,sram = &sram0;
+	};
+
+	aliases {
+		sw0 = &button0;
+		watchdog0 = &wdog0;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+
+		/* Input with pull-up, both edges (stock board initialisation). */
+		button0: button_0 {
+			gpios = <&gpioc 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+};
+
+&cpu0 {
+	clock-frequency = <76800000>;
+};
+
+/*
+ * SYSCLK and EM01GRPACLK: HFRCODPLL locked to the HFXO at 76.8 MHz, the clock tree of the
+ * stand-in kit on which the radio and scheduler timings were calibrated. The stock firmware runs
+ * from the HFXO directly at 38.4 MHz; the crystal is the same 38.4 MHz on both.
+ */
+&hfrcodpll {
+	clock-frequency = <DT_FREQ_K(76800)>;
+	clocks = <&hfxo>;
+	dpll-autorecover;
+	dpll-edge = "fall";
+	dpll-lock = "phase";
+	dpll-m = <1919>;
+	dpll-n = <3839>;
+};
+
+&dcdc {
+	regulator-boot-on;
+	regulator-initial-mode = <SILABS_DCDC_MODE_BUCK>;
+	status = "okay";
+};
+
+&gpio {
+	status = "okay";
+};
+
+&gpioa {
+	status = "okay";
+
+	/* DAC chip select (PA5) and the second select next to it (PA6): deselected. */
+	dac-selects-idle {
+		gpio-hog;
+		gpios = <5 GPIO_ACTIVE_HIGH>, <6 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+};
+
+/*
+ * Output stage held off from the GPIO driver's start, in every build (the product without
+ * -DOWO_HW=ON never touches these pins again). From reset until then the pins are high
+ * impedance (GPIO reset state); docs/suit-board.md describes that window.
+ *
+ * H-bridge "off" exactly as the stock bridge routine and owo-stim's safe-off set it: both high
+ * sides (PB0, PB1) off, both low sides (PB2, PB3) on.
+ */
+&gpiob {
+	status = "okay";
+
+	bridge-high-sides-off {
+		gpio-hog;
+		gpios = <0 GPIO_ACTIVE_HIGH>, <1 GPIO_ACTIVE_HIGH>;
+		output-low;
+	};
+
+	bridge-low-sides-on {
+		gpio-hog;
+		gpios = <2 GPIO_ACTIVE_HIGH>, <3 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+};
+
+&gpioc {
+	status = "okay";
+
+	/* Channel switch latch (PC3): idle high, as the stock firmware leaves it. */
+	switch-latch-idle {
+		gpio-hog;
+		gpios = <3 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+
+	/* Boost converter PWM (PC7): low, the converter does not switch. */
+	boost-off {
+		gpio-hog;
+		gpios = <7 GPIO_ACTIVE_HIGH>;
+		output-low;
+	};
+};
+
+&gpiod {
+	status = "okay";
+};
+
+&wdog0 {
+	status = "okay";
+};
+
+&trng {
+	status = "okay";
+};
+
+/* Disabled until boards/owo_suit_hw.overlay describes the parts behind them. */
+&usart0 {
+	pinctrl-0 = <&usart0_suit_switch>;
+	pinctrl-names = "default";
+};
+
+&usart1 {
+	pinctrl-0 = <&usart1_suit_dac>;
+	pinctrl-names = "default";
+};
+
+&i2c0 {
+	pinctrl-0 = <&i2c0_suit_expander>;
+	pinctrl-names = "default";
+};
+
+&adc0 {
+	pinctrl-0 = <&iadc0_suit_sense>;
+	pinctrl-names = "default";
+};
+
+/*
+ * Flash map of the unit (352 KiB, 8 KiB pages), read from its flash. Only the application
+ * partition and the storage page are ours; docs/suit-board.md explains the storage choice.
+ */
+&flash0 {
+	partitions {
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Gecko Bootloader; its table puts the application space at 0x6000-0x58000. */
+		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00000000 DT_SIZE_K(24)>;
+			label = "gecko-bootloader";
+			read-only;
+		};
+
+		/* AppLoader, the Bluetooth OTA "application" the bootloader starts on request. */
+		apploader_partition: partition@6000 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00006000 DT_SIZE_K(64)>;
+			label = "apploader";
+			read-only;
+		};
+
+		/* The application, where every stock GBL is written, up to the stock NVM3. */
+		slot0_partition: partition@16000 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00016000 DT_SIZE_K(216)>;
+			label = "image-0";
+		};
+
+		/* Stock NVM3 (five pages, in use): kept so a reinstalled stock firmware finds it. */
+		stock_nvm3_partition: partition@4c000 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x0004c000 DT_SIZE_K(40)>;
+			label = "stock-nvm3";
+			read-only;
+		};
+
+		/* The last page, erased and referenced by neither the bootloader nor the stock app. */
+		storage_partition: partition@56000 {
+			compatible = "zephyr,mapped-partition";
+			reg = <0x00056000 DT_SIZE_K(8)>;
+			label = "storage";
+		};
+	};
+};
