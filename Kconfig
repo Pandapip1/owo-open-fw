@@ -4,4 +4,20 @@ config OWO_ADV_INTERVAL_MS
 	int "Advertising interval (ms)"
 	default 100
 
+config OWO_GECKO_APP_PROPERTIES
+	bool "Image descriptor for the Gecko Bootloader"
+	default y
+	help
+	  Put the Silicon Labs ApplicationProperties descriptor in the image and its address in
+	  vector slot 13. The Gecko Bootloader and AppLoader in front of the app (0x16000) do not
+	  start an image without it (docs/ota.md).
+
+config OWO_GECKO_APP_VERSION
+	int "Application version in the image descriptor"
+	depends on OWO_GECKO_APP_PROPERTIES
+	default 1
+	help
+	  The stock app carries 1. Kept equal so that neither an update to the open firmware nor
+	  a return to stock depends on the bootloader's unknown version policy.
+
 source "Kconfig.zephyr"

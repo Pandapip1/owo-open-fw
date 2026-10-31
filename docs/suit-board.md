@@ -116,15 +116,17 @@ application area replaced by the default `owo_suit` build. **[E]**
   PC3 set, PC7 cleared, then the modes), and the radio runs repeated TX sequences (advertising).
   The model reports only reads of the CPU's debug status register (DHCSR), which it does not
   implement.
+- The product now carries that descriptor (`src/gecko_app_properties.c`, `ota.md`); the default
+  `owo_suit` build starts straight from the unit's bootloader and runs the radio. **[E]**
 
-## Build numbers (default configuration, 2026-10-31)
+## Build numbers (2026-10-31, with the budget settings in `prj.conf`)
 | Board | Flash | RAM (of 32 760 B) | Fits? |
 |---|---|---|---|
-| `bg22_ek4108a` | 192 708 B | 33 068 B | no: RAM overflows by 308 B (unchanged by this board) |
-| `owo_suit` | 186 284 B of 221 184 B (84.2 %) | 32 612 B (99.6 %) | links; image ends at 0x437AC, inside 0x16000-0x4C000 |
+| `bg22_ek4108a` | 143 228 B | 31 956 B (97.6 %) | links |
+| `owo_suit` | 137 804 B of 221 184 B (62.3 %) | 31 500 B (96.2 %) | links |
+| `owo_suit`, `-DOWO_HW=ON` | - | - | no: RAM overflows by 324 B |
 
-The suit build links because it has no console UART (6.4 KB flash and 456 B RAM less than the
-kit). Its 148 B of RAM headroom is far below the 1 760 B reserve that
-`scripts/check-hardware-ram.sh` enforces, so the size decision recorded in `TODO.md` still
-applies to it. With `-DOWO_HW=ON` the suit build compiles; the link needs 210 788 B of flash
-(fits) and 34 204 B of RAM, 1 444 B more than the part has.
+Before the budget settings (LTO, no printk, no controller privacy or filter list, no fault dump,
+no GATT caching, no vendor HCI) the kit needed 192 708 B / 33 068 B (RAM over by 308 B) and the
+suit 186 284 B / 32 612 B; `-DOWO_HW=ON` was 1 444 B over. The suit's 1 260 B of RAM headroom is
+still below the 1 760 B reserve that `scripts/check-hardware-ram.sh` enforces.

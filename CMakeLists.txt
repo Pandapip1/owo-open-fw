@@ -31,3 +31,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(owo_open_fw)
 
 rust_cargo_application()
+
+if(CONFIG_OWO_GECKO_APP_PROPERTIES)
+  target_sources(app PRIVATE src/gecko_app_properties.c)
+endif()

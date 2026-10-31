@@ -39,15 +39,18 @@ by the script).
   distributes them to everybody, so an unsigned update is probably accepted **[I]**; the bootloader's
   configuration was never read, and application secure boot (set through OTP) would reject an
   unsigned application **[D]** (see `owo-open-firmware-feasibility.md` section 2).
-- **Our image has no ApplicationProperties_t (the pointer in vector-table word 13 is 0), and on the
-  suit that keeps it from starting [E].** In QEMU, running the unit's own bootloader and AppLoader
-  (flash read from the suit) with the `owo_suit` image at 0x16000, the AppLoader stays in its OTA
-  mode and the application never runs. The same image with an ApplicationProperties_t appended
-  (magic, struct version 1.1, no signature, type Bluetooth application) and word 13 pointing at
-  it boots: the bootloader hands over and the open firmware advertises. The stock application
-  carries exactly such a struct (unsigned, type Bluetooth application). So the earlier reading
-  ("assume valid" in `bootload_verifyApplication`) does not hold for this unit's AppLoader. The
-  product must carry the struct before it is installed on a suit (open item in `TODO.md`).
+- **Image descriptor [E].** The suit's bootloader/AppLoader does not start an image without an
+  ApplicationProperties_t: in QEMU, running the unit's own bootloader and AppLoader (flash read
+  from the suit), an image whose vector-table word 13 is 0 leaves the AppLoader in its OTA mode,
+  so the earlier reading ("assume valid" in `bootload_verifyApplication`) does not hold for this
+  unit. The product therefore carries one (`src/gecko_app_properties.c`,
+  `CONFIG_OWO_GECKO_APP_PROPERTIES`): the same unsigned descriptor as the stock app (structure
+  version 1.1, type Bluetooth app, version 1), with its own product ID
+  (217c860a-3c51-4aaa-bdf4-a465bfce3eb9). Zephyr's vector table takes slot 13 from the weak
+  symbol `z_arm_vector_reserved_13`, which the descriptor defines, so every build output (elf,
+  hex, bin, gbl) carries it. In QEMU the `owo_suit` image then starts straight from the unit's
+  bootloader and runs the radio. The version stays 1 because whether this bootloader refuses
+  lower versions (rollback protection) is unknown.
 - That the RAM word survives the reset into the bootloader exactly as in `bootloader_rebootAndInstall()`
   (the retention area is outside Zephyr's RAM, so the C runtime does not clear it).
 - Solved: the suit's flash map (352 KiB: bootloader, AppLoader at 0x6000, application 0x16000 to
