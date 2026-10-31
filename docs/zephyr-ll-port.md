@@ -133,7 +133,12 @@ the RX pool provisions each element as the maximum of advertising, data, control
 and user PDU sizes (`ull.c:437-450`). Encrypted connections first target the
 HAL scratch PDU (`lll_conn.c:444-447`), and DTM/advertiser scratch paths use
 `radio_pkt_scratch_get()` (`lll_test.c:308`, `lll_adv.c:534`); that EFR32 buffer
-is sized for maximum data PDU plus MIC (`hal/radio.c:61-64`). A future caller
+holds the largest payload any of those callers configures in the build
+(`EFR32_PKT_PAYLOAD_MAX` in `hal/radio.c`: a legacy advertising PDU, the data
+length without data length extension plus the MIC, or 255 with DLE or DTM), and
+`radio_pkt_configure()` asserts that bound. The BUFC TX FIFO is sized from the
+same bound (a 64-byte FIFO, `BUFC_BUF_CTRL.SIZE` 0, for the product); the RX FIFO
+stays 512 bytes because FRC writes whatever frame arrives. A future caller
 outside these paths must supply an explicit destination-capacity contract;
 the generic radio API itself has no size argument.
 
