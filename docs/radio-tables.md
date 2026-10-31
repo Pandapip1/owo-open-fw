@@ -6589,3 +6589,198 @@ Kept outside the repository:
   `rep.py`.
 - **Logs**: the matching `*.log` and `*.json` files. `rep-contaminated-by-ldma.log` is an
   invalid run: the LDMA was still running.
+
+### 7.75 Per-core clocks: each core runs at its silicon rate in QEMU
+
+Tags: **[F]** measured on silicon, **[I]** inferred, **[P]** placeholder (unmeasured).
+QEMU branch `core-clocks` in vendor/qemu (worktree `build/qemu-clocks-src`, build
+`build/qemu-clocks`), on top of `a10ac495f2` (timer-fidelity). Scratch probes:
+`scratchpad/clk/` (kern.S, run.py, runf.py, qrun.sh, dur.awk); raw results
+`clk/out-*.json`, `clk/outf*.json`, `clk/runf*.log`, `clk/live-*.log`, `clk/rx2tx-si.log`.
+
+**Setup and method.**
+
+- Board: BGM220 explorer kit, J-Link, stage 3 (`build-stage3-head`) running to set up the
+  clock tree, then the core under test driven from the debugger while the other core is
+  halted (the M0+ also has its NVIC disabled). **This is the no-interference baseline**;
+  the cross-core agent's numbers (`cross-core-findings.md`) agree with every row they
+  share (M0+ SEQRAM 2/2.5, radio 4.25, BUFC 3.25; M33 XIP SEQRAM 1.88, radio 3.88).
+- Live stage-3 registers [F]: `CMU.SYSCLKCTRL = 0x00010402` (HFRCODPLL, HCLK /1, PCLK /2,
+  RHCLKPRESC = DIV2), `EM01GRPACLKCTRL = 1`, `DPLL.CFG1 = 0x0eff077f`, `MSC.READCTRL =
+  0x00100000` (MODE = WS1), `RADIOCLKCTRL = 1`. ICACHE0 registers fault from the debugger
+  (bus clock off). M0+ SysTick: `CSR = 0x00010005` (core clock), `RELOAD = 9999975`,
+  `CALIB = 0xC0061A7F`.
+- **Kernels** (`clk/kern.S`, position independent): bracket = core cycle counter (M33
+  DWT.CYCCNT, M0+ SysTick CVR) and TIMER1.CNT read by the core itself; body = 8 copies of
+  one operation + `subs/bne`; run at N = 10 and N = 110 iterations, 5 runs each, cost per
+  iteration = difference / 100. TIMER1 free-running on HFRCODPLL with CFG.DEBUGRUN
+  (16-bit). The M0+ reads TIMER1 at `0x5004C024` (its AP reaches it; `0x4004C024` reads 0).
+- **Timebase**: TIMER1 = 76.8 MHz, calibrated by packet airtime (SS7.71: 8600 ticks =
+  112 us) and by the timer agent against HFXO/LFXO.
+- **Function CPI**: a firmware function called from the debugger with a bkpt return stub
+  (M33: SRAM 0x20005000, MPU off, PRIMASK set; M0+: SEQRAM 0x2900 stub `ldr CVR; blx;
+  ldr CVR; bkpt`), cycles at full speed, instructions by single-stepping the same call.
+- All runs below were zero-spread unless a range is given. Runs started after the board
+  disconnect (23:16) were redone from scratch after reconnection; the kernel tables were
+  re-measured post-reconnect with identical results.
+
+**1. Core clocks.**
+
+| quantity | value | n | method |
+|---|---|---|---|
+| [F] M33 HCLK / TIMER1 | **1.000** (55000-55002 cycles vs 55016-55018 ticks incl. a 16-17 tick bracket; XIP 54999 / 55014) | 10 + 10 | CYCCNT vs TIMER1, ALU loop N = 5000 |
+| [F] M33 HCLK | **76.8 MHz** in stage 3 | - | = TIMER1 |
+| [F] M0+ clock / TIMER1 | **0.5000** (21890 cycles in 43780 ticks between N = 10 and N = 2000; every kernel pair exactly 1:2) | 10 | SysTick (CLKSOURCE = core) vs TIMER1 |
+| [F] M0+ clock | **38.4 MHz** in stage 3 | - | = TIMER1 / 2 |
+| [F] (cross-core agent) M0+ = SYSCLK / (RHCLKPRESC + 1): 19.2 MHz on HFXO, 9.89 MHz on FSRCO, independent of HCLKPRESC; RADIOCLKCTRL.EN = 0 stops it with state kept | | | |
+| [I] the M0+ SysTick CALIB (`0xC0061A7F`) is NOREF + SKEW + RAC.STCTRL.STCAL as written by the firmware (`STCTRL = 0x01061a7f`); QEMU's CALIB does not follow RAC.STCTRL (unmodelled) | | | |
+
+The docs' earlier 2% SysTick cross-check discrepancy (SS7.72) is not a rate error: the M0+
+clock is exactly half of TIMER1.
+
+**2. Per-access and per-instruction costs [F] (cycles of the accessing core).**
+
+Loops of 8 copies; per-op cost = (cycles per iteration - loop overhead 3) / 8. n = 5 + 5.
+
+| op | M33, code in SRAM | M33, code in flash (warm cache) | M0+ (code in SEQRAM) |
+|---|---|---|---|
+| ALU `adds` | 1 | 1 | 1 |
+| NOP | 0.5 (dual issue) | 0.5 | 1 |
+| SRAM ld / st | 1.5 / 1.5 | 1 / 1 | (not visible in QEMU's M0+ map; 3.25 per cross-core) |
+| flash data ld | 4.0 | 4.5 | - |
+| SEQRAM ld / st | 3.625 / 3.625 | 1.875 / 1.875 | 2 / 2.5 |
+| BUFC ld | 3.625 | 1.875 | 3.25 |
+| RAC/FRC/SYNTH/MODEM/AGC ld, RAC.SR2 st, SET-alias st | 5.625 | 3.875 | 4.25 |
+| CMU ld | 5.125 | 3.875 | - |
+| GPIO ld | - | 3.875 | - |
+| TIMER1.CNT ld | 13.125 | 11.875 | 8.75 |
+
+M0+ costs in context (literal-load pairs and ALU around the access, kernels `k_lls`,
+`k_lll`, `k_saa`, `k_laa`, n = 5 + 5, measured twice incl. after the reconnect):
+literal `ldr` 2; radio load or store **5.0**; BUFC load **4.0**; SEQRAM load 2, store 2.5.
+So a radio access costs 0.75 cycle more when isolated than back to back.
+
+**Firmware-function CPI** (debugger calls, n = 6 each, warm; cycles less the empty-call
+overhead):
+
+| core | function | cycles | instructions | cycles/insn |
+|---|---|---|---|---|
+| M33 | snprintk (compiled C, z_cbvprintf) | 7973 (cold 8073) | 4342 | **1.84** |
+| M33 | memcpy 256 B | 2057 | 1286 | 1.60 |
+| M33 | memset 256 B | 1542 | 1030 | 1.50 |
+| M33 | strlen | 71 | 49 | 1.45 |
+| M0+ | efr32_seq_delay(4) | 171 | 100 | 1.71 (7 cycles per loop pass) |
+| M0+ | efr32_seq_delay(2) | 80 | 48 | 1.67 |
+| M0+ | rx_frontend_stop | 61 | 22 | 2.77 |
+| M0+ | synth_config_tx | 112 | 39 | 2.87 |
+| M0+ | synth_lock (cached) | 468 | 247 | 1.89 |
+| M0+ | pga_dc_interp (ALU) | 82 | 69 | 1.19 |
+| M0+ | synth_power_down | 163 | 65 | 2.51 |
+
+**Provenance of the M33 rows:** one run (n = 6 calls per function, zero spread except the
+first cold call; the stepped counts are a property of the code and input) taken during the
+board hold that ended in the USB disconnect, before it; the functions returned correct
+results (snprintk produced "123456 beef hello world|42-deadbeef"). Two reruns after the
+reconnect failed in the harness (the debugger-call setup no longer reached the return
+stub: register arguments did not take, CONTROL.SPSEL = 1 at halt), so these rows are
+**not re-confirmed post-reconnect** and should be repeated before they are cited as [F].
+The M0+ rows and all kernel tables were measured after the reconnect.
+
+[I] The M0+ follows the Cortex-M0+ instruction timings exactly once radio accesses are
+taken as 5 cycles: rx_frontend_stop = 10 literal loads x 2 + 4 movs + 7 radio stores x 5
++ bx 2 = 61; synth_config_tx = 20 x 2 + 5 + 13 x 5 + 2 = 112; the delay loop pass = ldr 2
++ subs 1 + str 2 + bpl 2 = 7. A flat average cannot fit both 1.19 and 2.87.
+
+**3. efr32_seq_delay(n) on silicon — contradicts the firmware's assumption [F].**
+
+`radio_seq.S` names its arguments `*_US` (e.g. `EFR32_SEQ_DCCAL_ISOLATE_US 16`), but the
+loop takes 7 cycles per pass and makes floor((195 n - 111) / 30) + 1 passes:
+**delay(n) ~ 1.18 n us + 0.3 us at 38.4 MHz** in the real image (delay(4) = 171 cycles =
+4.45 us, delay(2) = 80 cycles = 2.08 us). A copy at another SEQRAM alignment took 8 cycles
+per pass (delay(n) = 17 + 8 x passes: 41, 97, 249, 513, 1033, 2593 cycles for n = 1, 2, 5,
+10, 20, 50; 1.35 n us), so the code's placement changes every settle wait by ~14%.
+Neither is n us. At the stock image's assumed core clock the constant 195/30 would match
+1 us per unit at ~45 MHz (7 cycles) [I].
+
+**4. Handler durations on silicon [F] (re-measured, PRS -> TIMER1, live stage 3).**
+
+| interval | value | n |
+|---|---|---|
+| RACL.ACTIVE rise (TXEN) -> RACL.TX rise (TXWARM incl. handler) | **91.03 us** (all samples equal at 13 ns resolution) | 264 |
+| RACL.TX fall -> RACL.RX rise (TX2RX incl. handler) | **123.53 us** (123.44-123.62) | 376 |
+| RX2TX handler: entry -> synthesizer locked (open image's own SysTick / STIMER trace words) | **682 SysTick cycles = 17.76 us** (682-685); 85 STIMER ticks (85-86) | 58 |
+| RX2TX: entry -> M33's respond decision seen | 208 STIMER ticks = 43.3 us | 58 |
+| RX2TX: decision -> PA up (pa_start) | 138 ticks = 28.75 us | 58 |
+
+**5. QEMU model (branch core-clocks).**
+
+Design: icount per-CPU clocks (opt-in: `icount_cpu_clocks_enable`, enabled by the
+efr32bg22 machine property `core-clocks`, default on, precise -icount only).
+- Rounds of at most 500 ns, never past the next QEMU_CLOCK_VIRTUAL deadline. Each
+  runnable vCPU runs until its own time reaches the round end; device timers fire only
+  between rounds, so they are exact. QEMU_CLOCK_VIRTUAL inside a vCPU = that vCPU's time.
+- Overshoot (an instruction or access charge cannot be split) carries into the next
+  round. Halted vCPUs resume at the waker's time (interrupt raise, or the M0+ release).
+  0 Hz = clock stopped (RADIOCLKCTRL.EN = 0).
+- Time per vCPU: M33 = instructions x 1.84 cycles at HCLK (CMU: SYSCLKCTRL CLKSEL,
+  HCLKPRESC; FSRCO 19.807 MHz at reset, DPLL as configured); M0+ = Armv6-M cycles counted
+  per instruction class by the Thumb translator (1 + class extra; taken B<c> +1 at run
+  time) at SYSCLK / (RHCLKPRESC + 1).
+- Bus-model hook `IcountBusModel.access(master, addr, size, write) -> extra millicycles,
+  target class`; occupancy per vCPU per round in `CPUState.icount_bus_accesses[]`;
+  `round_end` callback for a future interconnect model. efr32 table: M33 radio/periph
+  +2.875, BUFC +0.875, TIMERn +10.875, SEQRAM +0.875 (+1.375 while the M0+ executes, which
+  also costs the M0+ 0.9 cycle per access, cross-core [F]); M0+ radio +3, BUFC +2.
+  Exception entry: M0+ 16 cycles (cross-core [F]), M33 17 (cross-core [F], SRAM vectors).
+  The M33 SEQRAM window at 0xB0000000 is now an I/O view so it reaches the bus model.
+- SysTick processor clocks of both cores follow the same clocks.
+
+Validation (run with -icount shift=5,sleep=off unless noted):
+
+| check | silicon | QEMU core-clocks | QEMU before (shared rate, same base, core-clocks=off) |
+|---|---|---|---|
+| TXWARM (0->8 to 8->9) | 91.03 us | **85.65 us** (85.36-86.04, n = 10935) | 59.2 us |
+| TX2RX (9->11 to 11->2) | 123.53 us | **118.98 us** (118.87-119.29, n = 10935) | 128.5 us |
+| RX2TX entry -> lock (STIMER) | 85 ticks | **85 ticks** | (91 ticks with flat CPI 2) |
+| RX2TX decision -> PA up | 138 ticks | **137 ticks** | |
+| EOF -> SCAN_RSP SYNCSENT (dual, shift=3) | 180.5 (180.1-180.9) | **181.55 us** (181.52-181.68, n = 1689)* | 180.6 (SS7.72) |
+| RX2TX entry -> M33 decision | 43.3 us | 19.0 us* (M33 at 1.0 cycle/insn) | |
+| hwcfg advertiser, 20 s wall | 150 TX / 5 s | 150 TX / 5 s, no late/FATAL over 364 s virtual | late at 57 s |
+| QEMU-config advertiser, 20 s wall | - | 150 TX / 5 s, no late/FATAL over 344 s virtual | panic at 19 ms (late 76 us) |
+| dual: hwcfg advertiser + QEMU-config active scanner | - | **scanner panics at 3.69 ms**: "radio job completion ran 80883 ns late (61036)" | |
+
+\* The active scanner panics (PANIC_ON_LATE, the BURTC SYNCBUSY defect another agent is
+fixing) with the M33 at its measured 1.84 cycles/insn, so the dual-run rows used a scratch
+build with the M33 at 1.0 cycle/insn (M0+ model unchanged); EOF -> SYNCSENT is set by the
+M0+'s STIMER loop, so it is not sensitive to that.
+
+[I] The remaining TXWARM (-5.4 us) and TX2RX (-4.5 us) deficits: each handler runs one
+11-trial VCO calibration, and QEMU's SYNTH.LOCNTSTATUS never reports BUSY, so the LO-count
+measurement time (~0.4-0.5 us per trial if it accounts for the whole gap) is missing. The
+M0+ code segments that contain no hardware wait now match silicon exactly.
+
+**6. Contradictions with firmware assumptions.**
+
+1. efr32_seq_delay(n) is ~1.18-1.35 n us, not n us (section 3), and its duration depends on
+   the loop's SEQRAM alignment.
+2. The M33 runs compiled C at 1.84 cycles/insn (not 1); with that rate the QEMU-config
+   active scanner misses its 61 us late-delivery tolerance at 3.69 ms.
+3. Under per-CPU clocks neither advertiser build reaches a late delivery in QEMU over 340+ s,
+   while silicon stage 3 logs ~15 per second (timer agent, late_count). So silicon still
+   loses M33 time the model does not have [I]: instruction-cache misses (unmeasured), flash
+   data, interrupt latency of flash-resident vectors, contention.
+
+**7. Unmodelled / placeholders.**
+
+- [P] LO-counter (VCO calibration) measurement time; SYNTH.LOCNTSTATUS.BUSY never set.
+- [P] M33 instruction-cache misses; M33 CPI is one average (1.84, compiled C; library loops
+  1.45-1.60); M33 flash data loads (+3.5) are RAM in QEMU.
+- [P] M33 exception entry with flash-resident vectors (17 cycles assumed, from SRAM).
+- M0+ exception return, M0+ SEQRAM store +0.5 in some loops, back-to-back radio accesses
+  (4.25, modelled as 5), MUL timing (1 assumed).
+- Contention other than SEQRAM (radio path, BUFC, SRAM, peripheral bus) — cross-core
+  findings; occupancy counters are in place for a bus model.
+- M33 EM2 stopping the M0+; the M0+ view of TIMER1/PRS/CMU/SRAM (QEMU's M0+ map has SEQRAM
+  and radio only); RAC.STCTRL -> M0+ SysTick CALIB.
+- Snapshot/migration of per-CPU time; adaptive -icount (shift=auto) falls back to the
+  shared rate with a warning.
