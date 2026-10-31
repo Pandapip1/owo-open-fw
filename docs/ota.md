@@ -19,7 +19,7 @@ installed open firmware can be replaced the same way (including by the stock fir
 |------|-----|-------|
 | Be linked where the bootloader expects the app (0x16000, as in every stock GBL) | flash partitions in devicetree + `CONFIG_USE_DT_CODE_PARTITION` | suit: the board (`boards/owo/owo_suit/owo_suit.dts`); kit: `boards/bg22_ek4108a.overlay`; both `boards/<board>.conf` |
 | Offer the OTA service with its Control point | GATT service, write-only, authenticated | `src/ble.rs` |
-| Reboot into the bootloader when told | Zephyr's **boot-mode retention** API; the board's devicetree places the retention area at the start of RAM with the bootloader's reset-reason word as its prefix (`0x0202` BOOTLOAD, `0xF00F` valid) | `boards/owo_product.dtsi` (included by every board overlay), `src/ota.rs` |
+| Reboot into the bootloader when told | Zephyr's **boot-mode retention** API; the board's devicetree places the retention area at the start of RAM with the word the AppLoader expects (`0x00000002`, "boot to DFU") as its prefix | `boards/owo_product.dtsi` (included by every board overlay), `src/ota.rs` |
 
   The reset-reason word is what `bootloader_rebootAndInstall()` writes before resetting
   (`platform/bootloader/api/btl_interface.c`, `btl_reset_info.h`, Gecko SDK 4.5.1). Using the
@@ -42,10 +42,11 @@ by the script).
   the link dropped, not an error from the suit.
 - In QEMU, running the suit's bootloader and AppLoader, the RAM reset word is honoured only after
   a SYSRESETREQ (EMU.RSTCAUSE.SYSREQ). AppLoader stays resident when the word is `0x00000002`.
-  **`0xF00F0202` (what this firmware writes today) sends the suit's bootloader into its own
-  install path, which fails and, after retries, boots the application again.** [I] that silicon
-  does the same. Before relying on the OTA trigger on a suit, use the AppLoader request instead
-  (or verify on silicon).
+  `0xF00F0202` (the Gecko SDK's `bootloader_rebootAndInstall()` form, which this firmware wrote
+  until 2026-10-31) sends the suit's bootloader into its own install path, which fails and, after
+  retries, boots the application again. The firmware now writes `0x00000002`, as the stock app
+  does (`boards/owo_product.dtsi`). [I] that silicon behaves the same; to confirm on a unit:
+  write the word by debugger, reset with SYSRESETREQ, and check that AppLoader advertises.
 
 ## What is not known
 - Whether the suit's bootloader accepts our file. The stock files carry no signature and the app

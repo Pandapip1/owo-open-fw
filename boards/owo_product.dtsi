@@ -48,11 +48,14 @@
 };
 
 /*
- * "Reboot into the bootloader" request. The bootloader's application API
- * (bootloader_rebootAndInstall in btl_interface.c) writes a struct {u16 reason; u16 signature;}
- * at the very start of RAM and resets; reason 0x0202 = BOOTLOADER_RESET_REASON_BOOTLOAD,
- * signature 0xF00F = valid (btl_reset_info.h). Zephyr's boot-mode retention writes its prefix
- * and then one mode byte, so the prefix is those four bytes (little endian).
+ * "Reboot into the bootloader" request. The stock app asks for its OTA by a software reset
+ * with the first RAM word set to 2 (the Bluetooth stack's "boot to DFU" reset); the suit's
+ * AppLoader stays in OTA mode only after a SYSRESETREQ reset with exactly that word, and the
+ * bootloader honours the word only after SYSRESETREQ as well. The Gecko SDK's
+ * bootloader_rebootAndInstall() form (reason 0x0202, signature 0xF00F) does not reach the
+ * AppLoader on this bootloader (docs/ota.md, docs/radio-tables.md SS7.78; QEMU with the unit's
+ * own bootloader and AppLoader, not yet confirmed on silicon). Zephyr's boot-mode retention
+ * writes its prefix and then one mode byte, so the prefix is that word (little endian).
  */
 / {
 	btl_request: retained@20000000 {
@@ -68,7 +71,7 @@
 			boot_mode0: retention@0 {
 				compatible = "zephyr,retention";
 				reg = <0x0 8>;
-				prefix = [02 02 0f f0];
+				prefix = [02 00 00 00];
 			};
 		};
 	};
