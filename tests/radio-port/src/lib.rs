@@ -19,6 +19,10 @@ const BT_DATA_FLAGS: u8 = 0x01;
 const BT_LE_AD_GENERAL: u8 = 0x02;
 const BT_LE_AD_NO_BREDR: u8 = 0x04;
 static AD_FLAGS: u8 = BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR;
+/* The name rides only in the scan response, so an active scanner learning it
+ * proves the advertiser received the SCAN_REQ and answered within T_IFS. */
+const BT_DATA_NAME_COMPLETE: u8 = 0x09;
+static SCAN_RSP_NAME: &[u8] = b"efr32-radio-port";
 
 #[no_mangle]
 extern "C" fn rust_main() {
@@ -48,9 +52,15 @@ extern "C" fn rust_main() {
         peer: ptr::null(),
         ..Default::default()
     };
-    // SAFETY: Zephyr consumes the advertising data during this synchronous
-    // API call; `ad`, `param`, and its static payload remain valid throughout.
-    let adv_err = unsafe { bt_le_adv_start(&param, ad.as_ptr(), ad.len(), ptr::null(), 0) };
+    // SAFETY: Zephyr consumes the advertising and scan-response data during
+    // this synchronous API call; `ad`, `sd`, `param`, and their static
+    // payloads remain valid throughout.
+    let sd = [bt_data {
+        type_: BT_DATA_NAME_COMPLETE,
+        data_len: SCAN_RSP_NAME.len() as u8,
+        data: SCAN_RSP_NAME.as_ptr(),
+    }];
+    let adv_err = unsafe { bt_le_adv_start(&param, ad.as_ptr(), ad.len(), sd.as_ptr(), sd.len()) };
     // A zero here is the host/controller boundary: an actual Zephyr legacy
     // advertising workload has been accepted. The QEMU harness separately
     // reports whether LLL reached its scheduled-start boundary or RAC TXEN;

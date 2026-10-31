@@ -380,6 +380,16 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 
 static void efr32_radio_completion_job(void *a, void *b, void *c);
 
+#if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
+/* Diagnostic only: RAC.STIMER (~4.8 ticks/us) into spare SEQRAM word n of
+ * the M33-side RX->TX timing record, same timebase as the sequencer's. */
+#define EFR32_RX2TX_M33_STAMP(n) \
+	(((volatile uint32_t *)0xB0004F50UL)[(n)] = \
+		*(volatile uint32_t *)0xB8020030UL)
+#else
+#define EFR32_RX2TX_M33_STAMP(n) do { } while (0)
+#endif
+
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 static void efr32_radio_qemu_rx_descriptor_isr(void *arg);
 static void efr32_radio_qemu_rx_descriptor_quiesce(void);
@@ -1816,7 +1826,16 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			efr32_qemu_tifs_begin_rx_to_tx();
 		}
 #endif
+		bool rx_cb = !abort && efr32_packet_stage.lifecycle.completion_direction ==
+					EFR32_RADIO_PACKET_RX;
+
+		if (rx_cb) {
+			EFR32_RX2TX_M33_STAMP(1);
+		}
 		callback(param);
+		if (rx_cb) {
+			EFR32_RX2TX_M33_STAMP(3);
+		}
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 		if (!abort) {
 			efr32_qemu_tifs_arm_staged_rx_to_tx();
@@ -1978,6 +1997,7 @@ void isr_radio(void *arg)
 		 */
 #if !defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 		if (completion_direction == EFR32_RADIO_PACKET_RX) {
+			EFR32_RX2TX_M33_STAMP(0);
 			efr32_hw_rx_deliver();
 		}
 #endif
@@ -2059,7 +2079,6 @@ static bool efr32_hw_rx_turnaround_claimed;
  * instead of leaving the LLL waiting for a TX completion that cannot come.
  */
 static bool efr32_hw_tx_after_rx_requested;
-#define EFR32_HW_UNSERVED_RESPONSE_BOUND_US 1000U
 /*
  * Hardware RX->TX (SS7.65).  [I] Stock raises a TX request while a frame is
  * still arriving (RAC.STATUS.TXENS during RXFRAME), so the RAC goes RX2TX at
@@ -2879,6 +2898,7 @@ void radio_pkt_tx_set(void *tx_packet)
 		efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
 		__DSB();
 		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_RESPOND;
+		EFR32_RX2TX_M33_STAMP(2);
 	}
 }
 
@@ -3086,11 +3106,14 @@ void radio_status_reset(void)
 		efr32_hw_rx_after_tx_pending = false;
 		efr32_hw_rx_turnaround_claimed = true;
 	}
-	if (completed && completed_direction == EFR32_RADIO_PACKET_RX &&
-	    efr32_hw_tx_after_rx_requested) {
+	/*
+	 * No unserved-response guard here any more: the LLL either stages a
+	 * response or calls radio_disable(), and the sequencer bounds its own
+	 * wait.  Arming a BURTC compare on this path cost ~119 us of the T_IFS
+	 * budget (LF-domain synchronisation; SS7.68).
+	 */
+	if (completed && completed_direction == EFR32_RADIO_PACKET_RX) {
 		efr32_hw_tx_after_rx_requested = false;
-		cntr_qemu_tifs_arm_after_us(EFR32_HW_UNSERVED_RESPONSE_BOUND_US,
-			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
 	}
 #endif
 	efr32_rx_delivery_invalid = false;

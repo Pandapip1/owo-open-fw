@@ -406,7 +406,20 @@ efr32_radio_seq_exception:
     mov lr, r0
     b 2f
 15: cmp r3, #EFR32_EXCEPTION_TX
-    bne 2f
+    beq 23f
+    b 2f
+23: /* Diagnostic only: STIMER at TX entry right after a responding RX2TX. */
+    ldr r0, =EFR32_SEQ_TRACE_RESPONSE_PENDING
+    ldr r1, [r0]
+    cmp r1, #0
+    beq 22f
+    movs r1, #0
+    str r1, [r0]
+    ldr r1, =EFR32_SYSTICK_CVR
+    ldr r1, [r1]
+    ldr r0, =EFR32_SEQ_TRACE_RESPONSE_TX_AT
+    str r1, [r0]
+22:
     ldr r3, =EFR32_SEQ_TRACE_TX
     b 3f
 1:  ldr r3, =EFR32_SEQ_TRACE_TXWARM
@@ -1656,9 +1669,21 @@ efr32_seq_tx_turnaround:
     bl efr32_seq_trace_count
     movs r0, #1
     bl efr32_seq_trace_stimer
+    ldr r0, =EFR32_SEQ_TRACE_RESPONSE_PENDING
+    movs r1, #1
+    str r1, [r0]
     bl efr32_seq_pa_start
     movs r0, #3
     bl efr32_seq_trace_stimer
+    /* The RAC enters TX ~3 us after this handler acknowledges STATERX2TX
+     * (measured, SS7.68), and RAC.STIMER restarted when RX2TX began, i.e.
+     * at the received frame's end.  Hold the acknowledgement so TX starts
+     * near T_IFS rather than ~75 us early. */
+    ldr r0, =EFR32_SEQ_RX2TX_TX_AT_STIMER
+    ldr r1, =EFR32_RAC_STIMER
+5:  ldr r2, [r1]
+    cmp r2, r0
+    blo 5b
 9:  pop {r4, pc}
 .ltorg
 
@@ -1680,7 +1705,17 @@ efr32_seq_trace_count:
 /* Diagnostic only: RAC.STIMER into word r0 of the RX2TX timing record
  * (entry, decision, locked, PA up).  Clobbers r0-r1. */
 .equ EFR32_SEQ_TRACE_RX2TX_TIMES,     0x00004f40
+/* RAC.STIMER runs at ~4.8 ticks/us (measured against BURTC, SS7.66).  [I]
+ * 140 us leaves ~10 us of T_IFS for the RX- and TX-chain delays, which are
+ * not yet measured: the available scanner accepts scan responses at any
+ * delay, so it cannot check this (SS7.68). */
+.equ EFR32_SEQ_RAC_STIMER_TICKS_PER_10US, 48
+.equ EFR32_SEQ_RX2TX_TX_AT_US,         140
+.equ EFR32_SEQ_RX2TX_TX_AT_STIMER, (EFR32_SEQ_RX2TX_TX_AT_US * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US / 10)
+.equ EFR32_SEQ_TRACE_RESPONSE_PENDING, 0x00004f34 /* diagnostic only */
+.equ EFR32_SEQ_TRACE_RESPONSE_TX_AT,   0x00004f38 /* diagnostic only */
 .equ EFR32_RAC_STIMER,                0xa8020030
+.equ EFR32_SYSTICK_CVR,               0xe000e018
 .thumb_func
 efr32_seq_trace_stimer:
     lsls r0, r0, #2
@@ -1688,6 +1723,12 @@ efr32_seq_trace_stimer:
     adds r0, r0, r1
     ldr r1, =EFR32_RAC_STIMER
     ldr r1, [r1]
+    str r1, [r0]
+    /* Same instant on this core's free-running SysTick (counts down),
+     * 0x20 bytes below: STIMER restarts on every RAC state change. */
+    ldr r1, =EFR32_SYSTICK_CVR
+    ldr r1, [r1]
+    subs r0, #0x20
     str r1, [r0]
     bx lr
 .ltorg

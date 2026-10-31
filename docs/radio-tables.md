@@ -5650,3 +5650,34 @@ stack") -- and the TX start is still not hardware-timed to T_IFS. Both need
 an architecture decision (running the RX callback at interrupt level, or
 letting the sequencer pre-qualify a SCAN_REQ) and finding stock's
 hardware T_IFS timing mechanism.
+
+### 7.68 Scan responses received by the host; the M33 delay was a BURTC arm on the critical path
+
+**Where the ~132 us went [F].** `RAC.STIMER` stamps (bring-up builds only,
+spare SEQRAM `0x4F50..`) on one consistent SCAN_REQ: RXDONE interrupt at
+~2 us; the completion job starts the LLL's RX callback at ~23 us -- the
+deadline scheduler releases it promptly; then inside the LLL's `isr_rx`,
+`lll_isr_status_reset()` alone took ~119 us. In it, `radio_status_reset()`
+armed §7.64's interim "unserved response" guard through
+`cntr_qemu_tifs_arm_after_us()`, i.e. a BURTC compare (LF-domain
+synchronisation and a 64-bit division). The guard is obsolete now that
+RX->TX exists (the LLL disables declined frames; the sequencer bounds its
+own wait) and is removed. Result: response published ~39 us after the
+frame end (was ~155), sequencer sees "respond" at ~41 us, PA up at ~69 us.
+
+**TX start.** `RAC.STIMER` restarts on every RAC state change, so TX-entry
+time was measured with the M0+'s free-running SysTick (~38.6 MHz,
+calibrated against STIMER within IRQ7): the RAC enters TX ~3 us after the
+sequencer acknowledges STATERX2TX, ~33 us after PA-up with a 30 us hold --
+the acknowledgement controls the TX start. The sequencer now holds it until
+`STIMER` reaches 140 us after the frame end. [I] The RX- and TX-chain delays
+that separate this from the on-air T_IFS are not measured.
+
+**On air [F].** `tests/radio-port` advertised with no scan-response data, so
+a host could never learn its name -- every earlier "no name" result for
+stage 3 was uninformative. With a complete-name scan response, an active
+`bluetoothctl scan le` reports `Name: efr32-radio-port`: the SCAN_REQ was
+received, accepted by the LLL and answered with a decodable SCAN_RSP. A
+negative control showed the host also accepts a response held 1-2 ms late,
+so this scanner cannot verify T_IFS compliance; that needs a stricter
+scanner or an SDR.
