@@ -39,6 +39,9 @@ modprobe dummy_hcd; modprobe raw_gadget       # /dev/raw-gadget, /sys/class/udc/
 qemu-system-arm -M efr32bg22,flash=<image.bin> ... \
   -object usb-gadget-host,id=udc0,udc-driver=dummy_udc,udc-device=dummy_udc.0 \
   -device jlink,model=ob,gadget=udc0[,vcom=<chardev>]
+# The OB's VCOM is the kit's console, USART1 (zephyr,console = &usart1):
+#   -chardev socket,id=soc.usart1,host=localhost,port=P,server=on,wait=off \
+#   -chardev socket,id=vcom,host=localhost,port=P  ...,vcom=vcom
 openocd -f interface/jlink.cfg -c 'adapter serial 004242000105' -c 'transport select swd' ...
 OWO_BG22_JLINK_SERIAL=004242000105 scripts/flash-bg22-openocd.sh <image.elf>
 ```
@@ -54,7 +57,7 @@ UDC_DEVICE=...`).
 | ARMMDebugOps | `target/arm/cpu.h`, `debug_helper.c`, `tcg/m_helper.c`, `cpu.c` | the core reports BKPT, FPB matches and the end of a halting step; a core in Debug state has no work; DCRSR register access |
 | `armv8m-debug` | `hw/misc/armv8m-debug.c` | M33 debug unit: DHCSR, DCRSR, DCRDR, DEMCR, DSCSR, DAUTHSTATUS, FPB, DWT CYCCNT/PCSR, PPB ROM table |
 | `efr32-dap` | `hw/misc/efr32-dap.c` | SW-DP, AP0 (AHB-AP into the M33 bus), AP1 (Secure Engine DCI); SYSRESETREQ |
-| `efr32-msc` | `hw/misc/efr32-msc.c` | flash page erase and word programming |
+| MSC | `hw/arm/efr32bg22.c` (`efr32_msc_*`) | flash page erase and word programming, shared with the firmware's NVM3 |
 | `swd-target` | `include/hw/misc/swd.h` | the pins a probe sees: SWDIO level per SWCLK cycle, VTref |
 | `swd-remote-bitbang` | `hw/misc/swd-remote-bitbang.c` | socket probe on OpenOCD's remote_bitbang protocol |
 | `usb-gadget-host` | `hw/usb/gadget-host.c` | owns a host UDC through Linux raw-gadget; silicon independent |
@@ -120,18 +123,26 @@ reply (OpenOCD's DCI read then times out).
 
 ### MSC
 
-Page erase (8 KiB main pages, the 1 KiB user-data page) and word programming
-through WRITECTRL.WREN, ADDRB and WDATA, both at 0x40030000 and the
-non-secure alias 0x50030000 that OpenOCD's efm32 driver uses; programming
-only clears bits; page locks and the user-data lock word block changes and
-report LOCKED; addresses outside flash report INVADDR (RM 6.3.12, 6.8).
+There is one MSC model, in `efr32bg22.c`; the AHB-AP reaches it like the
+core does (0x40030000 and the non-secure alias 0x50030000 that OpenOCD's
+efm32 driver uses), so the debugger's flash path and the firmware's NVM3
+path are the same code. Page erase (8 KiB main pages, the User Data page)
+and word programming through WRITECTRL.WREN, ADDRB and WDATA; programming
+only clears bits; INVADDR and LOCKED follow ADDRB; page locks,
+MISCLOCKWORD.UDLOCKBIT and MELOCKBIT refuse operations; MSC_LOCK locks
+READCTRL and WRITECTRL; IF/IEN drive IRQ 49 (RM 6.3.12, 6.7, 6.8). A core
+can only set the MISCLOCKWORD locks, a debugger may also clear them ("Host
+is only allowed to write one. Root and debug can clear this bit", RM 6.8.13).
 Operations complete at once (BUSY is never seen); see the open items.
 
 ### SYSRESETREQ
 
-The NVIC's SYSRESETREQ resets the system through the DAP. AP accesses fail
-(FAULT and STICKYERR) from the request until the reset has been performed,
-and for `sysreset-blackout-ns` after it (default 0; see quirk 4).
+One path: the NVIC's SYSRESETREQ sets EMU.RSTCAUSE.SYSREQ, tells the DAP
+that a reset began, and requests the system reset (`efr32_soc_sysresetreq`).
+AP accesses fail (FAULT and STICKYERR) from the request until the reset has
+been performed, and for `sysreset-blackout-ns` after it (default 0; see
+quirk 4). A SYSRESETREQ written by the debugger reads back as RSTCAUSE
+0x41 (POR and SYSREQ) in the simulator.
 
 ## Silicon quirks, evidence and model
 
@@ -239,7 +250,15 @@ descriptors and capability words were not captured (TODO.md).
 - qtest `efr32bg22-dap-test`: 6/6 (DP identity and the post-reset DPIDR
   rule, AP identity and memory, ROM table, sticky errors, DCI status, halt
   and core registers, FPB across SYSRESETREQ, MSC programming).
-  `efr32bg22-test` 93/93 and `efr32bg22-rf-test` 24/24 still pass.
+  `efr32bg22-test` 98/98 and `efr32bg22-rf-test` 24/24 still pass.
+- Dual-MCU radio run (scratch/sched/dual.sh b-adv b-scan, shift 3, 60 s):
+  122 SCAN_REQ, 122 SCAN_RSP, no late/unsat lines.
+- USB: on dummy_hcd the OB enumerates as 1366:0105 "J-Link" serial
+  004242000105 with three interfaces; /dev/ttyACM0 carries USART1's console
+  output when the VCOM is paired with USART1. The EDU Mini enumerates as
+  1366:0101 serial 004242000101. OpenOCD (libusb) could not yet open either:
+  the node /dev/bus/usb/003/NNN is root:root 0664 on this host, which has no
+  udev rule for SEGGER's vendor ID (libjaylink ships 60-libjaylink.rules).
 - The fault-injected slow recovery of `flash-bg22-openocd.sh` (socket probe).
 - `tests/debug-port/run-e2e.sh` with the socket probe: all procedures behave
   as on silicon (DEVINFO through the read-only mem_ap session, DCI status,
@@ -264,5 +283,12 @@ descriptors and capability words were not captured (TODO.md).
   access cost on the bus; EM2 with a debugger attached.
 - The probes' real USB descriptors, capability words, EDU Mini firmware
   string and hardware version; JTAG; SWCLK timing.
-- The OB VCOM reaches the `vcom` chardev only: the EFR32 USART model does not
-  forward bytes to a character device yet.
+- The OB VCOM joins USART1 through a pair of socket chardevs (configuration,
+  not an in-process link); line coding from the host is not applied to the
+  USART.
+
+Note for test images: with the USART's line timing, the radio-port QEMU
+build (radio-port-qemu-new) prints "in_delay_get needs software" from its
+IRQ 18 handler; the SRAM-execution proof resumed into that handler's
+uart_poll_out loop and did not reach its BKPT within the 5 s wait, so the
+proof fails on that image. The e2e run uses radio-port-qemu, which passes.

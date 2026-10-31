@@ -19,9 +19,9 @@
 # uses interface/jlink.cfg with the simulated probe's serial number.
 #
 # Inputs: BOOT_IMAGE (raw flash image QEMU starts from), IMAGE (ELF to
-# flash), QEMU_BIN, optional DEVINFO (a DEVINFO page dump loaded at
-# 0x0fe08000 for OpenOCD's flash probe, until the machine models the part's
-# DEVINFO).  Logs go to a temporary directory under build/, kept on failure.
+# flash), QEMU_BIN, optional DEVINFO (a DEVINFO page dump for the machine's
+# devinfo= property: the part OpenOCD's flash probe identifies).  Logs go to
+# a temporary directory under build/, kept on failure.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -59,11 +59,12 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-qemu_args=(-M efr32bg22,flash="$BOOT_IMAGE" -display none -monitor none
-           -serial none -icount shift=5 -D "$RUNTIME_DIR/qemu.log")
+machine="efr32bg22,flash=$BOOT_IMAGE"
 if [ -n "${DEVINFO:-}" ]; then
-  qemu_args+=(-device loader,file="$DEVINFO",addr=0x0fe08000,force-raw=on)
+  machine="$machine,devinfo=$DEVINFO"
 fi
+qemu_args=(-M "$machine" -display none -monitor none
+           -serial none -icount shift=5 -D "$RUNTIME_DIR/qemu.log")
 case "$PROBE" in
   rbb)
     qemu_args+=(-chardev socket,id=swd,host=localhost,port="$PORT",server=on,wait=off
@@ -72,8 +73,16 @@ case "$PROBE" in
     export OWO_BG22_ADAPTER_CFG="$ROOT/scripts/sim/qemu-swd.cfg"
     ;;
   jlink)
-    qemu_args+=(-object usb-gadget-host,id=udc0,udc-driver="${UDC_DRIVER:?}",udc-device="${UDC_DEVICE:?}"
-                -device jlink,model="$JLINK_MODEL",gadget=udc0)
+    qemu_args+=(-object usb-gadget-host,id=udc0,udc-driver="${UDC_DRIVER:?}",udc-device="${UDC_DEVICE:?}")
+    if [ "$JLINK_MODEL" = ob ]; then
+      # The OB's VCOM is the kit's console USART1 (xg22_explorer_kit.dtsi
+      # zephyr,console = &usart1): a socket pair joins the two line sides.
+      qemu_args+=(-chardev socket,id=soc.usart1,host=localhost,port=$((PORT + 1)),server=on,wait=off
+                  -chardev socket,id=vcom,host=localhost,port=$((PORT + 1))
+                  -device jlink,model=ob,gadget=udc0,vcom=vcom)
+    else
+      qemu_args+=(-device jlink,model="$JLINK_MODEL",gadget=udc0)
+    fi
     adapter=(-f interface/jlink.cfg -c "adapter serial $JLINK_SERIAL"
              -c 'transport select swd')
     export OWO_BG22_JLINK_SERIAL=$JLINK_SERIAL
