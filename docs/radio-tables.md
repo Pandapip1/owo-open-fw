@@ -5815,3 +5815,53 @@ blocks' EN registers on `CLKEN1`/`RADIOCLKCTRL`. `RDMAILBOX0/1`,
 `RDSCRATCHPAD`, `PRORTC` and `CLKEN0.SYSCFG` are not gated: §7.59 shows
 enabling the six together stopped the stock blob's lockups, but not which
 access faults or how, so there is no rule to model yet.
+
+### 7.71 T_IFS on silicon: matched to the stock stack, from hardware timestamps
+
+**Method [F].** No SDR or sniffer is available, so the turnaround was timed
+on the chip, non-intrusively, with `scripts/bg22-tifs-probe.tcl`. From the
+debugger, while the firmware runs unmodified, PRS async channels 9-11 route
+`MODEMH.EOF` (end of a received frame), `MODEMH.SYNCSENT` and
+`MODEM.FRAMESENT` into TIMER1 input capture. EOF reloads and starts the
+one-shot counter; the other two are captured against it. Probe findings:
+- The MODEM events must be taken as `INSEL=PRSASYNCPULSE`.
+  `PRSASYNCLEVEL` captured nothing, and `PRSSYNC` selects the synchronous
+  channels instead.
+- Debugger reads of `CCn.ICF` do not pop the capture FIFO. Once it is
+  full, each new capture lands in `CCn.ICOF`, which the script polls.
+- TIMER1 and PRS registers fault ("Failed to read memory") while their
+  `CMU.CLKEN0` bit is clear.
+
+**Calibration [F].** `FRAMESENT - SYNCSENT` equals the PDU+CRC bit count at
+1 Mbps exactly. In stage 3 (TIMER1 on HFRCODPLL, 76.8 MHz): 8600 ticks =
+112 us for a len-9 ADV_IND, 17816 = 232 us for the len-24 SCAN_RSP. In
+stage 1 (TIMER1 on HFXO, 38.4 MHz): 12287 = 320 us for its len-35
+ADV_IND, 3378 = 88 us for its empty SCAN_RSP. This identifies each packet
+and confirms both tick rates.
+
+**Result [F].** Interval from a received SCAN_REQ's EOF to our SCAN_RSP's
+sync word:
+
+| Image | EOF -> SCAN_RSP SYNCSENT | n | range |
+|---|---|---|---|
+| Stage 1 (Silicon Labs BLE stack, `ble_minimal`) | 180.8 us | 31 | 180.2-181.1 us (two at 182.1) |
+| Stage 3, 140 us RX2TX hold | 185.2 us | 8 | 184.9-185.4 us |
+| Stage 3, 135.6 us hold | 180.5 us | 9 (+10 repeat) | 180.1-180.9 us |
+
+From EOF to the last bit at the antenna, and from SYNCSENT to the sync
+word on air, the delays are fixed silicon paths, identical across the two
+images on the same PHY. So equal intervals mean equal on-air T_IFS. With
+the 140 us estimate the open stack answered 4.4 us later than stock. If
+stock sits at the nominal 150 us, that was ~154.4 us, outside 150 +/- 2 us.
+`EFR32_SEQ_RX2TX_TX_AT_100NS` is now 1356, matching stock to within ~0.3 us
+(one STIMER tick is ~0.21 us). Functional re-check: 150 TX per 5 s, host
+receives the scan-response name, no RX2TX timeouts.
+
+**Absolute T_IFS [I].** The SYNCSENT->FRAMESENT airtime implies SYNCSENT
+fires as the access address ends, 40 us (1 preamble + 4 AA octets) after
+the packet starts. So T_IFS = EOF->SYNCSENT - 40 us + d_rx + d_tx, where d_rx
+is the antenna-to-EOF delay and d_tx the SYNCSENT-to-antenna delay. If
+stock's on-air T_IFS is the nominal 150 us, d_rx + d_tx is ~9.2 us. That
+assumption is the remaining unverified link; checking it needs an external
+receiver. Stock's jitter (~1 us) is larger than ours (~0.5 us): the open
+image releases TX from a STIMER compare loop at fixed latency.
