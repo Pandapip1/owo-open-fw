@@ -31,6 +31,8 @@
 #include "hal/efr32/ll_deadlines.h"
 #include "hal/efr32/seq_abi.h"
 #include "hal/efr32/ticker.h"
+#include "hal/efr32/radio_conn.h"
+#include "lll/lll_vendor.h"
 #include "abort_lifecycle.h"
 #include "completion_dispatch.h"
 #include "hal/efr32/ll_irqs.h"
@@ -168,6 +170,9 @@ static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
 /* Instant the pending TX launch holds TXEN to. */
 static atomic_t efr32_radio_tx_instant;
+/* The pending RX launch's instant, and whether it holds SWRXEN to it (a Peripheral's window). */
+static atomic_t efr32_radio_rx_instant;
+static atomic_t efr32_radio_rx_hold;
 /*
  * Whether the current radio event began with a scheduled TX (an advertising event) rather than a
  * receive window, and the TXEN of its latest packet started by radio_tx_enable(): the work that
@@ -176,6 +181,30 @@ static atomic_t efr32_radio_tx_instant;
 static bool efr32_radio_event_tx;
 static uint32_t efr32_radio_last_txen;
 static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns);
+/*
+ * Event timer (docs/radio-tables.md 7.78). OpenISA's radio_tmr_*_get() microseconds count from
+ * the start tick of the event's radio_tmr_start(), here efr32_radio_start_cyc on the scheduler
+ * clock; efr32_radio_launch_cyc is the launch instant (start tick + remainder) and
+ * efr32_radio_ready_us when the radio is planned to be ready: the receiver searching, or the
+ * first preamble bit leaving.
+ */
+static uint32_t efr32_radio_start_cyc;
+static uint32_t efr32_radio_launch_cyc;
+static uint32_t efr32_radio_ready_us;
+/*
+ * End (MODEM EOF) of the frame last received in this event and its PDU length (header and
+ * payload octets), taken from RAC.STIMER while the RAC still holds the RX2TX state it entered at
+ * the frame's end (efr32_radio_rx_end_capture()).
+ */
+static uint32_t efr32_radio_rx_eof_cyc;
+static uint16_t efr32_radio_rx_pdu_octets;
+static bool efr32_radio_rx_eof_valid;
+/*
+ * Connection interval of the connection event being run, 0 outside one, and the receive-window
+ * tolerance of the next RX launch, 0 for a scan window (hal/efr32/radio_conn.h).
+ */
+static uint32_t efr32_radio_conn_interval_us;
+static uint32_t efr32_radio_rx_window_tolerance_us;
 
 /*
  * Hold a timed command to @p instant (interrupts locked by the caller). One read of the
@@ -189,6 +218,13 @@ static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns);
 #define EFR32_HOLD_TIMER ((TIMER_TypeDef *)DT_REG_ADDR(DT_NODELABEL(timer0)))
 static bool efr32_radio_hold_direct;
 
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+/* The TIMER0 count the last direct hold waited for, 0 when it did not wait (timing probe). */
+static uint32_t efr32_radio_hold_waited_count;
+/* When the last direct hold, its instant mapped, began to poll. */
+static uint32_t efr32_radio_hold_entry;
+#endif
+
 static inline void efr32_radio_hold_until(uint32_t instant)
 {
 	uint32_t count;
@@ -197,6 +233,11 @@ static inline void efr32_radio_hold_until(uint32_t instant)
 		while ((int32_t)(k_cycle_get_32() - instant) < 0) {
 		}
 	} else if (efr32_radio_hold_direct) {
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		efr32_radio_hold_waited_count =
+			(int32_t)(EFR32_HOLD_TIMER->CNT - count) < 0 ? count : 0U;
+		efr32_radio_hold_entry = k_cycle_get_32();
+#endif
 		while ((int32_t)(EFR32_HOLD_TIMER->CNT - count) < 0) {
 		}
 	} else {
@@ -221,7 +262,11 @@ static void efr32_radio_hold_init(void)
 		    CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS), \
 		MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS, \
 		    CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS)), \
-	    CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS)
+	    MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS, \
+		COND_CODE_1(CONFIG_BT_CONN, \
+			    (MAX(MAX(CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_TX_RX_NS, \
+				     CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS), \
+				 CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS)), (0))))
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_completion_event);
@@ -231,7 +276,52 @@ static struct {
 	radio_isr_cb_t callback;
 	void *param;
 	bool abort;
+	/* The kind efr32_radio_completion_window() chose, and whether in a connection event. */
+	uint8_t kind;
+	bool conn;
 } efr32_radio_completion_work;
+
+/* Completion kinds: each has its own measured run and start-by rule. */
+enum efr32_radio_completion_kind {
+	EFR32_COMPLETION_TX_RX,
+	EFR32_COMPLETION_RX_TX,
+	EFR32_COMPLETION_RX,
+	EFR32_COMPLETION_TX,
+	EFR32_COMPLETION_ABORT,
+	EFR32_COMPLETION_KINDS,
+};
+
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+/*
+ * Longest times seen, scheduler-clock cycles, for a debugger to read (docs/radio-tables.md
+ * 7.78 gives the procedure); [conn] is 1 in a connection event. Paths count from the
+ * completion job's (or RX launch's) start.
+ */
+struct efr32_radio_probe {
+	uint32_t completion_run[2][EFR32_COMPLETION_KINDS];
+	uint32_t to_pending[2];
+	uint32_t to_respond[2];
+	uint32_t rx_launch_pre;
+	uint32_t rx_launch_hold_late;
+	uint32_t rx_launch_run;
+	uint32_t samples;
+};
+struct efr32_radio_probe efr32_radio_probe;
+static uint32_t efr32_radio_probe_job_start;
+#define EFR32_PROBE_MAX(field, value) \
+	do { \
+		uint32_t v_ = (value); \
+		if (v_ > efr32_radio_probe.field) { \
+			efr32_radio_probe.field = v_; \
+		} \
+	} while (0)
+#define EFR32_PROBE_PATH(field) \
+	EFR32_PROBE_MAX(field[efr32_radio_completion_work.conn ? 1 : 0], \
+			k_cycle_get_32() - efr32_radio_probe_job_start)
+#else
+#define EFR32_PROBE_MAX(field, value) do { } while (0)
+#define EFR32_PROBE_PATH(field) do { } while (0)
+#endif
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
 
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
@@ -521,6 +611,7 @@ static struct {
 #endif
 
 static void efr32_radio_tx_start(bool hold, uint32_t instant);
+static void efr32_radio_rx_start(bool hold, uint32_t instant);
 
 static void efr32_radio_tx_job(void *a, void *b, void *c)
 {
@@ -562,10 +653,20 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 		atomic_val_t generation;
 
 		k_deadline_event_wait(&efr32_radio_rx_event);
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		efr32_radio_probe_job_start = k_cycle_get_32();
+#endif
 		generation = atomic_get(&efr32_radio_rx_pending_generation);
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
-			radio_rx_enable();
+			/* A Peripheral's window holds SWRXEN to its instant, like TXEN. */
+			bool hold = atomic_get(&efr32_radio_rx_hold) != 0;
+			unsigned int key = irq_lock();
+
+			efr32_radio_rx_start(hold, (uint32_t)atomic_get(&efr32_radio_rx_instant));
+			irq_unlock(key);
+			EFR32_PROBE_MAX(rx_launch_run,
+					k_cycle_get_32() - efr32_radio_probe_job_start);
 		}
 	}
 }
@@ -584,7 +685,7 @@ K_THREAD_DEFINE(efr32_radio_completion_job_thread,
 		EFR32_LLL_THREAD_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
-void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t instant,
+void efr32_radio_launch_wake(uint8_t trx, bool hold, uint32_t generation, uint32_t instant,
 			     uint32_t not_before, int deadline)
 {
 	if (atomic_get(&efr32_radio_halted) != 0) {
@@ -598,10 +699,17 @@ void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t instant,
 		atomic_set(&efr32_radio_tx_instant, (atomic_val_t)instant);
 		/* Released early by the wake latency: wait out not_before, then hold TXEN. */
 		k_deadline_event_post_at(&efr32_radio_tx_event, not_before, deadline);
+	} else if (hold) {
+		atomic_set(&efr32_radio_rx_pending_generation, generation);
+		atomic_set(&efr32_radio_rx_instant, (atomic_val_t)instant);
+		atomic_set(&efr32_radio_rx_hold, 1);
+		/* As a TX launch: wait out not_before, then hold SWRXEN. */
+		k_deadline_event_post_at(&efr32_radio_rx_event, not_before, deadline);
 	} else {
-		ARG_UNUSED(instant);
 		ARG_UNUSED(not_before);
 		atomic_set(&efr32_radio_rx_pending_generation, generation);
+		atomic_set(&efr32_radio_rx_instant, (atomic_val_t)instant);
+		atomic_set(&efr32_radio_rx_hold, 0);
 		k_deadline_event_post(&efr32_radio_rx_event, deadline);
 	}
 }
@@ -1971,6 +2079,10 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		unsigned int key;
 
 		k_deadline_event_wait(&efr32_radio_completion_event);
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		efr32_radio_probe_job_start = k_cycle_get_32();
+		efr32_radio_probe.samples++;
+#endif
 		key = irq_lock();
 		if (efr32_radio_completion_dispatch_take(&efr32_radio_completion_dispatch)) {
 			callback = efr32_radio_completion_work.callback;
@@ -2018,6 +2130,9 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
 		}
+		EFR32_PROBE_MAX(completion_run[efr32_radio_completion_work.conn ? 1 : 0]
+					      [efr32_radio_completion_work.kind],
+				k_cycle_get_32() - efr32_radio_probe_job_start);
 	}
 }
 
@@ -2035,6 +2150,8 @@ static int efr32_packet_stage_rx_complete(const uint8_t *pdu, uint16_t bytes);
  * it.  Each RX window starts from a CLEARed channel, so a frame never wraps
  * in practice; one that would is rejected rather than reassembled.
  */
+static void efr32_radio_rx_end_capture(void);
+
 static void efr32_hw_rx_deliver(void)
 {
 	uintptr_t base = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
@@ -2079,6 +2196,7 @@ static void efr32_hw_rx_deliver(void)
 		}
 	}
 #endif
+	efr32_radio_rx_pdu_octets = (uint16_t)bytes;
 	(void)efr32_packet_stage_rx_complete(&efr32_rx_fifo[read], (uint16_t)bytes);
 	*radio_reg32(base + EFR32_BUFC_READOFFSET_OFFSET) =
 		(read + bytes + EFR32_FRC_TRAILER_OCTETS) % sizeof(efr32_rx_fifo);
@@ -2167,6 +2285,7 @@ void isr_radio(void *arg)
 		if (completion_direction == EFR32_RADIO_PACKET_RX) {
 			EFR32_RX2TX_M33_STAMP(0);
 			efr32_hw_rx_deliver();
+			efr32_radio_rx_end_capture();
 		}
 #endif
 		LL_ASSERT(efr32_packet_lifecycle_latch_completion(
@@ -2263,12 +2382,60 @@ static bool efr32_hw_rx2tx_armed;
 
 #define EFR32_RAC_STIMER_OFFSET 0x030U
 #define EFR32_RAC_STIMER_MASK 0xFFFFU
+#define EFR32_RAC_STATE_RXFRAME 3U
 #define EFR32_RAC_STATE_RX2TX 7U
 /* RAC.STIMER ticks in @p ns, rounded up / down. */
 #define EFR32_STIMER_TICKS_CEIL(ns) \
 	DIV_ROUND_UP((uint32_t)(ns) * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US, 10000U)
 #define EFR32_STIMER_TICKS_FLOOR(ns) \
 	((uint32_t)(ns) * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US / 10000U)
+
+/* RAC state, RAC.STIMER (ticks since that state began) and the scheduler clock, read together. */
+static bool efr32_rac_stimer_in(uint32_t state, uint32_t *stimer, uint32_t *now)
+{
+	uint32_t before = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+			   EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+	uint32_t after;
+
+	*stimer = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STIMER_OFFSET) & EFR32_RAC_STIMER_MASK;
+	*now = k_cycle_get_32();
+	after = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+		 EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+	return before == state && after == state;
+}
+
+/*
+ * Timestamp the frame just received. A window armed for a response (every receive in a
+ * connection event, and an advertiser's CONNECT_IND) holds RX2TX, which the RAC entered
+ * EFR32_RADIO_RX_EOF_TO_EXIT_NS after the frame's MODEM EOF and which RAC.STIMER counts from
+ * (docs/radio-tables.md 7.68, 7.72): the EOF is that much before now. Another state means the
+ * frame end is no longer visible; the timers then report none (radio_tmr_end_get()).
+ */
+static void efr32_radio_rx_end_capture(void)
+{
+	uint32_t start = k_cycle_get_32();
+	uint32_t stimer;
+	uint32_t now;
+
+	/*
+	 * RXDONE is raised at the EOF and the RAC leaves RXFRAME EFR32_RADIO_RX_EOF_TO_EXIT_NS
+	 * later, so an interrupt taken at once can find it still in RXFRAME: wait out that
+	 * measured exit, no longer.
+	 */
+	while (((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+		 EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
+	       EFR32_RAC_STATE_RXFRAME &&
+	       k_cycle_get_32() - start <=
+	       k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_RX_EOF_TO_EXIT_NS_MAX)) {
+	}
+	efr32_radio_rx_eof_valid = efr32_rac_stimer_in(EFR32_RAC_STATE_RX2TX, &stimer, &now);
+	if (efr32_radio_rx_eof_valid) {
+		efr32_radio_rx_eof_cyc =
+			now - k_ns_to_cyc_floor32(stimer * 10000U /
+						  EFR32_SEQ_RAC_STIMER_TICKS_PER_10US) -
+			k_ns_to_cyc_floor32(CONFIG_EFR32_RADIO_RX_EOF_TO_EXIT_NS);
+	}
+}
 /*
  * Latest RAC.STIMER count (since RX2TX began, i.e. since the received frame's end) at which
  * RESPOND may be written: the sequencer reaches its hold the measured RESPOND-to-TX-ready time
@@ -2286,21 +2453,37 @@ BUILD_ASSERT(CONFIG_EFR32_RADIO_TIFS_SPREAD_NS < BT_ACTIVE_CLOCK_JITTER_US * 100
 
 /*
  * Start-by of work whose output is the next packet of the current radio event, @p path_ns from
- * its start to that packet's TXEN or RXEN at the latest (hal/efr32/ll_deadlines.h).
+ * its start to that packet's TXEN or RXEN at the latest (hal/efr32/ll_deadlines.h). In a
+ * connection event that work closes the event and serves the connection's next event.
  */
 static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns)
 {
+	if (efr32_radio_conn_interval_us != 0U) {
+		return efr32_dl_conn_close_start_by(efr32_radio_launch_cyc,
+						    efr32_radio_conn_interval_us, path_ns);
+	}
 	return efr32_radio_event_tx ? efr32_dl_adv_next_start_by(efr32_radio_last_txen, path_ns) :
 				      efr32_dl_scan_next_start_by(now, path_ns);
 }
 
 /*
+ * Measured run of each completion kind (Kconfig): connection events run lll_conn.c's callbacks,
+ * advertising and scanning their own.
+ */
+#define EFR32_COMPLETION_NS(conn, kind) \
+	((conn) ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_##kind##_NS : \
+		  CONFIG_EFR32_RADIO_WCET_COMPLETION_##kind##_NS)
+
+/*
  * Deadline and budget of the completion published at @p now:
- * - TX whose RX follows (ADV_IND of a scannable advertiser): mark the RX->TX window before the
- *   earliest SCAN_REQ is recognised (efr32_dl_completion_tx_rx_start_by()).
- * - RX with a response armed, the RAC holding in RX2TX: write RESPOND by
- *   EFR32_RX2TX_RESPOND_BY_STIMER, read against RAC.STIMER, which counts from the frame's end.
- * - Every other kind (RX without response, last TX, abort) may start the event's next packet.
+ * - TX whose RX follows (ADV_IND of a scannable advertiser; in a connection event, a packet
+ *   with more to come): mark the RX->TX window before the earliest reply is recognised
+ *   (efr32_dl_completion_tx_rx_start_by()).
+ * - RX with a response armed, the RAC holding in RX2TX (SCAN_REQ; every receive in a connection
+ *   event): write RESPOND by EFR32_RX2TX_RESPOND_BY_STIMER, read against RAC.STIMER, which
+ *   counts from the frame's end.
+ * - Every other kind (RX without response, last TX, abort) may start the event's next packet,
+ *   or closes a connection event.
  * The QEMU TIFS seam starts its T_IFS delay only after the callback, so with it neither
  * turnaround's callback has a T_IFS deadline of its own: they take the last rule
  * (docs/radio-tables.md 7.77).
@@ -2311,27 +2494,35 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 	enum efr32_radio_packet_direction direction =
 		efr32_packet_stage.lifecycle.completion_direction;
 	bool rx_follows = efr32_hw_rx_after_tx_pending;
+	bool conn = efr32_radio_conn_interval_us != 0U;
 	uint32_t wcet_ns;
 
+	efr32_radio_completion_work.conn = conn;
+	efr32_radio_completion_work.kind =
+		abort ? EFR32_COMPLETION_ABORT :
+		(direction == EFR32_RADIO_PACKET_TX) ?
+			((rx_follows && !IS_ENABLED(CONFIG_EFR32_RADIO_QEMU_TIFS)) ?
+				EFR32_COMPLETION_TX_RX : EFR32_COMPLETION_TX) :
+		efr32_hw_rx2tx_armed ? EFR32_COMPLETION_RX_TX : EFR32_COMPLETION_RX;
 	if (abort) {
-		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS;
+		wcet_ns = conn ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS :
+				 CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS;
 	} else if (direction == EFR32_RADIO_PACKET_TX && rx_follows &&
 		   !IS_ENABLED(CONFIG_EFR32_RADIO_QEMU_TIFS)) {
-		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS);
-		*deadline = efr32_dl_completion_tx_rx_start_by(now);
+		*budget = EFR32_DL_MEAS_CYC(EFR32_COMPLETION_NS(conn, TX_RX));
+		*deadline = efr32_dl_completion_tx_rx_start_by(
+			now, conn ? CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_PENDING_NS :
+				    CONFIG_EFR32_RADIO_COMPLETION_TO_PENDING_NS);
 		return;
 	} else if (direction == EFR32_RADIO_PACKET_TX) {
-		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS;
+		wcet_ns = conn ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS :
+				 CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS;
 	} else if (efr32_hw_rx2tx_armed) {
-		uint32_t state = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
-				  EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
-		uint32_t stimer = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STIMER_OFFSET) &
-				  EFR32_RAC_STIMER_MASK;
-		uint32_t state_after = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
-					EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+		uint32_t stimer;
+		uint32_t at;
 
-		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS);
-		if (state == EFR32_RAC_STATE_RX2TX && state_after == EFR32_RAC_STATE_RX2TX) {
+		*budget = EFR32_DL_MEAS_CYC(EFR32_COMPLETION_NS(conn, RX_TX));
+		if (efr32_rac_stimer_in(EFR32_RAC_STATE_RX2TX, &stimer, &at)) {
 			int32_t ticks = (int32_t)EFR32_RX2TX_RESPOND_BY_STIMER - (int32_t)stimer;
 			/* Rounded towards earlier either way. */
 			uint32_t left = (ticks >= 0) ?
@@ -2340,14 +2531,17 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 				-k_ns_to_cyc_ceil32(DIV_ROUND_UP((uint32_t)-ticks * 10000U,
 						    EFR32_SEQ_RAC_STIMER_TICKS_PER_10US));
 
-			*deadline = (int)(now + left -
-					  EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_COMPLETION_TO_RESPOND_NS));
+			*deadline = (int)(at + left -
+					  EFR32_DL_MEAS_CYC(conn ?
+						CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS :
+						CONFIG_EFR32_RADIO_COMPLETION_TO_RESPOND_NS));
 			return;
 		}
 		/* The sequencer has left RX2TX: no response can follow this frame. */
-		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS;
+		wcet_ns = EFR32_COMPLETION_NS(conn, RX_TX);
 	} else {
-		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS;
+		wcet_ns = conn ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS :
+				 CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS;
 	}
 	*budget = EFR32_DL_MEAS_CYC(wcet_ns);
 	*deadline = efr32_radio_next_start_by(now, wcet_ns);
@@ -2503,6 +2697,10 @@ void radio_reset(void)
 	EFR32_RADIO_TRACE_ONCE("radio-reset");
 	efr32_radio_launch_disarm();
 	efr32_hw_turnaround_reset();
+	/* Every prepare starts here; a connection's sets its facts after (radio_conn.h). */
+	efr32_radio_conn_interval_us = 0U;
+	efr32_radio_rx_window_tolerance_us = 0U;
+	efr32_radio_rx_eof_valid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_cancel();
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -3183,19 +3381,38 @@ void radio_pkt_tx_set(void *tx_packet)
 		atomic_inc(&efr32_hw_hcto_generation);
 		efr32_tx_fifo_publish();
 		efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
+		/*
+		 * A response the LLL wants answered in turn (a connection event that continues)
+		 * turns to RX at its end as a launched TX does (efr32_radio_tx_start()): the RX
+		 * FIFO is set up and SWRXEN raised while the response is under way, so the RAC
+		 * passes TX2RX at the frame's end.
+		 */
+		if (efr32_hw_rx_after_tx_requested) {
+			efr32_bufc_rx_fifo_configure();
+			efr32_hw_rx_fifo_preconfigured = true;
+		}
 		__DSB();
 		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_RESPOND;
+		EFR32_PROBE_PATH(to_respond);
 		EFR32_RX2TX_M33_STAMP(2);
+		efr32_hw_rx_after_tx_pending = efr32_hw_rx_after_tx_requested;
+		efr32_hw_rx_after_tx_requested = false;
+		if (efr32_hw_rx_after_tx_pending) {
+			*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+				     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+		}
 	}
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/*
+ * TXEN to the first preamble bit (Kconfig EFR32_RADIO_TX_READY_NS, measured; LE 1M only). The
+ * Central's ULL schedules its anchor's TXEN this much before the anchor point.
+ */
 uint32_t radio_tx_ready_delay_get(uint8_t phy, uint8_t flags)
 {
 	ARG_UNUSED(phy);
 	ARG_UNUSED(flags);
-	EFR32_RADIO_TODO("software");
-	return 0;
+	return DIV_ROUND_UP(CONFIG_EFR32_RADIO_TX_READY_NS, NSEC_PER_USEC);
 }
 
 /* [software] software (no register access needed); not implemented yet */
@@ -3207,13 +3424,15 @@ uint32_t radio_tx_chain_delay_get(uint8_t phy, uint8_t flags)
 	return 0;
 }
 
-/* [software] software (no register access needed); not implemented yet */
+/*
+ * SWRXEN to RXSEARCH, the receiver searching (Kconfig EFR32_RADIO_RX_READY_NS, measured; LE 1M
+ * only). The Peripheral's ULL opens its receive windows this much earlier.
+ */
 uint32_t radio_rx_ready_delay_get(uint8_t phy, uint8_t flags)
 {
 	ARG_UNUSED(phy);
 	ARG_UNUSED(flags);
-	EFR32_RADIO_TODO("software");
-	return 0;
+	return DIV_ROUND_UP(CONFIG_EFR32_RADIO_RX_READY_NS, NSEC_PER_USEC);
 }
 
 /* [software] software (no register access needed); not implemented yet */
@@ -3230,15 +3449,54 @@ uint32_t radio_rx_chain_delay_get(uint8_t phy, uint8_t flags)
  * archived primitive is at librail_efr32xg22_gcc_release.a(rail_rf_hal.o),
  * sli_rail_dadf1c52f26190429dcacf7151424c68; see radio-tables.md §4.1.
  */
-void radio_rx_enable(void)
+static void efr32_radio_rx_start(bool hold, uint32_t instant)
 {
 	while (!radio_is_idle()) {
 	}
 
 	/* Validate and label a completion before arming the hardware source. */
 	efr32_packet_stage_arm(EFR32_RADIO_PACKET_RX);
+#if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
+	/*
+	 * A window the LLL wants answered (a Peripheral's anchor, an initiator's or active
+	 * scanner's window) is marked PENDING before the receiver starts, as a TX->RX turnaround's
+	 * is in radio_tmr_hcto_configure(): the sequencer then requests TX at RXFRAME and holds
+	 * RX2TX for the LLL's decision (SS7.65).
+	 */
+	if (efr32_hw_tx_after_rx_requested) {
+		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_PENDING;
+		efr32_hw_rx2tx_armed = true;
+	}
+#endif
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+	efr32_radio_hold_waited_count = 0U;
+	efr32_radio_hold_entry = efr32_radio_probe_job_start;
+#endif
+	if (hold) {
+		efr32_radio_hold_until(instant);
+	}
 	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+	/*
+	 * In active-provider (TIMER0) counts, read after the store as for the TX launch (7.77);
+	 * only a hold that waited: one entered past its instant is the start's lateness.
+	 */
+	if (efr32_radio_hold_waited_count != 0U) {
+		EFR32_PROBE_MAX(rx_launch_hold_late,
+				EFR32_HOLD_TIMER->CNT - efr32_radio_hold_waited_count);
+	}
+	if (hold) {
+		/* Start to the hold's poll, the instant's mapping included (as TX's PRE, 7.77). */
+		EFR32_PROBE_MAX(rx_launch_pre,
+				efr32_radio_hold_entry - efr32_radio_probe_job_start);
+	}
+#endif
+}
+
+void radio_rx_enable(void)
+{
+	efr32_radio_rx_start(false, 0U);
 }
 
 /*
@@ -3701,9 +3959,21 @@ static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t
 	atomic_set(&efr32_radio_launch_active, generation);
 	efr32_radio_event_tx = trx != 0U;
 	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
+	/*
+	 * The launch is due at the start tick plus the remainder, like OpenISA's T1 compare
+	 * (EVENT_TMR counts from the tick): the remainder carries the anchor's sub-tick part, which
+	 * a Central's anchor points must keep to the sleep clock's 16 us (Vol 6 Part B 4.2.2).
+	 */
+	efr32_radio_start_cyc = cntr_tick_cycles(tick);
+	efr32_radio_launch_cyc = efr32_radio_start_cyc + k_us_to_cyc_floor32(remainder);
+	efr32_radio_ready_us = remainder + (trx ? radio_tx_ready_delay_get(0U, 0U) :
+						  radio_rx_ready_delay_get(0U, 0U));
+	efr32_radio_rx_eof_valid = false;
 	EFR32_RADIO_TRACE_ONCE("schedule trx=%u tick=%u remainder=%u generation=%u",
 			       trx, tick, supplied_remainder, generation);
-	cntr_radio_cmp_set(trx, tick, generation);
+	cntr_radio_cmp_set(trx, efr32_radio_launch_cyc,
+			   trx ? 0U : efr32_radio_rx_window_tolerance_us, generation);
+	efr32_radio_rx_window_tolerance_us = 0U;
 	return remainder;
 }
 
@@ -3791,9 +4061,20 @@ void radio_tmr_hcto_configure(uint32_t hcto)
 			*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) =
 				EFR32_SEQ_RX2TX_PENDING;
 			efr32_hw_rx2tx_armed = true;
+			EFR32_PROBE_PATH(to_pending);
 		}
 		/* As in the QEMU path, HCTO bounds the window from this point. */
 		cntr_rx_timeout_arm_after_us(hcto,
+			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
+	} else if (!efr32_radio_event_tx && atomic_get(&efr32_radio_launch_active) != 0) {
+		/*
+		 * The receive window of a launch being prepared (a Peripheral's): OpenISA's HCTO is
+		 * on the event timer, i.e. from the start tick. lll_peripheral.c sets it to the
+		 * window's end plus windowWidening plus the address time (Vol 6 Part B 4.2.4:
+		 * listen until windowWidening after receiveWindowEnd); the expiry only ends a
+		 * search, never a frame being received, and a timer can only fire late.
+		 */
+		cntr_rx_timeout_arm_at(efr32_radio_start_cyc + k_us_to_cyc_ceil32(hcto),
 			(uint32_t)atomic_inc(&efr32_hw_hcto_generation) + 1U);
 	}
 #endif
@@ -3819,11 +4100,24 @@ void radio_tmr_aa_capture(void)
 	efr32_radio_timer_state_aa_capture_request(&efr32_radio_timer);
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/* Event-timer microseconds (from the start tick) of scheduler-clock time @p cyc. */
+static uint32_t efr32_radio_event_us(uint32_t cyc)
+{
+	return k_cyc_to_us_floor32(cyc - efr32_radio_start_cyc);
+}
+
+/*
+ * End of the access address of the frame last received: its MODEM EOF less the PDU and CRC
+ * at LE 1M (Vol 6 Part B 2.1). Without a captured frame end (QEMU-configuration images: the
+ * QEMU-only descriptor seam has no air time) it is 0, as before.
+ */
 uint32_t radio_tmr_aa_get(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	if (!efr32_radio_rx_eof_valid) {
+		return 0;
+	}
+	return radio_tmr_end_get() -
+	       (efr32_radio_rx_pdu_octets + BT_LE_CRC_OCTETS) * BT_LE_1M_US_PER_OCTET;
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
@@ -3838,11 +4132,14 @@ uint32_t radio_tmr_aa_restore(void)
 	return efr32_radio_timer.saved_aa;
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/*
+ * When the radio was planned to be ready, as OpenISA's (remainder + warm-up): a timed launch
+ * holds its command to the instant, so the plan is what happened, within the launch's
+ * measured hold lateness.
+ */
 uint32_t radio_tmr_ready_get(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	return efr32_radio_ready_us;
 }
 
 /* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
@@ -3851,11 +4148,28 @@ void radio_tmr_end_capture(void)
 	efr32_radio_timer_state_end_capture_request(&efr32_radio_timer);
 }
 
-/* [regs] PROTIMER (timebase, compare, captures) and RTC sync: unknown (T8) */
+/*
+ * MODEM EOF of the frame last received (efr32_radio_rx_end_capture()); 0 without one. The
+ * receiver's chain delay is not separated from the transmitter's (docs/radio-tables.md 7.71:
+ * only d_tx + d_rx is measured), so every receive-side time here is the MODEM's: the anchor the
+ * Peripheral derives from it and the window it opens are both late by the same d_rx.
+ */
 uint32_t radio_tmr_end_get(void)
 {
-	EFR32_RADIO_TODO("regs");
-	return 0;
+	if (!efr32_radio_rx_eof_valid) {
+		return 0;
+	}
+	return efr32_radio_event_us(efr32_radio_rx_eof_cyc);
+}
+
+void efr32_radio_conn_event_set(uint32_t interval_us)
+{
+	efr32_radio_conn_interval_us = interval_us;
+}
+
+void efr32_radio_rx_window_set(uint32_t tolerance_us)
+{
+	efr32_radio_rx_window_tolerance_us = tolerance_us;
 }
 
 /* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
@@ -4251,8 +4565,11 @@ static int efr32_radio_budgets_init(void)
 {
 	k_deadline_event_budget_set(&efr32_radio_tx_event,
 				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_TX_LAUNCH_NS));
+	/* A Peripheral's held receive-window launch runs longer than a scan window's. */
 	k_deadline_event_budget_set(&efr32_radio_rx_event,
-				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_RX_LAUNCH_NS));
+				    k_ns_to_cyc_ceil32(MAX(CONFIG_EFR32_RADIO_WCET_RX_LAUNCH_NS,
+				    COND_CODE_1(CONFIG_BT_PERIPHERAL,
+						(CONFIG_EFR32_RADIO_WCET_RX_WINDOW_LAUNCH_NS), (0)))));
 	/* The longest kind registers the event; each publication carries its own kind's budget. */
 	k_deadline_event_budget_set(&efr32_radio_completion_event,
 				    EFR32_DL_MEAS_CYC(EFR32_RADIO_WCET_COMPLETION_MAX_NS));

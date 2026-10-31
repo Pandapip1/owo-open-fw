@@ -122,6 +122,28 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "\t\tret = preempt_ticker_start(next, ticker_start_op_cb);\n"
             "preempt timeout restart asserts it was not already scheduled")
 
+  # Connection events tell the radio HAL what their jobs serve (hal/efr32/radio_conn.h): the
+  # connection interval, whose next event the event's closing work serves, and, for a Peripheral,
+  # how late its receive window may open by the specification (docs/radio-tables.md 7.78).
+  if(CONFIG_BT_PERIPHERAL)
+    efr32_radio_patch(lll/lll_peripheral.c "#include \"hal/radio.h\"\n"
+              "#include \"hal/radio.h\"\n#include \"hal/efr32/radio_conn.h\"\n"
+              "connection timing hooks")
+    efr32_radio_patch(lll/lll_peripheral.c
+              "\tremainder = p->remainder;\n\tremainder_us = radio_tmr_start(0, ticks_at_start, remainder);\n"
+              "\tremainder = p->remainder;\n\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tefr32_radio_rx_window_set(EVENT_TICKER_RES_MARGIN_US);\n\tremainder_us = radio_tmr_start(0, ticks_at_start, remainder);\n"
+              "Peripheral receive window and connection interval")
+  endif()
+  if(CONFIG_BT_CENTRAL)
+    efr32_radio_patch(lll/lll_central.c "#include \"hal/radio.h\"\n"
+              "#include \"hal/radio.h\"\n#include \"hal/efr32/radio_conn.h\"\n"
+              "connection timing hooks")
+    efr32_radio_patch(lll/lll_central.c
+              "\tremainder_us = radio_tmr_start(1, ticks_at_start, remainder);\n"
+              "\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tremainder_us = radio_tmr_start(1, ticks_at_start, remainder);\n"
+              "Central connection interval")
+  endif()
+
   # The one RV32M1-specific spot in the LLL: the tick-counter ISR reads the LPTMR1 compare flag.
   # Replaced by a flag set from the counter alarm callback (hal/cntr.c).
   file(READ ${GEN}/lll/lll.c _c)

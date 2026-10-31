@@ -17,19 +17,17 @@
 #   (same pattern for build/radio-rx-port-central-qemu with tests/radio-rx-port
 #    and -DEXTRA_CONF_FILE=prj-central.conf)
 #
-# What this proves and what it does not: the central receives ADV_IND, stages a
-# 36-byte CONNECT_IND that the RF medium delivers to the advertiser, and the
-# central's host connected callback fires with HCI error 0. The advertiser then
-# switches to the connection's data channels. The sustained bidirectional
-# connection-event exchange (the central's EMPTY PDU acknowledged by a
-# peripheral data-channel packet) is NOT claimed. Tracing shows the two
-# endpoints' RAC windows do overlap and the medium still reports 0 RX offers for
-# the central's EMPTY PDU snapshot, i.e. the skip is a SYNTH CHCTRL channel
-# mismatch: the endpoints' connection-event data-channel grids are desynced
-# because the peripheral's first-event anchor comes from the PROTIMER AA/end
-# captures that hal/radio.c stubs return 0 for (docs/radio-tables.md T8). That is
-# a firmware/HAL unknown, not a model-timing bound, so this harness asserts
-# establishment only.
+# Both profiles run the hardware configuration (the silicon path; both QEMU-only
+# seams off). What this proves: the central receives ADV_IND and answers with a
+# 36-byte CONNECT_IND at T_IFS that the RF medium delivers to the advertiser,
+# the central's host connected callback fires with HCI error 0, and the link is
+# sustained: the advertiser answers connection events on the data channels for
+# the whole run and the central reports no disconnection. The Peripheral tracks
+# the Central's anchor from the received frames' end, dated from RAC.STIMER
+# (docs/radio-tables.md 7.78). What it does not prove: spec timing in QEMU. The
+# model runs lll_conn's turnaround callbacks past their spec-derived start-by
+# deadlines, so these QEMU-only profiles count misses instead of shutting the
+# radio down (7.78 attributes every one); nor anything about silicon.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -83,8 +81,9 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
 fi
 
 console=$(sed -n 's/.*USART[01] TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-	"$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r\000')
-printf '%s\n' "$console" | grep -E '^(bt_enable|conn_cb_register|scan_start|scan_stop|conn_le_create|adv_start|central_connected):' || true
+	"$RUNTIME_DIR/radio.trace" | LC_ALL=C awk '{ printf "%c", strtonum("0x" $0) }' |
+	tr -d '\r\000')
+printf '%s\n' "$console" | grep -aE '^(bt_enable|scan_start|scan_stop|conn_le_create|adv_start|central_connected|gatt_discover|gatt_rw):' || true
 
 # A fatal error on either endpoint (stack overflow, deadline panic, assert) is
 # a failure regardless of how far the exchange got.
@@ -126,7 +125,7 @@ fi
 #    peripheral armed for the first connection event.
 post_handoff_rx=$(awk '
 	/endpoint=0 now=[0-9]* RF RX handoff bytes=36/ { handed = NR; next }
-	handed && NR > handed && /endpoint=0.*RAC state 0 -> 2/ { count++ }
+	handed && NR > handed && /endpoint=0.*RAC state 1 -> 2/ { count++ }
 	END { print count + 0 }
 ' "$RUNTIME_DIR/radio.trace")
 if [ "$post_handoff_rx" -lt 1 ]; then
@@ -134,6 +133,33 @@ if [ "$post_handoff_rx" -lt 1 ]; then
 	exit 1
 fi
 
-echo "connection-e2e: established a QEMU connection (CONNECT_IND delivered, central err 0, advertiser armed $post_handoff_rx connection-event RX)"
-echo "connection-e2e: establishment only; sustained connection events fail on a connection-event data-channel desync (overlapping RAC windows, 0 RX offers => channel mismatch)"
-echo "connection-e2e: that desync is rooted in the PROTIMER AA/end capture stubs (hal/radio.c radio_tmr_*_get, docs T8), not a QEMU model-timing bound, and not a silicon claim"
+# 5. The link is sustained: the advertiser answers connection events (its
+#    data-channel PDUs after the handoff, 2-octet empty PDUs and longer), at
+#    least one per second of the run at the central's longest interval (50 ms
+#    allows 20), and the central's host never reports a disconnection.
+answers=$(awk '
+	/endpoint=0 now=[0-9]* RF RX handoff bytes=36/ { handed = 1; next }
+	handed && /endpoint=0 TX snapshot/ && !/bytes=11 / { count++ }
+	END { print count + 0 }
+' "$RUNTIME_DIR/radio.trace")
+if [ "$answers" -lt "$RUN_SECONDS" ]; then
+	echo "connection-e2e: advertiser answered only $answers connection events" >&2
+	exit 1
+fi
+if printf '%s\n' "$console" | grep -aq 'central_disconnected'; then
+	echo "connection-e2e: the central lost the connection" >&2
+	printf '%s\n' "$console" | grep -a 'central_disconnected' >&2
+	exit 1
+fi
+
+# 6. GATT over the link: the central found the advertiser's test characteristic and
+#    every write-then-read-back round it ran matched (src/central.c reports every 30).
+if ! printf '%s\n' "$console" | grep -aq 'gatt_rw: [0-9]* rounds, [0-9]* ok, 0 failed' ||
+   printf '%s\n' "$console" | grep -aq 'gatt_rw: round .* failed\|gatt_discover: failed'; then
+	echo "connection-e2e: GATT write/read-back over the link did not succeed" >&2
+	printf '%s\n' "$console" | grep -a 'gatt_' >&2 || true
+	exit 1
+fi
+
+echo "connection-e2e: QEMU connection established and sustained (CONNECT_IND delivered, central err 0, $post_handoff_rx Peripheral windows, $answers answers, no disconnection)"
+echo "connection-e2e: not a timing claim: the profiles count deadline misses (docs/radio-tables.md 7.78)"

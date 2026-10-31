@@ -804,11 +804,25 @@ efr32_seq_vco_calibrate:
 8:  ldr r0, =EFR32_SEQ_SYNTH_CAL_ABORTED
     pop {r4-r7, pc}
 
-/* Brings the TX synthesizer up in stock's order.  Clobbers r0-r3. */
+/* Brings the TX synthesizer up in stock's order, then the PA.  Clobbers r0-r3. */
 .ltorg
 
 .thumb_func
 efr32_seq_synth_start:
+    push {r4, lr}
+    bl efr32_seq_synth_power_up
+    cmp r0, #0
+    bne 9f
+    bl efr32_seq_pa_start
+9:  pop {r4, pc}
+
+/* The synthesizer part of efr32_seq_synth_start: supplies up, configured for TX, calibrated
+ * (and the calibration cached) and started; the PA stays off.  Returns r0 as
+ * efr32_seq_synth_lock.  Clobbers r0-r3. */
+.ltorg
+
+.thumb_func
+efr32_seq_synth_power_up:
     push {r4, lr}
     ldr r0, =(EFR32_RAC_RADIOEN + EFR32_ALIAS_SET)
     movs r1, #(EFR32_RAC_RADIOEN_PREEN | EFR32_RAC_RADIOEN_RFBIASEN)
@@ -869,10 +883,7 @@ efr32_seq_synth_start:
     str r1, [r0]
     movs r0, #EFR32_SEQ_SYNTH_LOCK_CAL_AND_CACHE
     bl efr32_seq_synth_lock
-    cmp r0, #0
-    bne 9f
-    bl efr32_seq_pa_start
-9:  pop {r4, pc}
+    pop {r4, pc}
 
 .ltorg
 
@@ -1167,9 +1178,16 @@ efr32_seq_pa_stop:
     ldr r0, =(EFR32_RAC_TX + EFR32_ALIAS_SET)
     ldr r1, =(EFR32_RAC_TX_TX6DBMENBLEEDPREDRVREG | EFR32_RAC_TX_TX6DBMENBLEEDREG | EFR32_RAC_TX_TX6DBMENRAMPCLK)
     str r1, [r0]
+    /* A PA that never ramped up (an RX2TX the M33 cancelled: the PA comes up only on RESPOND)
+     * has no ramp-down to wait for; waiting out the bound held this handler, and with it the
+     * RAC in TXPD, ~18 ms in QEMU. */
+    ldr r0, =EFR32_RAC_PAENCTRL
+    ldr r4, [r0]
     ldr r0, =(EFR32_RAC_PAENCTRL + EFR32_ALIAS_CLR)
     ldr r1, =EFR32_RAC_PAENCTRL_PARAMP
     str r1, [r0]
+    tst r4, r1
+    beq 2f
     ldr r0, =(EFR32_MODEM_SEQIF + EFR32_ALIAS_CLR)
     movs r1, #EFR32_MODEM_SEQIF_TXRAMPDONE
     str r1, [r0]
@@ -1639,10 +1657,22 @@ efr32_seq_tx_turnaround:
      * TX while the M33 decides; the PA comes up only on RESPOND, so nothing
      * radiates for a declined frame (SS7.67). */
     bl efr32_seq_rx_frontend_stop
-    bl efr32_seq_synth_config_tx
+    /* A window the M33 opened from OFF (SWRXEN: RXWARM, then RXSEARCH; a Peripheral's anchor,
+     * an initiator's scan) had no TXWARM in this event, so the synthesizer is powered down
+     * (efr32_seq_synth_power_down leaves RADIOEN zero): bring it up and calibrate it as TXWARM
+     * does, PA still off.  After a TX->RX turnaround it is up: retune with the cached
+     * calibration. */
+    ldr r0, =EFR32_RAC_RADIOEN
+    ldr r0, [r0]
+    movs r1, #EFR32_RAC_RADIOEN_PREEN
+    tst r0, r1
+    bne 10f
+    bl efr32_seq_synth_power_up
+    b 11f
+10: bl efr32_seq_synth_config_tx
     movs r0, #EFR32_SEQ_SYNTH_LOCK_CACHED
     bl efr32_seq_synth_lock
-    movs r0, #2
+11: movs r0, #2
     bl efr32_seq_trace_stimer
     /* Wait (bounded) for the M33's decision on this received frame: it
      * either published a response or cancelled; this core never chooses. */
