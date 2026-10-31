@@ -5734,3 +5734,84 @@ state event is pending. New qtests: `pa-ramp-survives-clear-after-paramp` and
 reproduces the silicon failure: the firmware with the old 9-IRQ enable mask
 stops after one TX. With the fix it runs 153 TX cycles in 5 s of virtual
 time. RX2RX itself is still not modelled.
+
+### 7.70 QEMU models the receive side and both turnarounds; the hardware-configuration firmware answers SCAN_REQs in simulation
+
+Until now the QEMU model knew only OFF, RXSEARCH, TXWARM, TX, TXPD and
+SHUTDOWN, so the open M0+'s TX2RX, RXFRAME, RX2TX and RXPD handlers never ran
+in simulation, and the QEMU firmware build relied on two simulator-only seams
+(`CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR`, `CONFIG_EFR32_RADIO_QEMU_TIFS`).
+`vendor/qemu` `92d87db5fe` adds, for images that release the sequencer, the
+behaviour measured in §7.63-7.69:
+
+- TX ending with `RXENSRCEN.SWRXEN` asserted goes TX2RX (11), and RXSEARCH on
+  the `STATETX2RX` acknowledgement; SWRXEN set while TXWARM/TX is a pending
+  request, not an immediate RXSEARCH [F, §7.63 state mix].
+- An offered frame enters RXFRAME (3). At frame end FRC writes header,
+  length, payload and, with `TRAILRXDATA.CRCOK`, one trailer octet with bit 7
+  set to BUFC channel 1, raises RXDONE, and the RAC goes RX2TX (7) when TXEN
+  was latched during RXFRAME with SWRXEN withdrawn [F, §7.65], RX2RX (5)
+  when SWRXEN is still asserted [F that it returns to RX, §7.65; RX2RX as the
+  route [I] from §7.69], otherwise RXPD (4) [I].
+- RX2TX is held until acknowledged and TX starts 3 us later, with no TXWARM
+  [F, §7.66 TX > TXWARM counts, §7.68].
+- RXDIS in a receive state goes RXPD, then OFF on acknowledgement [F, §7.63];
+  with SWRXEN still asserted it is ignored [F outcome, §7.63; mechanism
+  unknown].
+- Frame-end and TX-end transitions, and RXFRAME entry, wait for pending
+  SEQIEN-enabled events like TXEN does [I generalisation of §7.69].
+- `RAC.STIMER` counts 4.8 ticks/us from the last state change, 16 bits
+  [F rate §7.66, restart §7.68; width from the public register model]. The
+  open RX2TX handler polls it, so without it the handler never returned.
+- `RAC.STATUS`: RXENS and RXMASK bit 1 follow SWRXEN, TXENS reports the
+  RXFRAME latch, SEQACTIVE reads 0 in RXFRAME [F, the four samples in
+  §7.21/7.63/7.65].
+
+Synthetic or inferred in the model, listed so they are not mistaken for
+measurements: the received frame lasts 150 us, the same synthetic value as
+the model's TX (no airtime model); the trailer's signal-dependent low bits
+are 0 and the CRC bit is always set (the medium has no bit errors); a
+receiver that enters RXSEARCH while a peer is mid-frame still receives that
+frame (pre-existing medium rule); OFF + SWRXEN still enters RXSEARCH
+directly, without RXWARM; RXDIS/TXDIS in RXPD/TXPD and TXDIS in a receive
+state are ignored; TXDIS/RXDIS in other busy states still end in OFF at once
+(pre-existing). Guests that configure the QEMU-only descriptor ring (BUFC
+channel 2) keep the old instantaneous handoff.
+
+**A seam bug this exposed [F, QEMU].** With the QEMU-configuration
+advertiser, the first SCAN_RSP ended in TX2RX and the event never finished:
+the QEMU_TIFS RX->TX path issued RXDIS without withdrawing SWRXEN, which on
+silicon does not stop receive (§7.63) and leaves an RX request on the next
+TX. `radio.c` now clears SWRXEN before that RXDIS, as `radio_disable()`
+already does. The hardware path is unaffected.
+
+**Results in QEMU [F, QEMU].** Hardware-configuration `tests/radio-port`
+(both seams off, board `bg22_ek4108a`), alone at `-icount shift=5`: 165
+TXWARM -> TX -> TX2RX -> RXSEARCH -> RXPD -> OFF cycles in 5.4 s of virtual
+time, the silicon state mix of §7.63, no deadline panic. Against the
+QEMU-configuration active scanner on `efr32bg22-dual` (`shift=3,sleep=off`,
+363 s virtual): 3626 SCAN_REQs received, each through RXSEARCH -> RXFRAME ->
+RX2TX -> TX -> TXPD -> OFF; 3625 SCAN_RSPs sent (the one exception is the
+first event, which the M33 had not yet marked pending, so the RAC went
+RX2RX); the scanner's host reported 3625 scan responses carrying the
+complete-name AD. TX started 143.1 us after every frame end: the open
+sequencer's 140 us STIMER hold plus the 3 us start. No panic. The
+QEMU-configuration advertiser against the same scanner: 1183 SCAN_RSPs in
+118 s virtual, 1180 reported. Hardware re-check of the current stage-3 build
+[F]: 150 TXWARM and 156 TX per 5 s, 6 respond / 8 cancel / 0 timeout, and
+the host reported `Name: efr32-radio-port`.
+
+**Seams.** The advertiser no longer needs either seam in QEMU. A scanner
+built with both seams off receives advertisements through the hardware path
+(2209 reports, all well-formed) but never sends a SCAN_REQ: the hardware
+driver marks an RX->TX window pending only after a TX->RX turnaround
+(`radio_tmr_hcto_configure`), so a scanner's plain RX window falls through
+RX2RX. That is a driver gap, not a model gap; the scanner still needs
+`QEMU_TIFS`. The `run-qemu-*-e2e.sh` checks still match pre-§7.62 traces
+(`RAC state 9 -> 0`, an 8-byte SCAN_RSP) and fail for that reason alone.
+
+**CMU gates (§7.59) not modelled.** The model gates only the eight radio
+blocks' EN registers on `CLKEN1`/`RADIOCLKCTRL`. `RDMAILBOX0/1`,
+`RDSCRATCHPAD`, `PRORTC` and `CLKEN0.SYSCFG` are not gated: §7.59 shows
+enabling the six together stopped the stock blob's lockups, but not which
+access faults or how, so there is no rule to model yet.

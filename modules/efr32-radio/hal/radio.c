@@ -1023,7 +1023,14 @@ static void efr32_qemu_tifs_begin_rx_to_tx(void)
 	irq_unlock(key);
 	if (claimed) {
 		cntr_qemu_tifs_cmp_cancel();
-		/* Do not call radio_disable(): RXDIS here is not an LLL abort. */
+		/*
+		 * Do not call radio_disable(): RXDIS here is not an LLL abort.  Like
+		 * radio_disable(), withdraw SWRXEN first: with the source still
+		 * asserted RXDIS does not stop receive on silicon (SS7.63), and a
+		 * source left asserted turns the following TX around into RX.
+		 */
+		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 		*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 		key = irq_lock();
 		efr32_qemu_tifs_rx_to_tx_staging = true;
