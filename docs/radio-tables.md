@@ -5490,6 +5490,11 @@ by the longer sequencer handlers -- unconfirmed. Next step for whoever
 continues: trace `efr32bg22_rf_*` medium events and the delivered RX bytes
 around the first RX window.
 
+**Resolved (SS7.69):** the `ull_periph_setup()` attribution and the RF-medium
+suspicion above were both wrong. The panic was the radio deadline check: the
+first launch ran late behind a per-event sequencer reinstall, and every
+TXPD then stalled ~15.7 ms in the model's TXRAMPDONE handling.
+
 ### 7.64 Stage 3 receives: the demodulator was correlating against an inverted access address
 
 **Diff in RXSEARCH [F].** Stage 3 held in RXSEARCH by halting the M33 at
@@ -5681,3 +5686,51 @@ received, accepted by the LLL and answered with a decodable SCAN_RSP. A
 negative control showed the host also accepts a response held 1-2 ms late,
 so this scanner cannot verify T_IFS compliance; that needs a stricter
 scanner or an SDR.
+
+### 7.69 The M0+ now runs across events; RAC holds transitions on unacknowledged state events
+
+**The QEMU regression [F].** Two independent causes, both found with the
+`-icount` firmware run's RAC state trace:
+
+1. `radio_reset()` runs in every LLL prepare, and it re-copied, byte-verified
+   and rebooted the private M0+ image each time. Its cost grows with the
+   image (3446 bytes now); the PA port (`9df1c9c`) added ~450 bytes and pushed
+   the first launch past its start-by deadline. Stock RAIL loads its image
+   once at initialization. The open HAL now installs and starts the M0+ from
+   `radio_setup()`, and later `radio_reset()` calls only quiesce the RAC.
+2. The model latched `MODEM.SEQIF.TXRAMPDONE` at the `RAC.PAENCTRL.PARAMP`
+   write. The TXPD ramp-down (SS7.62), like stock's, drops PARAMP, *then*
+   clears TXRAMPDONE, then polls it, so the clear erased the model's instant
+   completion and every TXPD ran the bounded wait to its limit (~15.7 ms of
+   virtual time). The model now leaves the ramp pending at the PARAMP change
+   and latches it at the first later read of `MODEM.IF`/`SEQIF`. It still has
+   no measured ramp duration.
+
+The printed lateness in `efr32_radio_deadline_check` overflowed 32 bits
+("7 ns" for ~87 us); it is now computed in 64 bits.
+
+**Silicon: RAC waits for every enabled state event [F].** Stopping the
+per-event reboot broke hardware after the first advertising event. The
+RAC sat in SHUTDOWN with a TXEN outstanding, `SEQIF=0x20200007` (STATESHUTDOWN
+bit 29 and RX2RX bit 21 set), `SEQIEN=0x3FFF0000`, and the M0+ idle in WFI
+with IRQ0/5/13 pending but not enabled (`ISER0=0xF9E`). The open reset
+handler enabled all 14 state events in SEQIEN but gave only 9 of them an
+NVIC enable. Clearing only bit 29 from the debugger released the held TXEN
+at once: the M0+ counters show TXWARM, TX, TX2RX, RXSEARCH and RXFRAME
+each running once. The RAC then parked in RX2RX (state 5) on the still-set
+bit 21. So the RAC holds a transition while any SEQIEN-enabled state event
+is uncleared. The per-event reboot's own SEQIF clear had been hiding this.
+The open image now NVIC-enables every state event it enables in SEQIEN (stock
+enables IRQ0-15, SS7.63). The common tail acknowledges those that have no
+handler. Hardware with the M0+ running continuously: 150 TX per 5 s and the
+host receives the scan-response name, as before.
+
+**QEMU model updated.** Every RAC state, SHUTDOWN included, latches
+`SEQIF` bit 16 + state and drives M0+ IRQ *state* (previously only IRQ8-10
+were wired, and SHUTDOWN latched nothing). With the sequencer released, a
+TXEN and the TXWARM/TX/TXPD handshakes are held while any SEQIEN-enabled
+state event is pending. New qtests: `pa-ramp-survives-clear-after-paramp` and
+`seq-unacked-state-event-holds-txen` (82/82, RF suite 17/17). The model now
+reproduces the silicon failure: the firmware with the old 9-IRQ enable mask
+stops after one TX. With the fix it runs 153 TX cycles in 5 s of virtual
+time. RX2RX itself is still not modelled.

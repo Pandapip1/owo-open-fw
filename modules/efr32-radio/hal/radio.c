@@ -825,8 +825,19 @@ static bool efr32_rac_in_rxsearch(void)
 static void efr32_radio_sequencer_install(void)
 {
 	volatile uint8_t *destination = (volatile uint8_t *)EFR32_SEQ_RAM_BASE;
+	static bool installed;
 	uint32_t initial_sp;
 	uint32_t reset_vector;
+
+	/* radio_reset() runs in every LLL prepare. Stock RAIL loads its image
+	 * once at initialization; re-copying, re-verifying and rebooting the
+	 * private core per event cost time proportional to the image size ahead
+	 * of every launch. The core keeps running between events, and its reset
+	 * handler holds no per-event state. */
+	if (installed) {
+		return;
+	}
+	installed = true;
 
 	LL_ASSERT(efr32_radio_seq_image_size >= (2U * sizeof(uint32_t)));
 	LL_ASSERT(efr32_radio_seq_image_size <= EFR32_SEQ_RAM_SIZE);
@@ -2215,6 +2226,11 @@ void radio_setup(void)
 		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+
+	/* Load and start the private core here, once, as stock RAIL does at
+	 * initialization. Otherwise the first LLL prepare's radio_reset() pays
+	 * for the image copy, verify and core start ahead of its launch. */
+	radio_reset();
 
 	/* Match OpenISA's initially available radio-clock contract. */
 	atomic_set(&efr32_radio_power_ref, 1);

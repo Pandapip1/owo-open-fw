@@ -52,14 +52,14 @@ extern "C" fn rust_main() {
         peer: ptr::null(),
         ..Default::default()
     };
-    // SAFETY: Zephyr consumes the advertising and scan-response data during
-    // this synchronous API call; `ad`, `sd`, `param`, and their static
-    // payloads remain valid throughout.
     let sd = [bt_data {
         type_: BT_DATA_NAME_COMPLETE,
         data_len: SCAN_RSP_NAME.len() as u8,
         data: SCAN_RSP_NAME.as_ptr(),
     }];
+    // SAFETY: Zephyr consumes the advertising and scan-response data during
+    // this synchronous API call; `ad`, `sd`, `param`, and their static
+    // payloads remain valid throughout.
     let adv_err = unsafe { bt_le_adv_start(&param, ad.as_ptr(), ad.len(), sd.as_ptr(), sd.len()) };
     // A zero here is the host/controller boundary: an actual Zephyr legacy
     // advertising workload has been accepted. The QEMU harness separately

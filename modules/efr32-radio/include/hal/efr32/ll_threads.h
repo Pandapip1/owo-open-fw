@@ -54,7 +54,7 @@ static inline void efr32_radio_deadline_check(int deadline, const char *what)
 		LOG_PANIC();
 		printk("radio job %s ran %u ns late (tolerance %u ns): deadline %u now %u\n",
 		       what,
-		       (unsigned)((uint32_t)(now - (uint32_t)deadline) * NSEC_PER_SEC /
+		       (unsigned)((uint64_t)(now - (uint32_t)deadline) * NSEC_PER_SEC /
 				  CONFIG_CLOCK_EVENT_SCHED_FREQUENCY),
 		       CONFIG_CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS,
 		       (unsigned)deadline, (unsigned)now);

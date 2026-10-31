@@ -73,14 +73,15 @@
 .equ EFR32_BUFC_TX_WRITE_OFFSET,      (EFR32_BUFC_TX_CHANNEL_BASE + EFR32_BUFC_CHANNEL_WRITE_OFFSET)
 .equ EFR32_BUFC_TX_READ_OFFSET,       (EFR32_BUFC_TX_CHANNEL_BASE + EFR32_BUFC_CHANNEL_READ_OFFSET)
 .equ EFR32_NVIC_ISER0,                0xe000e100
-.equ EFR32_RAC_IRQ_TXWARM,            (1 << 8)
-.equ EFR32_RAC_IRQ_TX,                (1 << 9)
-/* SEQIF.STATETXPD (bit 26) arrives on IRQ10 (IRQn <-> SEQIF bit n+16, the
- * same mapping as TXWARM/TX), SS7.62. */
-.equ EFR32_RAC_IRQ_TXPD,              (1 << 10)
-/* RX side, same mapping (SS7.63): RXWARM 1, RXSEARCH 2, RXFRAME 3, RXPD 4,
- * RX2TX 7, TX2RX 11. */
-.equ EFR32_RAC_IRQ_RX_STATES, ((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 7) | (1 << 11))
+/* State event n (SEQIF bit n+16) arrives on M0+ IRQn (SS7.62/SS7.63): RXWARM 1,
+ * RXSEARCH 2, RXFRAME 3, RXPD 4, RX2RX 5, RX2TX 7, TXWARM 8, TX 9, TXPD 10,
+ * TX2RX 11, SHUTDOWN 13.  RAC holds a transition until every state event
+ * enabled in SEQIEN is acknowledged (measured, SS7.69): with SEQIEN.SHUTDOWN
+ * and SEQIEN.RX2RX latched but their IRQs disabled, RAC parked in SHUTDOWN and
+ * RX2RX.  So every enabled event gets its IRQ, as stock enables IRQ0-15
+ * (SS7.63); those without a handler are acknowledged by the common tail. */
+.equ EFR32_RAC_SEQIF_STATE_SHIFT,     16
+.equ EFR32_RAC_IRQ_STATE_EVENTS,      (EFR32_RAC_SEQIF_STATE_EVENTS >> EFR32_RAC_SEQIF_STATE_SHIFT)
 .equ EFR32_EXCEPTION_RXPD,            (16 + 4)
 .equ EFR32_EXCEPTION_RX2TX,           (16 + 7)
 .equ EFR32_EXCEPTION_RXFRAME,         (16 + 3)
@@ -305,11 +306,11 @@ efr32_radio_seq_reset:
     movs r1, #EFR32_SYSTICK_CSR_ENABLE_AND_CLKSOURCE
     str r1, [r0]
 
-    /* Live AP3 traces identify external IRQ8 and IRQ9 as the TXWARM and TX
-     * state-service entries.  Enable only those bounded peripheral events;
-     * the M33 scheduler remains the sole source of radio-job policy. */
+    /* Enable the IRQ of every state event enabled in SEQIEN above, so each is
+     * acknowledged; the M33 scheduler remains the sole source of radio-job
+     * policy. */
     ldr r0, =EFR32_NVIC_ISER0
-    ldr r1, =(EFR32_RAC_IRQ_TXWARM | EFR32_RAC_IRQ_TX | EFR32_RAC_IRQ_TXPD | EFR32_RAC_IRQ_RX_STATES)
+    ldr r1, =EFR32_RAC_IRQ_STATE_EVENTS
     str r1, [r0]
 
     cpsie i
