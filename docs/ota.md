@@ -34,6 +34,19 @@ rebuilds a stock file from its own image: it is byte-identical for all ten stock
 is `zephyr.bin` of the build (linked at 0x16000: initial SP in RAM, reset vector in flash, checked
 by the script).
 
+## The suit's stock OTA path (docs/radio-tables.md §7.78)
+- The stock app's OTA control handler accepts any write to the characteristic with no
+  precondition: success response, it closes the link itself, then resets into AppLoader (OTA-DFU
+  boot mode) on the disconnect, with the AppLoader told to advertise the device's own name. The
+  ATT error 0x0E the host reported on 2026-10-31 is BlueZ's code for a request still pending when
+  the link dropped, not an error from the suit.
+- In QEMU, running the suit's bootloader and AppLoader, the RAM reset word is honoured only after
+  a SYSRESETREQ (EMU.RSTCAUSE.SYSREQ). AppLoader stays resident when the word is `0x00000002`.
+  **`0xF00F0202` (what this firmware writes today) sends the suit's bootloader into its own
+  install path, which fails and, after retries, boots the application again.** [I] that silicon
+  does the same. Before relying on the OTA trigger on a suit, use the AppLoader request instead
+  (or verify on silicon).
+
 ## What is not known
 - Whether the suit's bootloader accepts our file. The stock files carry no signature and the app
   distributes them to everybody, so an unsigned update is probably accepted **[I]**; the bootloader's

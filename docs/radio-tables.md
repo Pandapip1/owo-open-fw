@@ -7049,3 +7049,111 @@ T_IFS starts at the callback); the K_RX completion budget is the QEMU figure (ne
 silicon); RX launch for a connection peripheral (window widening) and the connection roles are
 not derived (their profiles count misses, QEMU only); the prepare lead (XTAL 1500 + START 300 us)
 is still the OpenISA placeholder; the hardware scanner receives nothing on silicon.
+
+### 7.78 The suit's part in QEMU; the stock image boots in the model
+
+The suit control unit is a BGM220PC22WGA2 module (DEVINFO module name; the BGM220P data sheet
+lists it with 352 KB flash and 32 KB RAM) around an EFR32BG22C222F352GM40 (DEVINFO.PART
+0x021608AE: family BG, number 22, device 2222). The explorer kit the model was built from
+carries a BGM220PC22HNA2 with 512 KB. The public part headers for C222F352 and C224F512
+differ only in `FLASH_SIZE` (0x58000 vs 0x80000). The suit's dumps live only in the
+proprietary baselines directory (`suit-backup-2026-10-31/`, analysis in
+`suit-sim-2026-10-31/`).
+
+**Board identity in the model (vendor/qemu).** Machine properties `devinfo=` and
+`userdata=` take raw page images (1 KB each, RM Table 6.1: USERDATA at 0x0FE00000, DEVINFO at
+0x0FE08000); the dual machine takes `devinfo0/1`, `userdata0/1`. Flash and RAM are sized from
+DEVINFO.MSIZE (RM 6.4.2.4) as on silicon. Without the properties the board is the old
+BGM220PC22HNA2 identity, so existing images and scripts are unchanged (qtests 98/98 apart
+from the known-flaky `seq-sleeping-follows-wfi`; RF suite 24/24; the stage-3 dual run gives
+the same ADV/SCAN_REQ/SCAN_RSP counts and the same pre-existing late start at the same
+virtual time as before the change). An access past the flash end is unmapped, so it bus
+faults: RM 4.2.1.2 and 6.6.4 say an access to an address not assigned to any device faults
+while SYSCFG_CTRL.ADDRFAULTEN is set (its default). Whether the 352-512 KB hole of a 352 KB
+part is "not assigned" is not stated in the RM; it needs a silicon read (TODO).
+
+**What the stock image needed, and what was added [F unless marked].** Booting
+`flash-a.bin` with its DEVINFO and USERDATA exposed these divergences, in order:
+
+1. NVM3 erased every page of the suit's NVM3 area at the first boot. NVM3 writes the chip
+   family into each page header, and the suit's pages carry 0x35, the RM's BG22 code for
+   SYSCFG.CHIPREV.FAMILY (RM 6.6.6.4). The model returned CHIPREV = 0. CHIPREV.FAMILY now
+   follows DEVINFO.PART through the RM's enumeration. MAJOR/MINOR stay 0 [U]: never read.
+2. Flash programming: the MSC is modelled from RM 6.3.12 and 6.8 (WREN, ADDRB with INVADDR
+   outside main flash and USERDATA, ERASEPAGE, WDATA programming that only clears bits with
+   ADDRB += 4, PAGELOCKn, MISCLOCKWORD.UDLOCKBIT and MELOCKBIT, MSC_LOCK, IF/IEN on IRQ 49).
+   [U] Erase and write complete at once: their duration and the flash read stall are
+   unmeasured.
+3. The app polls the RTCC (sleeptimer). RTCC (RM 15.3) counts at the CMU.RTCCCLKCTRL clock
+   with CNTPRESC, compares CNT against the CCn output-compare values and wraps (IF.OF), IRQ 12.
+   RM 15.3.1: RTCC writes take effect immediately. [I] IF.CCn sets on the edge where CNT
+   becomes OCVALUE (RM Figure 15.3); BURTC on silicon fires one edge later (§7.73).
+4. The app reads its battery through the IADC (single conversion of PD02, VDDX reference,
+   then scales by a resistor divider). The IADC single queue is modelled (RM 24); a pin's
+   voltage is board input, the machine property `analog=PD02=<mV>`, and VDDX is the board's
+   3.3 V. [U] Conversion time.
+5. The M33's RAC_SEQ line (IRQ 38) followed SEQIF & SEQIEN; with the stock M0+ enabling
+   SEQIEN = 0x3FFF0000 that line never cleared and the M33 never left the handler. Both M33
+   RAC lines come from RAC.IF & RAC.IEN (public RAC_S_field.py: bits 0-3 STATECHANGE,
+   STIMCMPEV, SEQLOCKUP, SEQRESETREQ; bits 16-23 SEQ): RAC_RSM carries bits 0-3, RAC_SEQ
+   carries IF.SEQ. The stock app enables only IEN bit 18 and services IRQ 38 by reading
+   RAC.IF & RAC.IEN; stock runs on silicon with SEQIEN = 0x3FFF0000 and IRQ 38 enabled, so
+   SEQIF cannot reach the M33. The open firmware does not use IRQ 38.
+6. The stock M0+ HardFaulted reading EMU.TEMP at 0x40004088: the model's M0+ saw only SEQRAM
+   and the radio window. §7.74's silicon map of the M0+ is now modelled: main SRAM at
+   0x20000000, the non-secure peripheral window 0x5xxxxxxx, and the secure window 0x4xxxxxxx
+   reading 0 without a fault (TIMER1.CNT at 0x4004C024 read 0 there). [U] Writes to the
+   secure window are dropped.
+7. RDMAILBOX: FLAGS read a constant 0 because the model had no M0+ peer. With the stock
+   sequencer running, the stock M0+ posts on mailbox 0 (MSGPTR0, IF_SET, then waits for the
+   flag to clear) and the M33 posts on mailbox 1. IF/IEN now latch; mailbox 0 drives the M33's
+   RDMAILBOX IRQ 39 (stock M33 enables IEN there) and mailbox 1 drives M0+ IRQ 23 (the stock
+   sequencer's vector table services mailbox 1 there).
+8. EMU.RSTCAUSE read 0. It now reads POR after power-up, gains SYSREQ on an M33
+   AIRCR.SYSRESETREQ and survives resets until EMU_CMD.RSTCAUSECLR (RM 12.3: read, then clear).
+   [I] Causes accumulate until cleared. The bootloader and AppLoader honour the RAM reset
+   word only with SYSREQ set.
+
+**How far the stock image gets.** Gecko bootloader -> AppLoader (which finds no request and
+jumps on) -> application. The application initialises clocks, NVM3 (its data is kept), GPIO,
+two USARTs in synchronous mode, I2C0 (devices at 7-bit 0x20 and 0x69 get no answer: the I2C
+controller and the board's devices are not modelled, so each transfer runs to its poll limit),
+the IADC battery read, RTCC, RAIL (the radio configuration and the stock M0+ sequencer
+load; the mailbox handshake completes), then runs its main loop (watchdog feed, LED GPIO,
+periodic ADC). It never advertises: the Bluetooth stack never delivers its boot event, so the
+application never creates an advertising set. [I] The stack waits on the protocol timer: it
+programs PROTIMER (CTRL, PRECNT top, START, compare channels 0 and 1, IEN 0x03001804), and the
+model's PROTIMER raises no compare or wrap flag (TODO: PROTIMER is not publicly documented).
+
+**OTA in the stock application [F, static].** The application's GATT database has the OTA
+control characteristic as a user-handled, write-only attribute with no security requirement
+(handle 66, in service handle 64). The OTA handler (Silicon Labs' OTA DFU component pattern)
+acts on any write to that handle whatever the value: it answers the write with success,
+records an OTA request, sets the AppLoader's advertised name to the device's own name and its
+OTA configuration flag 1, and closes the connection itself; on the connection-closed event it
+resets with the Bluetooth stack's system reset in OTA-DFU boot mode. There is no precondition
+(no bonding, no value check, no state). The ATT error 0x0E the host saw is BlueZ's, not the
+suit's: BlueZ completes a request that is still pending when the link drops with an error
+response and no PDU (`src/shared/att.c` `disc_att_send_op`), which `gatt-client.c`
+`process_error` turns into BT_ATT_ERROR_UNLIKELY (0x0E). The suit closes the link right after
+queueing its Write Response, so the host reports 0x0E. The follow-up scan matched the same
+address and the name "OWO..." (the AppLoader is told to advertise the device's own name), and
+service discovery then timed out; that is consistent with the suit being in AppLoader. Whether
+it was is unproven (no capture of that advertisement).
+
+**AppLoader entry in the model.** With the RSTCAUSE model:
+- RAM word 0x00000002 at 0x20000000 + AIRCR.SYSRESETREQ: bootloader -> AppLoader, which sees
+  SYSREQ and word 2 and stays (it reached its radio start-up). This is the AppLoader's own
+  request format.
+- 0xF00F0202 (`bootloader_rebootAndInstall`, BOOTLOAD) + SYSRESETREQ: the suit's bootloader
+  tries its own install, fails, counts retries in the RAM word (signature 0xABC0 plus count)
+  with reasons 0x0203/0x0204, and finally starts AppLoader with a word that is not 2, which
+  boots the application. So the open firmware's current OTA trigger (docs/ota.md, which
+  writes 0xF00F/0x0202) would not reach AppLoader on this bootloader in the model. [I] that
+  silicon does the same: the failure is the bootloader's own storage path, not a modelled
+  peripheral, but it was not run on the suit.
+- AppLoader then runs (its RAIL cycles the RAC through SHUTDOWN and back to OFF with the
+  stock sequencer) but never transmits in the model: no advertisement, so no connection, and
+  the AppLoader OTA of `stock-from-backup.gbl` could not be run in simulation. The blocker is
+  the same Bluetooth stack start-up as in the application. (Before items 6-7 the AppLoader sat
+  in SHUTDOWN, waiting for OFF, with the M0+ in HardFault.)
