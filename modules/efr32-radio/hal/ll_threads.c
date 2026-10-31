@@ -17,6 +17,8 @@
 #include "util/mayfly.h"
 #include "hal/debug.h"
 #include "ll_sw/lll.h"
+#include "lll/lll_vendor.h"
+#include "hal/ticker.h"
 #include "hal/efr32/swi.h"
 #include "hal/efr32/ll_threads.h"
 #include "hal/efr32/cntr_efr32.h"
@@ -98,6 +100,16 @@ static void (*ll_context_take(struct ll_context *ctx))(const void *arg)
 	return body;
 }
 
+/*
+ * When the worker run in progress fell due (its ticker compare or doorbell), and the earliest
+ * such instant among the runs that have pended LLL work since the LLL doorbell last rang: the
+ * LLL work a worker run requests serves the event that run prepares, so it is due when the run
+ * was (hal/efr32/ll_deadlines.h, prepare chain).
+ */
+static uint32_t worker_run_due;
+static uint32_t lll_due;
+static bool lll_due_valid;
+
 static void ll_context_thread(void *context, void *b, void *c)
 {
 	struct ll_context *ctx = context;
@@ -114,6 +126,10 @@ static void ll_context_thread(void *context, void *b, void *c)
 		 */
 		k_deadline_event_wait(&ctx->event);
 		EFR32_LL_TRACE_ONCE("%s wake", ctx->name);
+		if (ctx == &worker_ctx) {
+			worker_run_due = (uint32_t)k_current_get()->base.prio_deadline -
+					 EFR32_DL_ULL_WINDOW_CYC;
+		}
 		body = ll_context_take(ctx);
 		if (body != NULL) {
 			body(NULL);
@@ -137,26 +153,39 @@ void efr32_ll_threads_bind(void (*worker)(const void *arg), void (*lll)(const vo
 }
 
 /*
- * Doorbells: only make the context runnable. A mayfly or a re-enabled gate is due when its
- * doorbell rings; the ticker compare releases the worker itself, from the instant it was due.
+ * Doorbells: only make the context runnable. The ticker compare releases the worker itself,
+ * due at the compare; a worker doorbell (a mayfly, a re-enabled gate) is due when it rings, and
+ * its run gets the same window, since it may serve ticker work just as well. Either run must
+ * start in time for a radio event prepared EVENT_OVERHEAD_XTAL_US + EVENT_OVERHEAD_START_US
+ * ahead (EFR32_DL_ULL_WINDOW_CYC). LLL work is due when the worker run that requested it was,
+ * or when its doorbell rings if a thread requested it.
  */
 void efr32_ll_worker_doorbell_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
 	EFR32_LL_TRACE_ONCE("worker-doorbell");
-	ll_context_post(&worker_ctx, efr32_ll_start_by_now());
+	ll_context_post(&worker_ctx, (int)(k_cycle_get_32() + EFR32_DL_ULL_WINDOW_CYC));
 }
 
 void efr32_ll_lll_doorbell_isr(const void *arg)
 {
+	uint32_t due = k_cycle_get_32();
+	unsigned int key;
+
 	ARG_UNUSED(arg);
 	EFR32_LL_TRACE_ONCE("lll-doorbell");
-	ll_context_post(&lll_ctx, efr32_ll_start_by_now());
+	key = irq_lock();
+	if (lll_due_valid) {
+		due = lll_due;
+		lll_due_valid = false;
+	}
+	irq_unlock(key);
+	ll_context_post(&lll_ctx, (int)(due + EFR32_DL_LLL_WINDOW_CYC));
 }
 
 void efr32_ll_worker_release_due(uint32_t due)
 {
-	ll_context_post(&worker_ctx, efr32_ll_start_by(due));
+	ll_context_post(&worker_ctx, (int)(due + EFR32_DL_ULL_WINDOW_CYC));
 }
 
 static struct ll_context *callee_context(uint8_t callee_id)
@@ -223,6 +252,15 @@ void mayfly_pend(uint8_t caller_id, uint8_t callee_id)
 	EFR32_LL_TRACE_ONCE("mayfly-pend caller=%u callee=%u", caller_id, callee_id);
 	if (callee_context(callee_id) == &lll_ctx) {
 		EFR32_LL_TRACE_ONCE("mayfly-pend-lll caller=%u", caller_id);
+		if (!k_is_in_isr() && k_current_get() == efr32_ull_worker_thread) {
+			unsigned int key = irq_lock();
+
+			if (!lll_due_valid || (int32_t)(worker_run_due - lll_due) < 0) {
+				lll_due = worker_run_due;
+				lll_due_valid = true;
+			}
+			irq_unlock(key);
+		}
 		hal_swi_lll_pend();
 	} else {
 		hal_swi_worker_pend();
@@ -271,9 +309,10 @@ bool efr32_ll_threads_stop(void)
 #if defined(CONFIG_EFR32_RADIO_ADMISSION)
 /*
  * The LLL context runs at the radio jobs' priority, so its runs are admitted with them (Kconfig
- * EFR32_RADIO_WCET_LLL_NS, measured). The ULL worker has no budget: no admitted work runs below
- * it, and its start-by deadline is an ordering key with the radio's tolerance rather than a
- * requirement of the controller, so it stays under the run-time start check only.
+ * EFR32_RADIO_WCET_LLL_NS, measured). The ULL worker is not admitted: its measured run
+ * (EFR32_RADIO_WCET_ULL_NS) is wall time that includes the radio level preempting it, which
+ * admission already counts as that level's own demand, so as a budget it would count that work
+ * twice. Its start-by deadline (EFR32_DL_ULL_WINDOW_CYC) is checked when it starts.
  */
 static int ll_threads_budgets_init(void)
 {

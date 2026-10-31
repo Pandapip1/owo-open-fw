@@ -10,7 +10,7 @@
 #
 # Usage (TIMER1, PRS async channels 9-11 and their TIMER1 consumers must be
 # unused by the firmware under test):
-#   openocd -f interface/jlink.cfg -c 'transport select swd' \
+#   openocd -f interface/jlink.cfg -c 'adapter serial 000440200548' -c 'transport select swd' \
 #     -f target/silabs/xg21.cfg -f scripts/bg22-tifs-probe.tcl \
 #     -c init -c tifs_setup -c 'tifs_watch 30000' -c shutdown
 # Each "C <cc1> <cc2>" line is a new capture pair, in TIMER1 ticks. TIMER1

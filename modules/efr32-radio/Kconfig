@@ -130,86 +130,275 @@ config EFR32_RADIO_QEMU_TIFS
 
 config EFR32_RADIO_ADMISSION
 	bool "Admit radio work against its execution budgets"
+	default y if EFR32_RADIO_TIMING_SILICON
 	select SCHED_DEADLINE_ADMISSION
 	help
 	  Declare the worst-case execution time of each radio job and of the
-	  LLL context (k_deadline_event_budget_set()), admit every timed release
-	  when it is armed (k_deadline_event_admit_plan()) and let the kernel
-	  check every other release when it is posted. An infeasible release is
-	  reported as K_DEADLINE_MISS_UNSAT and shuts the radio down like a
-	  missed deadline (hal/radio.c).
+	  LLL and ULL contexts (k_deadline_event_budget_set(), per publication
+	  for the completion job), admit every timed release when it is armed
+	  (k_deadline_event_admit_plan()) and let the kernel check every other
+	  release when it is posted. An infeasible release is reported as
+	  K_DEADLINE_MISS_UNSAT and shuts the radio down like a missed deadline
+	  (hal/radio.c).
 
-	  Off by default: with the measured budgets, the one-interrupt allowance
-	  and the start-by deadlines of EFR32_LL_START_TOLERANCE_CYCLES (61 us
-	  after a job falls due), the first radio completion is already
-	  infeasible: in QEMU 89.4 us of work is ahead of a 61 us window (the
-	  39.4 us interrupt allowance and the 50 us QEMU TIFS placeholder), and
-	  a completion released while an LLL prepare runs has up to 219 us ahead.
-	  Admission needs start-by deadlines derived from what each job must
-	  achieve, not one tolerance for all.
+	  Every start-by deadline is derived from the Bluetooth Core
+	  Specification and the measured times below
+	  (include/hal/efr32/ll_deadlines.h, docs/radio-tables.md 7.77).
 
-if EFR32_RADIO_ADMISSION
+	  On by default with silicon's times, where the job set is feasible.
+	  Off by default with the QEMU model's: there the turnaround deadlines
+	  are infeasible by analysis: the model's longest interrupt, 72.4 us,
+	  exceeds both the ADV_IND completion's window (46.6 us after its
+	  post) and the QEMU TIFS turnaround's (61.9 us after a release the
+	  150 us seam delay leaves too close to arm early), so admission would
+	  stop the radio at the first turnaround. Every start is still checked
+	  at run time.
 
-# Budgets: the longest run (k_deadline_event_wait() to the next wait) of each
-# job, CONFIG_SCHED_DEADLINE_STATS on silicon (BGM220 explorer kit, stage 3,
-# scheduler clock 33554432 Hz from HFXO via TIMER0), host active scanning, four
-# runs of 60 s (three from boot, one after zeroing the maxima at steady state).
+choice EFR32_RADIO_TIMING
+	prompt "Platform the measured times come from"
+	default EFR32_RADIO_TIMING_SILICON
+	help
+	  Every budget and path below is measured on the platform that runs
+	  the image. QEMU (vendor/qemu, per-core clocks, the M33 at a flat
+	  1.84 cycles per instruction) runs this firmware's paths at other
+	  speeds than silicon, slower for most (docs/radio-tables.md 7.77), so
+	  its images declare its own measurements.
+
+config EFR32_RADIO_TIMING_SILICON
+	bool "Silicon (BG22)"
+
+config EFR32_RADIO_TIMING_QEMU
+	bool "The QEMU model"
+
+endchoice
+
+# Measured times. Silicon: BGM220 explorer kit (BG22), stage 3 (tests/radio-port, hardware
+# configuration) with a host actively scanning, admission on, maxima over 120 s of steady state
+# (after zeroing them 20 s after boot) unless stated. QEMU: build/qemu-new, efr32bg22-dual,
+# -icount shift=3, admission on, 120 s wall (280-880 s virtual) of each pair: QEMU-configuration
+# advertiser and active scanner, hardware-configuration advertiser and scanner, and the mixed
+# pair. Runs are CONFIG_SCHED_DEADLINE_STATS (one k_deadline_event_wait() return to the next
+# call, in scheduler-clock cycles at 33554432 Hz), paths inside a run are scheduler-clock
+# timestamps from the run's start (scratch probes, not committed). Budgets are the longest run
+# seen and paths the longest path seen; nothing is added to them.
 
 config EFR32_RADIO_WCET_TX_LAUNCH_NS
 	int "TX launch job budget (ns)"
-	default 12400
+	default 29000 if EFR32_RADIO_TIMING_QEMU
+	default 29500
 	help
-	  Measured: 415 cycles (12.4 us) in all four runs.
+	  Longest run of the TX launch job, its TXEN hold included. Silicon
+	  27.9 us (29.5 us with a longer hold); QEMU 29.0 us.
+
+config EFR32_RADIO_TX_LAUNCH_PRE_NS
+	int "TX launch: start to TXEN hold (ns)"
+	default 16600 if EFR32_RADIO_TIMING_QEMU
+	default 12000
+	help
+	  Longest path from the TX launch job's start to its TXEN hold (TX
+	  FIFO publish, pre-TX handshake, mapping the instant): silicon
+	  12.0 us, QEMU 16.6 us.
+
+config EFR32_RADIO_TX_LAUNCH_HOLD_LATE_NS
+	int "TX launch: instant to TXEN (ns)"
+	default 680 if EFR32_RADIO_TIMING_QEMU
+	default 890
+	help
+	  Longest time from the held instant to just after the TXEN store
+	  (TIMER0.CNT read after the store): silicon 0.89 us, QEMU 0.68 us.
+
+config EFR32_RADIO_SPIN_EXIT_NS
+	int "Not-before wait exit to job start (ns)"
+	default 36300 if EFR32_RADIO_TIMING_QEMU
+	default 5800
+	help
+	  Longest time from a TX launch's not-before bound to its start when
+	  it was released before the bound (k_deadline_event_post_at()):
+	  silicon 5.8 us, QEMU 36.3 us.
 
 config EFR32_RADIO_WCET_RX_LAUNCH_NS
 	int "RX launch job budget (ns)"
-	default 24800
+	default 5100 if EFR32_RADIO_TIMING_QEMU
+	default 7400
 	help
-	  PLACEHOLDER, unmeasured: stage 3 never releases the RX launch job.
-	  Twice the measured TX launch run; the RX path writes fewer registers.
+	  Silicon: tests/radio-rx-port (passive scanner, hardware path) on
+	  the explorer kit, 60 s from boot, about 760 launches, 7.4 us (the
+	  advertiser never launches RX). QEMU 5.1 us.
 
-config EFR32_RADIO_WCET_COMPLETION_NS
-	int "Completion job budget (ns)"
-	default 270100
+config EFR32_RADIO_WCET_COMPLETION_TX_RX_NS
+	int "Completion budget: TX followed by RX (ns)"
+	default 86800 if EFR32_RADIO_TIMING_QEMU
+	default 46400
 	help
-	  Measured: run maxima 1469 to 9063 cycles (43.8 to 270.1 us) over the
-	  four runs; the budget is the largest.
+	  Completion of a transmission the sequencer turns to RX (the LLL's
+	  isr_tx: the ADV_IND of a scannable advertiser): silicon 46.4 us,
+	  QEMU 86.8 us (hardware configuration).
+
+config EFR32_RADIO_WCET_COMPLETION_RX_TX_NS
+	int "Completion budget: RX with a response armed (ns)"
+	default 45600 if EFR32_RADIO_TIMING_QEMU
+	default 38900
+	help
+	  Completion of a frame received in a window armed for a response
+	  (the LLL's isr_rx for a SCAN_REQ): silicon 38.9 us, QEMU 45.6 us.
+
+config EFR32_RADIO_WCET_COMPLETION_RX_NS
+	int "Completion budget: other RX (ns)"
+	default 129300
+	help
+	  Completion of a frame received without a response armed (a
+	  scanner's reports, an advertiser's foreign frames). QEMU 129.3 us
+	  (QEMU-configuration active scanner; 29.7 us hardware
+	  configuration). Not observed on silicon: the hardware scanner
+	  receives nothing there yet and the advertiser saw no foreign frame
+	  in 120 s, so the QEMU figure stands in.
+
+config EFR32_RADIO_WCET_COMPLETION_TX_NS
+	int "Completion budget: TX not followed by RX (ns)"
+	default 186800 if EFR32_RADIO_TIMING_QEMU
+	default 27100
+	help
+	  Completion of a transmission that ends its exchange (the LLL's
+	  isr_done after a SCAN_RSP; in QEMU-configuration images every TX,
+	  isr_tx included): silicon 27.1 us, QEMU 186.8 us.
+
+config EFR32_RADIO_WCET_COMPLETION_ABORT_NS
+	int "Completion budget: abort (ns)"
+	default 91800 if EFR32_RADIO_TIMING_QEMU
+	default 267500
+	help
+	  Cleanup callback of a radio_disable() (no-response timeout, scan
+	  window end, event close): silicon 267.5 us, QEMU 91.8 us.
 
 config EFR32_RADIO_WCET_LLL_NS
 	int "LLL context budget (ns)"
-	default 179900
+	default 266900 if EFR32_RADIO_TIMING_QEMU
+	default 249100
 	help
-	  Measured: run maxima 5974 to 6038 cycles (178.0 to 179.9 us); the LLL
-	  prepares (lll_adv_prepare()) dominate.
+	  The LLL prepares dominate, admission of the launch they arm
+	  included: silicon 249.1 us, QEMU 266.9 us.
+
+config EFR32_RADIO_WCET_ULL_NS
+	int "ULL worker budget (ns)"
+	default 439600 if EFR32_RADIO_TIMING_QEMU
+	default 487800
+	help
+	  Silicon 487.8 us, QEMU 439.6 us (wall time, preemption by the
+	  radio level included). Bounds the prepare chain's ULL step; not an
+	  admission budget (hal/ll_threads.c).
 
 config EFR32_RADIO_WCET_QEMU_TIFS_NS
 	int "QEMU TIFS job budget (ns)"
 	depends on EFR32_RADIO_QEMU_TIFS
-	default 50000
+	default 152700
 	help
-	  PLACEHOLDER, unmeasured on silicon: the job exists only in QEMU
-	  builds.
+	  QEMU-only job, measured in QEMU: 152.7 us (the turnaround that
+	  also arms the no-response timeout).
+
+config EFR32_RADIO_QEMU_TIFS_PRE_NS
+	int "QEMU TIFS job: start to command hold (ns)"
+	depends on EFR32_RADIO_QEMU_TIFS
+	default 36400
+	help
+	  Longest path from the QEMU TIFS job's start to its RXEN/TXEN hold,
+	  measured in QEMU: 36.4 us.
+
+config EFR32_RADIO_QEMU_TIFS_HOLD_LATE_NS
+	int "QEMU TIFS job: instant to command (ns)"
+	depends on EFR32_RADIO_QEMU_TIFS
+	default 770
+	help
+	  Longest time from the held instant to just after the RXEN/TXEN
+	  store, measured in QEMU: 0.77 us.
 
 config EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS
 	int "QEMU RX descriptor drain budget (ns)"
 	depends on EFR32_RADIO_QEMU_RX_DESCRIPTOR
-	default 50000
+	default 264200
 	help
-	  PLACEHOLDER, unmeasured on silicon: the job exists only in QEMU
-	  builds.
+	  One descriptor record per run, measured in QEMU: 264.2 us (wall
+	  time, preemption by the radio level included). Bounds the path to
+	  the RX completion it gates; not an admission budget.
 
-endif # EFR32_RADIO_ADMISSION
+config EFR32_RADIO_COMPLETION_TO_PENDING_NS
+	int "Completion: start to RX->TX PENDING (ns)"
+	default 54400 if EFR32_RADIO_TIMING_QEMU
+	default 12800
+	help
+	  Longest path from a TX-then-RX completion's start to the store that
+	  marks the RX->TX window PENDING (radio_tmr_hcto_configure()):
+	  silicon 12.8 us, QEMU 54.4 us.
+
+config EFR32_RADIO_COMPLETION_TO_RESPOND_NS
+	int "Completion: start to RESPOND (ns)"
+	default 43200 if EFR32_RADIO_TIMING_QEMU
+	default 24700
+	help
+	  Longest path from an RX-with-response completion's start to the
+	  RESPOND store (radio_pkt_tx_set()): silicon 24.7 us, QEMU 43.2 us.
+
+config EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS
+	int "TX frame end to its completion's post, unblocked (ns)"
+	default 11540
+	help
+	  Silicon: FRAMESENT to the RAC leaving TX at most 1.0 us (PRS into
+	  TIMER1, docs/radio-tables.md 7.72); TX exit to FRC interrupt entry
+	  RAC.STIMER 5 ticks (1.04 us) at entry in every sample; entry to the
+	  completion's post 737 DWT cycles (9.5 us). An interrupt that delays
+	  the entry is EFR32_RADIO_INTERRUPT_BLOCKING_NS more. Not measured in
+	  QEMU: the silicon figure stands in.
+
+config EFR32_RADIO_SEQ_RESPOND_TO_TX_READY_NS
+	int "RESPOND store to the sequencer's RX2TX hold (ns)"
+	default 29400
+	help
+	  Silicon: from the M33's RESPOND store to the sequencer reaching its
+	  RX2TX hold with the PA up, RAC.STIMER 141 ticks (29.4 us) in all 44
+	  responses of a 60 s run (the sequencer's decision stamp 3 ticks
+	  after the store, PA up 138 ticks after that; QEMU models 137).
+
+config EFR32_RADIO_TIFS_SPREAD_NS
+	int "Measured spread of our T_IFS (ns)"
+	default 800
+	help
+	  Silicon: EOF -> SCAN_RSP SYNCSENT 180.1 to 180.9 us with the current
+	  hold (docs/radio-tables.md 7.71, PRS into TIMER1): the part of the
+	  active clock's 2 us our turnaround already uses.
+
+config EFR32_RADIO_INTERRUPT_BLOCKING_NS
+	int "One interrupt ahead of any job (ns)"
+	default 72400 if EFR32_RADIO_TIMING_QEMU
+	default 58100
+	help
+	  The longest interrupt, outermost and nested ones included
+	  (CONFIG_TRACING_USER enter/exit hooks), in steady state: silicon
+	  58.1 us, QEMU 72.4 us; admission's checks in the interrupts that
+	  release jobs are part of it (39.4 us on silicon without them).
+	  Silicon's boot maximum, 95.1 us, is before the radio starts.
+	  Admission's blocking allowance, and the delay one interrupt can add
+	  between a frame's end and its completion's post.
+
+config EFR32_RADIO_LLL_DOORBELL_LATENCY_NS
+	int "LLL doorbell to LLL context start (ns)"
+	default 130200 if EFR32_RADIO_TIMING_QEMU
+	default 56900
+	help
+	  The LLL doorbell interrupt and the LLL context's longest
+	  release-to-start. Silicon: 13.0 us (DWT) and 43.9 us. QEMU: the
+	  doorbell taken as the longest interrupt, 72.4 us, and 57.8 us.
 
 config EFR32_RADIO_WAKE_LATENCY_NS
 	int "Clock-event wake to job dispatch (ns)"
 	default 55700
 	help
-	  Longest time from a scheduler clock event falling due to the dispatch
-	  of the job it releases. Measured bounds, summed: the longest
-	  steady-state clock-event interrupt on silicon (TIMER0, 3029 DWT cycles
-	  at 76.8 MHz, 39.4 us) and the longest release-to-start delay of the TX
-	  launch job (546 scheduler clock cycles, 16.3 us). Admission models a
-	  timed release (launch, QEMU TIFS) as starting this late.
+	  A timed command job (TX launch, QEMU TIFS turnaround) is armed this
+	  much before its not-before bound; admission models any other timed
+	  release as starting this late. The steady-state TIMER0 interrupt
+	  without admission (39.4 us) and the TX launch's longest
+	  release-to-start (16.3 us), silicon. With admission on, every TX
+	  launch on silicon (and in QEMU) was dispatched before its bound: the
+	  expiry is delivered within 18.3 us (QEMU 31.9 us) and the job starts
+	  at most EFR32_RADIO_SPIN_EXIT_NS after the bound.
 
 config EFR32_RADIO_TEST_OVERRUN_US
 	int "Test only: one injected TX launch job overrun (us)"
@@ -239,10 +428,17 @@ choice SCHED_DEADLINE_MISS_POLICY
 	default SCHED_DEADLINE_MISS_CUSTOM if BT_LLL_VENDOR_EFR32
 endchoice
 
-# Interference ahead of every admitted job: one interrupt. The longest measured in steady
-# state on silicon is the TIMER0 scheduler clock-event interrupt, 3029 DWT cycles at 76.8 MHz
-# (39.4 us; BURTC 34.2, FRC 20.1, doorbells 13.3). The 90.6 us TIMER0 maximum occurs only
-# during boot. Lower-priority non-preemptible sections cannot delay a meta-IRQ job released
-# from an interrupt or from a running thread: the release itself runs after them.
+# A clock event delivered later than this is a fault of the scheduler clock service (the radio's
+# own work is checked against its spec-derived start-by deadlines, hal/efr32/ll_deadlines.h):
+# the deep-sleep provider's grid, one 32768 Hz cycle (30518 ns; BURTC COMP is programmed one
+# count before the deadline's tick, docs/radio-tables.md 7.73), plus one interrupt the delivering
+# interrupt may wait behind (EFR32_RADIO_INTERRUPT_BLOCKING_NS: 58100 silicon, 72400 QEMU).
+configdefault CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS
+	default 102918 if EFR32_RADIO_TIMING_QEMU
+	default 88618 if BT_LLL_VENDOR_EFR32
+
+# Interference ahead of every admitted job: one interrupt (EFR32_RADIO_INTERRUPT_BLOCKING_NS,
+# measured). Lower-priority non-preemptible sections cannot delay a meta-IRQ job released from
+# an interrupt or from a running thread: the release itself runs after them.
 configdefault SCHED_DEADLINE_ADMISSION_BLOCKING_NS
-	default 39400 if EFR32_RADIO_ADMISSION
+	default EFR32_RADIO_INTERRUPT_BLOCKING_NS if EFR32_RADIO_ADMISSION

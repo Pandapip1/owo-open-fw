@@ -40,6 +40,7 @@ fi
 common_args=(
   -s "$scripts"
   -f interface/jlink.cfg
+  -c 'adapter serial 000440200548'
   -c 'transport select swd'
   -f target/silabs/xg21.cfg
   -f "$helpers"

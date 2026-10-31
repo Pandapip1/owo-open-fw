@@ -10,6 +10,8 @@
  * explained in docs/radio-tables.md and covered by simulator tests.
  */
 
+#include "hal/efr32/seq_abi.h"
+
 .syntax unified
 .cpu cortex-m0plus
 .thumb
@@ -1706,15 +1708,12 @@ efr32_seq_trace_count:
 /* Diagnostic only: RAC.STIMER into word r0 of the RX2TX timing record
  * (entry, decision, locked, PA up).  Clobbers r0-r1. */
 .equ EFR32_SEQ_TRACE_RX2TX_TIMES,     0x00004f40
-/* RAC.STIMER runs at ~4.8 ticks/us (measured against BURTC, SS7.66).  The
- * hold is matched to the stock stack on silicon (SS7.71): with a 140 us hold
- * our SCAN_RSP sync word went out 185.2 us after the received frame's
- * MODEM EOF, stock's 180.8 us, both PRS-timestamped in TIMER1.  The chain
- * delays from those events to the antenna are the same silicon in both, so
- * matching stock's interval matches its on-air T_IFS. */
-.equ EFR32_SEQ_RAC_STIMER_TICKS_PER_10US, 48
-.equ EFR32_SEQ_RX2TX_TX_AT_100NS,      1356
-.equ EFR32_SEQ_RX2TX_TX_AT_STIMER, (EFR32_SEQ_RX2TX_TX_AT_100NS * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US / 100)
+/* The RX2TX hold (EFR32_SEQ_RX2TX_TX_AT_STIMER) and the RAC.STIMER rate are in
+ * include/hal/efr32/seq_abi.h, shared with the M33 HAL, which derives its
+ * RESPOND deadline from them.  The hold is matched to the stock stack on
+ * silicon (SS7.71); the chain delays from MODEM EOF and SYNCSENT to the
+ * antenna are the same silicon in both, so matching stock's interval
+ * matches its on-air T_IFS. */
 .equ EFR32_SEQ_TRACE_RESPONSE_PENDING, 0x00004f34 /* diagnostic only */
 .equ EFR32_SEQ_TRACE_RESPONSE_TX_AT,   0x00004f38 /* diagnostic only */
 .equ EFR32_RAC_STIMER,                0xa8020030

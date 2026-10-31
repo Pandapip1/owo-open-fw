@@ -17,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/irq.h>
+#include <zephyr/kernel/clock_event.h>
 #include <zephyr/kernel/deadline_miss.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
@@ -27,6 +28,8 @@
 #include "hal/cntr.h"
 #include "hal/efr32/cntr_efr32.h"
 #include "hal/efr32/ll_threads.h"
+#include "hal/efr32/ll_deadlines.h"
+#include "hal/efr32/seq_abi.h"
 #include "hal/efr32/ticker.h"
 #include "abort_lifecycle.h"
 #include "completion_dispatch.h"
@@ -44,6 +47,8 @@
 #include "timer_state.h"
 
 #include "util/mem.h"
+#include "util/memq.h"
+#include "util/mayfly.h"
 #include "common/rpa.h"
 
 #include "lll/pdu_vendor.h"
@@ -52,13 +57,15 @@
 /*
  * Marks a function that cannot be implemented without the radio register map: logs once. With
  * immediate logging a printk blocks its caller for the whole line at the console baud rate
- * (milliseconds), and these run in lower-link-layer contexts that have start-by deadlines: print
- * only when the console is deferred.
+ * (milliseconds); even deferred, formatting it took 40-150 us in QEMU, and the lower-link-layer
+ * contexts and radio jobs (mayfly_is_running()) have start-by deadlines that do not include it:
+ * print only from other threads, with the console deferred.
  */
 #define EFR32_RADIO_TODO(tag) \
 	do { \
 		static bool efr32_once_; \
-		if (!IS_ENABLED(CONFIG_LOG_MODE_IMMEDIATE) && !efr32_once_) { \
+		if (!IS_ENABLED(CONFIG_LOG_MODE_IMMEDIATE) && !efr32_once_ && \
+		    !k_is_in_isr() && !mayfly_is_running()) { \
 			efr32_once_ = true; \
 			printk("efr32-radio: %s needs %s (docs/radio-tables.md)\n", __func__, tag); \
 		} \
@@ -159,6 +166,62 @@ static atomic_t efr32_radio_halted;
 /* Generation mailboxes pair the coalescing event latch with its expiry. */
 static atomic_t efr32_radio_tx_pending_generation;
 static atomic_t efr32_radio_rx_pending_generation;
+/* Instant the pending TX launch holds TXEN to. */
+static atomic_t efr32_radio_tx_instant;
+/*
+ * Whether the current radio event began with a scheduled TX (an advertising event) rather than a
+ * receive window, and the TXEN of its latest packet started by radio_tx_enable(): the work that
+ * may start the next ADV_IND is due BT_ADV_PDU_SPACING_MAX_US after it.
+ */
+static bool efr32_radio_event_tx;
+static uint32_t efr32_radio_last_txen;
+static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns);
+
+/*
+ * Hold a timed command to @p instant (interrupts locked by the caller). One read of the
+ * scheduler clock's logical time takes about 2 us in QEMU, the whole active clock tolerance, and
+ * one read through the active provider about 1.1 us on silicon (it waits for TIMER0's
+ * SYNCBUSY), so the instant is mapped once onto the active provider's count and TIMER0.CNT, that
+ * count, is polled directly: the hold ends at most two counter loads after the instant (Kconfig
+ * *_HOLD_LATE_NS, measured with the command store), and never before it, as the mapping rounds
+ * up. efr32_radio_hold_init() checks that TIMER0 is the active provider.
+ */
+#define EFR32_HOLD_TIMER ((TIMER_TypeDef *)DT_REG_ADDR(DT_NODELABEL(timer0)))
+static bool efr32_radio_hold_direct;
+
+static inline void efr32_radio_hold_until(uint32_t instant)
+{
+	uint32_t count;
+
+	if (k_clock_event_sched_active_target(instant, &count) != 0) {
+		while ((int32_t)(k_cycle_get_32() - instant) < 0) {
+		}
+	} else if (efr32_radio_hold_direct) {
+		while ((int32_t)(EFR32_HOLD_TIMER->CNT - count) < 0) {
+		}
+	} else {
+		while ((int32_t)(k_clock_event_sched_active_count() - count) < 0) {
+		}
+	}
+}
+
+/* TIMER0.CNT is the active provider's count when a direct read falls between two of its reads. */
+static void efr32_radio_hold_init(void)
+{
+	unsigned int key = irq_lock();
+	uint32_t before = k_clock_event_sched_active_count();
+	uint32_t direct = EFR32_HOLD_TIMER->CNT;
+	uint32_t after = k_clock_event_sched_active_count();
+
+	irq_unlock(key);
+	efr32_radio_hold_direct = (direct - before) <= (after - before);
+}/* The longest completion kind: registers the completion event for admission. */
+#define EFR32_RADIO_WCET_COMPLETION_MAX_NS \
+	MAX(MAX(MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS, \
+		    CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS), \
+		MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS, \
+		    CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS)), \
+	    CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS)
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_completion_event);
@@ -187,9 +250,38 @@ static bool efr32_qemu_tifs_rx_to_tx_staging;
 K_DEADLINE_EVENT_DEFINE(efr32_qemu_tifs_event);
 K_MUTEX_DEFINE(efr32_qemu_tifs_op_lock);
 
-static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation)
+/* Instant the pending TIFS turnaround holds its RXEN/TXEN to. */
+static uint32_t efr32_qemu_tifs_instant;
+
+/*
+ * Arm the job @p delay_us from now. A turnaround (RXEN or TXEN at T_IFS) is a timed command held
+ * to the active clock's 2 us (Vol 6 Part B 4.2.1) around the seam's T_IFS instant; the
+ * no-response timeout serves only the event's next packet, which follows through radio_disable(),
+ * an FRC abort and the abort completion.
+ */
+static void efr32_qemu_tifs_schedule(uint32_t delay_us, uint32_t generation, bool turnaround)
 {
-	cntr_qemu_tifs_arm_after_us(delay_us, generation);
+	uint32_t now = k_cycle_get_32();
+	uint32_t instant = now + EFR32_DL_SPEC_CYC(delay_us);
+
+	if (turnaround) {
+		efr32_qemu_tifs_instant = instant;
+		cntr_qemu_tifs_arm_at(efr32_dl_hold_not_before(instant,
+							       CONFIG_EFR32_RADIO_QEMU_TIFS_PRE_NS),
+				      efr32_dl_hold_start_by(instant,
+							     CONFIG_EFR32_RADIO_QEMU_TIFS_PRE_NS,
+							     BT_ACTIVE_CLOCK_JITTER_US,
+							     CONFIG_EFR32_RADIO_QEMU_TIFS_HOLD_LATE_NS),
+				      generation, true);
+	} else {
+		cntr_qemu_tifs_arm_at(instant,
+				      efr32_radio_next_start_by(now,
+					      CONFIG_EFR32_RADIO_WCET_QEMU_TIFS_NS +
+					      /* the FRC interrupt and one interrupt ahead of it */
+					      2U * CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS +
+					      CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS),
+				      generation, false);
+	}
 }
 
 static void efr32_qemu_tifs_cancel(void)
@@ -229,7 +321,7 @@ static void efr32_qemu_tifs_arm(uint32_t hcto_us)
 	generation = efr32_qemu_tifs_state_arm(&efr32_qemu_tifs, hcto_us);
 	irq_unlock(key);
 
-	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation);
+	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation, true);
 
 	/* If reset/teardown raced the start, do not resurrect the cancelled job. */
 	key = irq_lock();
@@ -244,7 +336,8 @@ static void efr32_qemu_tifs_arm(uint32_t hcto_us)
 static void efr32_qemu_tifs_begin_rx_to_tx(void);
 static void efr32_qemu_tifs_arm_staged_rx_to_tx(void);
 static bool efr32_qemu_tifs_tx_staged(void);
-static void efr32_qemu_tifs_start_staged_tx(void);
+static void efr32_qemu_tifs_start_staged_tx(uint32_t instant);
+static void efr32_qemu_tifs_start_rx(uint32_t instant);
 
 static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 {
@@ -277,21 +370,19 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 			key = irq_lock();
 			bool claimed = efr32_qemu_tifs_state_claim_rx(
 				&efr32_qemu_tifs, generation);
-			irq_unlock(key);
 			if (!claimed) {
+				irq_unlock(key);
 				k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 				continue;
 			}
 
 			/* radio_pkt_rx_set() was completed before HCTO was configured. */
 			if (radio_is_idle()) {
-				radio_rx_enable();
+				efr32_qemu_tifs_start_rx(efr32_qemu_tifs_instant);
 			} else {
-				/* Do not hold the cancellation lock while waiting on RAC. */
-				key = irq_lock();
 				efr32_qemu_tifs_state_cancel(&efr32_qemu_tifs);
-				irq_unlock(key);
 			}
+			irq_unlock(key);
 			k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 
 			/* Arm the same persistent job for the bounded no-response path. */
@@ -299,7 +390,7 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 			if (efr32_qemu_tifs.phase == EFR32_QEMU_TIFS_WAIT_HCTO &&
 			    efr32_qemu_tifs.generation == generation) {
 				irq_unlock(key);
-				efr32_qemu_tifs_schedule(hcto_us, generation);
+				efr32_qemu_tifs_schedule(hcto_us, generation, false);
 			} else {
 				irq_unlock(key);
 			}
@@ -309,10 +400,10 @@ static void efr32_qemu_tifs_job(void *a, void *b, void *c)
 			key = irq_lock();
 			bool claimed = efr32_qemu_tifs_state_claim_tx(
 				&efr32_qemu_tifs, generation);
-			irq_unlock(key);
 			if (claimed && radio_is_idle() && efr32_qemu_tifs_tx_staged()) {
-				efr32_qemu_tifs_start_staged_tx();
+				efr32_qemu_tifs_start_staged_tx(efr32_qemu_tifs_instant);
 			}
+			irq_unlock(key);
 			k_mutex_unlock(&efr32_qemu_tifs_op_lock);
 		} else if (phase == EFR32_QEMU_TIFS_WAIT_HCTO) {
 			key = irq_lock();
@@ -345,7 +436,7 @@ static atomic_t efr32_hw_hcto_generation;
  * hardware builds end a silent RX window here with radio_disable(), which is
  * the interrupt-safe OpenISA abort path.
  */
-void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
+void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t not_before, int deadline)
 {
 	if (atomic_get(&efr32_radio_halted) != 0) {
 		return;
@@ -359,14 +450,14 @@ void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t deadline)
 	irq_unlock(key);
 	if (valid) {
 		/*
-		 * The clock-event expiry is this job's release; the compare target is
-		 * when the turn-around falls due. Its start-by deadline orders the
-		 * worker among equal-priority ready jobs and is checked on entry.
+		 * The clock-event expiry is this job's release, armed the wake
+		 * latency early; the job waits out its not-before bound and is
+		 * checked against its start-by deadline (efr32_qemu_tifs_schedule()).
 		 */
-		k_deadline_event_post_at(&efr32_qemu_tifs_event, deadline,
-					 efr32_ll_start_by(deadline));
+		k_deadline_event_post_at(&efr32_qemu_tifs_event, not_before, deadline);
 	}
 #else
+	ARG_UNUSED(not_before);
 	ARG_UNUSED(deadline);
 	/*
 	 * HCTO bounds the search for a frame's header, not a frame already
@@ -407,19 +498,29 @@ static inline bool efr32_qemu_rx_descriptor_pending(void);
  */
 K_DEADLINE_EVENT_DEFINE(efr32_qemu_rx_descriptor_event);
 
-/* The drain gates the RX completion, which is due as soon as it is published. */
+/*
+ * The drain gates the RX completion: after it the FRC interrupt posts the completion, whose LLL
+ * callback may start the event's next packet (efr32_radio_next_start_by()).
+ */
 static inline void efr32_qemu_rx_descriptor_release(void)
 {
 	if (atomic_get(&efr32_radio_halted) != 0) {
 		return;
 	}
-	k_deadline_event_post(&efr32_qemu_rx_descriptor_event, efr32_ll_start_by_now());
+	k_deadline_event_post(&efr32_qemu_rx_descriptor_event,
+			      efr32_radio_next_start_by(k_cycle_get_32(),
+				      CONFIG_EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS +
+				      /* the FRC interrupt and one interrupt ahead of it */
+				      2U * CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS +
+				      CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS));
 }
 static struct {
 	uint16_t descriptor_read_offset;
 	bool descriptor_crc_valid;
 } efr32_qemu_rx_descriptor;
 #endif
+
+static void efr32_radio_tx_start(bool hold, uint32_t instant);
 
 static void efr32_radio_tx_job(void *a, void *b, void *c)
 {
@@ -433,7 +534,11 @@ static void efr32_radio_tx_job(void *a, void *b, void *c)
 		generation = atomic_get(&efr32_radio_tx_pending_generation);
 		if (atomic_cas(&efr32_radio_launch_active,
 			    generation, 0)) {
-			radio_tx_enable();
+			/* TXEN is held to the event's instant: no interrupt may come between. */
+			unsigned int key = irq_lock();
+
+			efr32_radio_tx_start(true, (uint32_t)atomic_get(&efr32_radio_tx_instant));
+			irq_unlock(key);
 #if CONFIG_EFR32_RADIO_TEST_OVERRUN_US > 0
 			static bool efr32_test_overrun_done;
 
@@ -479,7 +584,8 @@ K_THREAD_DEFINE(efr32_radio_completion_job_thread,
 		EFR32_LLL_THREAD_PRIO, 0, 0);
 
 /* ISR-safe: publish only a generation and wake the pre-created job. */
-void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t deadline)
+void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t instant,
+			     uint32_t not_before, int deadline)
 {
 	if (atomic_get(&efr32_radio_halted) != 0) {
 		return;
@@ -489,12 +595,14 @@ void efr32_radio_launch_wake(uint8_t trx, uint32_t generation, uint32_t deadline
 	}
 	if (trx) {
 		atomic_set(&efr32_radio_tx_pending_generation, generation);
-		/* Compare expiry is the release; the launch falls due at the target. */
-		k_deadline_event_post(&efr32_radio_tx_event, efr32_ll_start_by(deadline));
+		atomic_set(&efr32_radio_tx_instant, (atomic_val_t)instant);
+		/* Released early by the wake latency: wait out not_before, then hold TXEN. */
+		k_deadline_event_post_at(&efr32_radio_tx_event, not_before, deadline);
 	} else {
+		ARG_UNUSED(instant);
+		ARG_UNUSED(not_before);
 		atomic_set(&efr32_radio_rx_pending_generation, generation);
-		/* The EDF key orders equal-priority ready jobs; it cannot start early. */
-		k_deadline_event_post(&efr32_radio_rx_event, efr32_ll_start_by(deadline));
+		k_deadline_event_post(&efr32_radio_rx_event, deadline);
 	}
 }
 
@@ -992,7 +1100,7 @@ static void efr32_qemu_tifs_arm_tx(void)
 	key = irq_lock();
 	generation = efr32_qemu_tifs_state_arm_tx(&efr32_qemu_tifs);
 	irq_unlock(key);
-	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation);
+	efr32_qemu_tifs_schedule(efr32_radio_timer.tifs_us, generation, true);
 
 	key = irq_lock();
 	stale = efr32_qemu_tifs.phase != EFR32_QEMU_TIFS_WAIT_TX ||
@@ -1018,10 +1126,20 @@ static bool efr32_qemu_tifs_tx_staged(void)
 		efr32_packet_stage.tx_bytes >= 2U;
 }
 
-static void efr32_qemu_tifs_start_staged_tx(void)
+/* RXEN held to @p instant (interrupts locked by the caller); the RAC is idle. */
+static void efr32_qemu_tifs_start_rx(uint32_t instant)
+{
+	efr32_packet_stage_arm(EFR32_RADIO_PACKET_RX);
+	efr32_radio_hold_until(instant);
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+}
+
+static void efr32_qemu_tifs_start_staged_tx(uint32_t instant)
 {
 	efr32_tx_fifo_publish();
 	efr32_packet_stage_arm(EFR32_RADIO_PACKET_TX);
+	efr32_radio_hold_until(instant);
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
 }
 
@@ -1814,9 +1932,16 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
  * callback, then re-enables the sources after that callback has had its
  * normal radio_status_reset() opportunity.
  */
+static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadline,
+					  uint32_t *budget);
+
 static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 						   bool abort)
 {
+	uint32_t now = k_cycle_get_32();
+	uint32_t budget;
+	int deadline;
+
 	if (atomic_get(&efr32_radio_halted) != 0) {
 		return;
 	}
@@ -1828,8 +1953,9 @@ static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 	efr32_radio_completion_work.callback = callback;
 	efr32_radio_completion_work.param = param;
 	efr32_radio_completion_work.abort = abort;
-	/* FRC completion has occurred; make the callback worker eligible now. */
-	k_deadline_event_post(&efr32_radio_completion_event, efr32_ll_start_by_now());
+	/* The kind of completion decides what the callback serves, hence its deadline and budget. */
+	efr32_radio_completion_window(abort, now, &deadline, &budget);
+	k_deadline_event_post_budget(&efr32_radio_completion_event, deadline, budget);
 }
 
 static void efr32_radio_completion_job(void *a, void *b, void *c)
@@ -2134,6 +2260,98 @@ static bool efr32_hw_tx_after_rx_requested;
 #define EFR32_SEQ_RX2TX_RESPOND 1U
 #define EFR32_SEQ_RX2TX_CANCEL 2U
 static bool efr32_hw_rx2tx_armed;
+
+#define EFR32_RAC_STIMER_OFFSET 0x030U
+#define EFR32_RAC_STIMER_MASK 0xFFFFU
+#define EFR32_RAC_STATE_RX2TX 7U
+/* RAC.STIMER ticks in @p ns, rounded up / down. */
+#define EFR32_STIMER_TICKS_CEIL(ns) \
+	DIV_ROUND_UP((uint32_t)(ns) * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US, 10000U)
+#define EFR32_STIMER_TICKS_FLOOR(ns) \
+	((uint32_t)(ns) * EFR32_SEQ_RAC_STIMER_TICKS_PER_10US / 10000U)
+/*
+ * Latest RAC.STIMER count (since RX2TX began, i.e. since the received frame's end) at which
+ * RESPOND may be written: the sequencer reaches its hold the measured RESPOND-to-TX-ready time
+ * after the write, and TX then starts at the hold, at our measured T_IFS; a later write delays
+ * TX past it, which the active clock's 2 us allows, less the spread of our T_IFS already
+ * measured on air (section 7.71).
+ */
+#define EFR32_RX2TX_RESPOND_BY_STIMER \
+	(EFR32_SEQ_RX2TX_TX_AT_STIMER - \
+	 EFR32_STIMER_TICKS_CEIL(CONFIG_EFR32_RADIO_SEQ_RESPOND_TO_TX_READY_NS) + \
+	 EFR32_STIMER_TICKS_FLOOR(BT_ACTIVE_CLOCK_JITTER_US * 1000U - \
+				  CONFIG_EFR32_RADIO_TIFS_SPREAD_NS))
+BUILD_ASSERT(CONFIG_EFR32_RADIO_TIFS_SPREAD_NS < BT_ACTIVE_CLOCK_JITTER_US * 1000U,
+	     "the measured T_IFS spread already exceeds the active clock's tolerance");
+
+/*
+ * Start-by of work whose output is the next packet of the current radio event, @p path_ns from
+ * its start to that packet's TXEN or RXEN at the latest (hal/efr32/ll_deadlines.h).
+ */
+static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns)
+{
+	return efr32_radio_event_tx ? efr32_dl_adv_next_start_by(efr32_radio_last_txen, path_ns) :
+				      efr32_dl_scan_next_start_by(now, path_ns);
+}
+
+/*
+ * Deadline and budget of the completion published at @p now:
+ * - TX whose RX follows (ADV_IND of a scannable advertiser): mark the RX->TX window before the
+ *   earliest SCAN_REQ is recognised (efr32_dl_completion_tx_rx_start_by()).
+ * - RX with a response armed, the RAC holding in RX2TX: write RESPOND by
+ *   EFR32_RX2TX_RESPOND_BY_STIMER, read against RAC.STIMER, which counts from the frame's end.
+ * - Every other kind (RX without response, last TX, abort) may start the event's next packet.
+ * The QEMU TIFS seam starts its T_IFS delay only after the callback, so with it neither
+ * turnaround's callback has a T_IFS deadline of its own: they take the last rule
+ * (docs/radio-tables.md 7.77).
+ */
+static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadline,
+					  uint32_t *budget)
+{
+	enum efr32_radio_packet_direction direction =
+		efr32_packet_stage.lifecycle.completion_direction;
+	bool rx_follows = efr32_hw_rx_after_tx_pending;
+	uint32_t wcet_ns;
+
+	if (abort) {
+		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS;
+	} else if (direction == EFR32_RADIO_PACKET_TX && rx_follows &&
+		   !IS_ENABLED(CONFIG_EFR32_RADIO_QEMU_TIFS)) {
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS);
+		*deadline = efr32_dl_completion_tx_rx_start_by(now);
+		return;
+	} else if (direction == EFR32_RADIO_PACKET_TX) {
+		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS;
+	} else if (efr32_hw_rx2tx_armed) {
+		uint32_t state = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+				  EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+		uint32_t stimer = *radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STIMER_OFFSET) &
+				  EFR32_RAC_STIMER_MASK;
+		uint32_t state_after = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+					EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS);
+		if (state == EFR32_RAC_STATE_RX2TX && state_after == EFR32_RAC_STATE_RX2TX) {
+			int32_t ticks = (int32_t)EFR32_RX2TX_RESPOND_BY_STIMER - (int32_t)stimer;
+			/* Rounded towards earlier either way. */
+			uint32_t left = (ticks >= 0) ?
+				k_ns_to_cyc_floor32((uint32_t)ticks * 10000U /
+						    EFR32_SEQ_RAC_STIMER_TICKS_PER_10US) :
+				-k_ns_to_cyc_ceil32(DIV_ROUND_UP((uint32_t)-ticks * 10000U,
+						    EFR32_SEQ_RAC_STIMER_TICKS_PER_10US));
+
+			*deadline = (int)(now + left -
+					  EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_COMPLETION_TO_RESPOND_NS));
+			return;
+		}
+		/* The sequencer has left RX2TX: no response can follow this frame. */
+		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS;
+	} else {
+		wcet_ns = CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS;
+	}
+	*budget = EFR32_DL_MEAS_CYC(wcet_ns);
+	*deadline = efr32_radio_next_start_by(now, wcet_ns);
+}
 /*
  * Bounds a silent RX window: the BURTC alarm the QEMU TIFS path uses is real
  * hardware, and its expiry callback disables the radio unless a completion
@@ -2165,6 +2383,7 @@ static void efr32_hw_turnaround_reset(void)
 /* [regs-public] Enable the eight radio blocks in the observed stock order. */
 void radio_setup(void)
 {
+	efr32_radio_hold_init();
 	const uint32_t radio_bus_clocks =
 		CMU_CLKEN1_AGC | CMU_CLKEN1_MODEM | CMU_CLKEN1_RFCRC |
 		CMU_CLKEN1_FRC | CMU_CLKEN1_PROTIMER | CMU_CLKEN1_RAC |
@@ -2733,14 +2952,6 @@ static inline void efr32_qemu_rx_descriptor_ack(uint16_t offset)
 		offset & EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
 }
 
-/*
- * The drain may hold the CPU against other lower-link-layer jobs for at most
- * this long before it re-releases itself: a job released meanwhile with an
- * earlier deadline then runs first, within the radio jobs' lateness tolerance.
- */
-#define EFR32_QEMU_RX_DESCRIPTOR_SLICE_CYCLES \
-	(k_ns_to_cyc_ceil32(CONFIG_CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS) / 2U)
-
 static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -2750,12 +2961,11 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 	for (;;) {
 		volatile uint8_t *ring;
 		uint32_t fifo_address;
-		uint32_t slice_start;
 		uint16_t write_offset;
+		bool drained_one = false;
 		bool sliced = false;
 
 		k_deadline_event_wait(&efr32_qemu_rx_descriptor_event);
-		slice_start = k_cycle_get_32();
 		ring = efr32_qemu_rx_descriptor_ring();
 		fifo_address = *radio_reg32(EFR32_BUFC_BASE +
 			EFR32_BUFC_RX_BASE_OFFSET + EFR32_BUFC_ADDR_OFFSET);
@@ -2770,13 +2980,19 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 		write_offset = *radio_reg32(EFR32_BUFC_BASE +
 			EFR32_BUFC_RX_DESCRIPTOR_BASE_OFFSET + EFR32_BUFC_WRITEOFFSET) &
 			EFR32_RADIO_RX_DESCRIPTOR_ENDPOINT_MASK;
+		/*
+		 * One record per run: its budget (EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS) is
+		 * one record's work, and the ULL worker at this priority, ordered by
+		 * deadline, is never held behind more than that.
+		 */
 		while (efr32_qemu_rx_descriptor.descriptor_read_offset != write_offset) {
-			if (k_cycle_get_32() - slice_start >= EFR32_QEMU_RX_DESCRIPTOR_SLICE_CYCLES) {
+			if (drained_one) {
 				/* Continue under a fresh deadline, after any job due sooner. */
 				efr32_qemu_rx_descriptor_release();
 				sliced = true;
 				break;
 			}
+			drained_one = true;
 			uint8_t raw[EFR32_RADIO_RX_DESCRIPTOR_BYTES];
 			struct efr32_radio_rx_descriptor descriptor;
 			uint8_t pdu[PDU_AC_LL_SIZE_MAX];
@@ -3032,6 +3248,12 @@ void radio_rx_enable(void)
  */
 void radio_tx_enable(void)
 {
+	efr32_radio_tx_start(false, 0U);
+}
+
+/* TX start: with @p hold, TXEN is held to @p instant (interrupts locked by the caller). */
+static void efr32_radio_tx_start(bool hold, uint32_t instant)
+{
 	uint32_t status_before;
 	uint32_t sequencer_flags;
 
@@ -3083,7 +3305,11 @@ void radio_tx_enable(void)
 		efr32_hw_rx_fifo_preconfigured = true;
 	}
 #endif
+	if (hold) {
+		efr32_radio_hold_until(instant);
+	}
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXEN;
+	efr32_radio_last_txen = k_cycle_get_32();
 #if !defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_hw_rx_after_tx_pending = efr32_hw_rx_after_tx_requested;
 	efr32_hw_rx_after_tx_requested = false;
@@ -3321,7 +3547,6 @@ void radio_switch_complete_and_rx(uint8_t phy_rx)
 	efr32_qemu_tifs_next_action_set(&efr32_qemu_tifs_next_action,
 					EFR32_QEMU_TIFS_NEXT_RX);
 #endif
-	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
 /* See radio_switch_complete_and_rx() for the bounded implementation contract. */
@@ -3343,7 +3568,6 @@ void radio_switch_complete_and_tx(uint8_t phy_rx, uint8_t flags_rx, uint8_t phy_
 	efr32_qemu_tifs_next_action_set(&efr32_qemu_tifs_next_action,
 					EFR32_QEMU_TIFS_NEXT_TX);
 #endif
-	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
 /* [regs] software TIFS on top of PROTIMER compare + RAC commands (T2, T8) */
@@ -3359,7 +3583,6 @@ void radio_switch_complete_and_disable(void)
 	 */
 	efr32_qemu_tifs_next_action_clear(&efr32_qemu_tifs_next_action);
 #endif
-	EFR32_RADIO_TODO("software TIFS on top of PROTIMER compare + RAC com");
 }
 
 /* [regs-public] AGC.CMD.RSSISTART requests a live RSSI measurement (T9). */
@@ -3476,6 +3699,7 @@ static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t
 		generation = (uint32_t)atomic_inc(&efr32_radio_launch_generation) + 1U;
 	} while (!generation);
 	atomic_set(&efr32_radio_launch_active, generation);
+	efr32_radio_event_tx = trx != 0U;
 	efr32_radio_timer_state_start_set(&efr32_radio_timer, tick);
 	EFR32_RADIO_TRACE_ONCE("schedule trx=%u tick=%u remainder=%u generation=%u",
 			       trx, tick, supplied_remainder, generation);
@@ -4029,16 +4253,17 @@ static int efr32_radio_budgets_init(void)
 				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_TX_LAUNCH_NS));
 	k_deadline_event_budget_set(&efr32_radio_rx_event,
 				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_RX_LAUNCH_NS));
+	/* The longest kind registers the event; each publication carries its own kind's budget. */
 	k_deadline_event_budget_set(&efr32_radio_completion_event,
-				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_COMPLETION_NS));
+				    EFR32_DL_MEAS_CYC(EFR32_RADIO_WCET_COMPLETION_MAX_NS));
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	k_deadline_event_budget_set(&efr32_qemu_tifs_event,
 				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_QEMU_TIFS_NS));
 #endif
-#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
-	k_deadline_event_budget_set(&efr32_qemu_rx_descriptor_event,
-				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS));
-#endif
+	/*
+	 * The QEMU RX drain shares the ULL worker's priority and, like it, is not admitted: its
+	 * measured run is wall time including the radio level's preemption (ll_threads.c).
+	 */
 	return 0;
 }
 

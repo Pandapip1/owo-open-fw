@@ -47,6 +47,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
       OUTPUT ${SEQ_C}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}/sequencer
       COMMAND ${CMAKE_C_COMPILER} -mcpu=cortex-m0plus -mthumb -nostdlib
+              -I${CMAKE_CURRENT_LIST_DIR}/include
               -Wl,--build-id=none -Wl,-T,${SEQ_LD}
               ${SEQ_SRC} -o ${SEQ_ELF}
       COMMAND ${CMAKE_OBJCOPY} -O binary ${SEQ_ELF} ${SEQ_BIN}
@@ -54,6 +55,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
               ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
               ${SEQ_BIN} ${SEQ_C} open
       DEPENDS ${SEQ_SRC} ${SEQ_LD}
+              ${CMAKE_CURRENT_LIST_DIR}/include/hal/efr32/seq_abi.h
               ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
       VERBATIM
       COMMENT "Building and embedding open EFR32 radio-sequencer firmware"

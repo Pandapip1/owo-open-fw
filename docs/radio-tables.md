@@ -6897,3 +6897,155 @@ deliveries over ~105 s; injected 2 ms overrun -> safe shutdown (section 2); deli
 infeasible build (`EFR32_RADIO_ADMISSION=y`, wake latency declared 100 us > 61 us window)
 -> unsat at the first TX launch arm, 1.5 ms before its release, then M0+ TX counters +0,
 RAC.TX 0, PAENCTRL 0x10000000, 0 host sightings over 10 s.
+
+### 7.77 Deadlines from the Bluetooth specification
+
+Tags: **[F]** measured on silicon, **[Q]** measured in QEMU, **[S]** Bluetooth Core
+Specification v6.1 (extracts kept in `scratch/refdocs/extracts.md`), **[D]** controller design
+value. Code: `include/hal/efr32/ll_deadlines.h` (spec constants and helpers), `hal/ll_threads.c`,
+`hal/cntr.c`, `hal/radio.c`, `Kconfig` (`EFR32_RADIO_TIMING` and every measured time); kernel
+(vendor/zephyr): per-publication budgets (`k_deadline_event_post_budget()`), admitted timed
+releases keep their not-before bound, `k_clock_event_sched_active_target()`.
+
+Section 7.76 gave every job one start-by deadline, "fell due + 61036 ns", which had no basis.
+Each job's deadline is now the latest start that still lets the on-air behaviour it serves meet
+the specification, worked back through measured paths. Nothing is added to either.
+
+**Spec quantities [S].**
+
+| name | value | source |
+|---|---|---|
+| T_IFS_150 | 150 us, end of one packet to the start of the next | Vol 6 Part B 4.1.1 |
+| active clock jitter | instantaneous timings within 2 us of the average; applies to adv packet -> SCAN_REQ and SCAN_REQ -> SCAN_RSP | 4.2.1 |
+| sleep clock jitter | within 16 us; applies to advInterval + advDelay and anchor points | 4.2.2, 4.4.2.2.1 |
+| ADV PDU spacing | beginnings of consecutive ADV_IND in one event <= 10 ms | 4.4.2.3 |
+| preamble + AA, LE 1M | (1 + 4) octets x 8 us = 40 us | 2.1 |
+| shortest scan window | LE_Scan_Window 0x0004 x 0.625 ms = 2.5 ms | Vol 4 Part E 7.8.10 |
+| receiver timing | "The clock used to time packet reception may have any accuracy" | Vol 6 Part B 4.2 |
+
+**Measured quantities** (Kconfig, one value per platform, `EFR32_RADIO_TIMING_SILICON` /
+`_QEMU`): silicon is stage 3 on the explorer kit with a host scanning and admission on, maxima
+over 120 s after zeroing them 20 s after boot (DWT and scheduler-clock probes in a scratch
+build, PRS/TIMER1 for the radio); QEMU is the three dual pairs at shift 3 for 120 s wall each.
+
+| quantity | silicon | QEMU |
+|---|---|---|
+| TX launch: start -> TXEN hold (PRE) | 12.0 us [F] | 16.6 [Q] |
+| TX launch: instant -> after TXEN store (HOLD_LATE) | 0.89 [F] | 0.68 [Q] |
+| not-before wait exit -> start (SPIN_EXIT) | 5.8 [F] | 36.3 [Q] |
+| wake latency (arm lead of timed commands) | 55.7 [F, 7.76]; every launch was dispatched before its bound | same |
+| TX / RX launch run | 29.5 / 7.4 [F] (RX from `tests/radio-rx-port` on silicon) | 29.0 / 5.1 |
+| completion run: TX->RX, RX with response, other RX, last TX, abort | 46.4, 38.9, -, 27.1, 267.5 [F] | 86.8, 45.6, 129.3, 186.8, 91.8 |
+| completion start -> PENDING / -> RESPOND | 12.8 / 24.7 [F] | 54.4 / 43.2 |
+| TX FRAMESENT -> completion post, unblocked | 1.0 + 1.04 + 9.5 = 11.54 [F] | (silicon) |
+| RESPOND store -> sequencer at its RX2TX hold, PA up | 141 STIMER ticks = 29.4 us, all 44 [F] | 137 ticks |
+| RX2TX hold | 650 ticks (`EFR32_SEQ_RX2TX_TX_AT_STIMER`, 7.71) | same |
+| our T_IFS spread | 0.8 us (180.1-180.9, 7.71) [F] | - |
+| longest interrupt, steady state (admission checks included) | 58.1 [F] (39.4 without admission; 95.1 at boot) | 72.4 |
+| LLL / ULL run | 249.1 / 487.8 [F] | 266.9 / 439.6 |
+| LLL doorbell -> LLL start | 13.0 + 43.9 [F] | 72.4 + 57.8 |
+| QEMU TIFS job: PRE, HOLD_LATE, run | - | 36.4, 0.77, 152.7 |
+| QEMU RX drain run (one record) | - | 264.2 |
+
+Budgets of ULL-priority jobs are wall time that includes the radio level preempting them; the
+ULL worker and the QEMU drain are therefore not admitted (their deadlines are checked when they
+start), since admission already counts that level's own work.
+
+**Derivation.** T is the instant a command is due; "post" the completion's publication (an
+interrupt timestamp, taken before admission runs).
+
+| job | serves | spec constraint | deadline (start-by) | silicon |
+|---|---|---|---|---|
+| TX launch | first PDU of an advertising event, a central's anchor | advInterval + advDelay held to 16 us [4.2.2] | timed command: not_before = T - PRE - SPIN_EXIT, start-by = T - PRE + 16 us - HOLD_LATE; armed the wake latency before not_before; TXEN held, interrupts locked, by polling TIMER0.CNT against the instant mapped onto the active provider | not_before T - 17.8 us, start-by T + 3.1 us; TXEN in [T, T + 0.89 us] |
+| RX launch | opening a scan window | none on the receiver [4.2]; the window should be complete [4.4.3.1] and lasts >= 2.5 ms [E 7.8.10] | T + 2.5 ms - RX run | T + 2492.6 us |
+| completion, TX then RX (ADV_IND of a scannable advertiser, hardware) | PENDING before the SCAN_REQ is recognised | SCAN_REQ starts >= T_IFS - 2 us after our last bit, recognised 40 us later [4.1.1, 4.2.1, 2.1] | post + 150 - 2 + 40 - FRAMESENT->post - one interrupt - start->PENDING | post + 105.6 us |
+| completion, RX with response armed (hardware, RAC in RX2TX) | RESPOND early enough for SCAN_RSP at T_IFS | SCAN_RSP within 2 us [4.2.1], less our measured 0.8 us spread | RAC.STIMER (from frame end) limit 650 - 142 + 5 = 513 ticks (106.9 us); start-by = post + (513 - STIMER at post)/4.8 - start->RESPOND | about post + 71 us |
+| completion, other kinds (RX without response, last TX, abort) | the event's next PDU | next ADV_IND within 10 ms [4.4.2.3]; in a scan window, 2.5 ms | last ADV TXEN + 10 ms - kind's run, or post + 2.5 ms - kind's run | >= 9.73 ms after the ADV_IND |
+| LLL context | the prepare that arms a launch | TX launch's start-by: the prepare (same priority, cooperative) must end before it | ticker due + (XTAL 49 + START 9 - 1 ticks) - PRE + 16 us - HOLD_LATE - LLL run; due = the requesting worker run's due, or the doorbell for thread requests | due + 1493.5 us |
+| ULL worker | ticker expiries, ULL mayflies | the LLL step above | LLL window - doorbell latency - ULL run | due + 948.8 us |
+| QEMU TIFS, turnaround (QEMU builds) | the seam's TX->RX / RX->TX at its T_IFS instant | 2 us [4.2.1] about the seam's instant | timed command, as the TX launch with 2 us | [Q] not_before I - 72.7, start-by I - 35.2 |
+| QEMU TIFS, no-response timeout | the next PDU | as "other kinds" | next-PDU rule less TIFS run, two interrupts and the abort completion | - |
+| QEMU RX drain | gates the RX completion | as "other kinds" | next-PDU rule less drain run, two interrupts and the RX completion | - |
+
+The prepare lead (EVENT_OVERHEAD_XTAL_US 1500 + EVENT_OVERHEAD_START_US 300) is a design value
+[D] placeholder from the OpenISA LLL; it is not a deadline. The spec instant is the event's TXEN;
+the lead only says how early the chain starts, and admission checks that it suffices.
+
+The QEMU TIFS seam starts its 150 us after the LLL callback, not at the frame's end, so a QEMU
+configuration's on-air turnaround is not spec-timed by construction; its callbacks therefore get
+the "other kinds" rule and only the seam's own command is held to 2 us.
+
+**Hold.** One read of the logical time takes ~2 us in QEMU and one read through the active
+provider 1.09 us on silicon (TIMER0 SYNCBUSY wait) [F]: both quantise a hold to about the active
+clock's whole tolerance. The instant is mapped once onto the active provider's count
+(`k_clock_event_sched_active_target()`, rounding up) and TIMER0.CNT is polled directly (0.156 us
+per read [F], 0.169 [Q]); `efr32_radio_hold_init()` checks TIMER0 is that provider.
+
+**What else changed.**
+- Completion deadlines and budgets are per kind (`k_deadline_event_post_budget()`): one budget
+  for all made every turnaround unsat behind a 267 us close.
+- The QEMU drain takes one record per run instead of a slice of half the old 61 us tolerance.
+- `EFR32_RADIO_TODO` no longer prints from the LL contexts and radio jobs: its one-time printk
+  in `radio_tmr_tifs_base_get()` and the chain-delay getters cost up to ~110 us in the first
+  ADV_IND completion in QEMU, and with them gone the hardware-configuration advertiser in QEMU
+  answers every SCAN_REQ of the QEMU-configuration scanner (6278/6278, was 2 of ~2500, 7.76).
+- `CONFIG_CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS` is no longer any job's deadline. It remains the
+  scheduler clock service's delivery-fault bound for events without a deadline of their own
+  (system timer, hardware RX timeout): one deep-sleep cycle (30518 ns, 7.73) plus one interrupt
+  the delivering interrupt may wait behind: 88618 ns silicon, 102918 ns QEMU (was 61036, two
+  deep cycles; QEMU delivered one 66.4 us late behind a 72 us interrupt).
+- The RX2TX hold and STIMER rate moved to `include/hal/efr32/seq_abi.h`, shared by the M0+
+  source and the M33 (the sequencer binary is byte-identical).
+- RAM (hardware image, admission on): launch stacks back to the 448 B default, the 768 B having
+  been for the bring-up trace; measured 208 B (TX) and 200 B (RX) peaks with admission [F].
+
+**Feasibility.**
+- Silicon: feasible; admission on by default. The tightest windows: the TX launch (3.1 us after
+  T - PRE; every launch dispatched before its bound) and the RX-with-response completion (about
+  71 us after post against 58.1 us of interrupt allowance and a 34.0 us longest
+  release-to-start).
+- QEMU: infeasible by analysis, so admission is off by default for QEMU-timed images. The
+  model's longest interrupt (72.4 us) is longer than the hardware-configuration ADV_IND
+  completion's window (46.6 us after post: 188 - 11.54 - 72.4 - 54.4 us) and the QEMU TIFS
+  turnaround's (61.9 us after a release the seam's 150 us leaves too close to arm early). The
+  model runs this firmware's radio paths 1.2-4x slower than silicon (start->PENDING 54.4 vs
+  12.8 us, RESPOND 43.2 vs 24.7; the M33 at a flat 1.84 cycles per instruction, 7.75), so these
+  are model gaps, not scheduling choices; priorities cannot resolve them (the blocking is one
+  interrupt). Admission on in QEMU reports exactly these: "efr32_radio_completion_event ...
+  deadline 46640 ns from the check, demand ahead of it 72419 ns" and "efr32_qemu_tifs_event ...
+  deadline 61959 ns ... demand ahead 72419 ns".
+
+**Verification.**
+- Kernel, native_sim: deadline_admission 13/13 (two new cases: a publication's own budget, an
+  admitted timed release keeping its not-before bound), deadline 14/14 (also with admission and
+  stats), clock_event_sched 13/13, deferred_release 5/5 (also with admission), clock_event 4/4.
+- Silicon, stage 3 (`EFR32_RADIO_ADMISSION=y`, silicon times): 75 s, 90 s and 75 s runs with a
+  host scanning: miss_count 0, late_count 0, not halted, scan-response name received; M0+ per
+  5 s: 150 TXWARM, 163 TX, 13 respond, 0 timeout. T_IFS (`scripts/bg22-tifs-probe.tcl`): EOF ->
+  SCAN_RSP SYNCSENT 180.33 us (n = 1, 60 s) and 180.53-180.95 us (n = 5, 60 s), inside 7.71's
+  180.1-180.9/stock 180.2-181.1 at timer resolution. Unchanged control image (7.76): 180.51-180.74
+  (n = 3, 30 s).
+- Silicon, deliberately infeasible (one interrupt declared 200 us): unsat at the first ADV_IND
+  completion ("deadline -40620 ns from the check, demand ahead of it 200003 ns"), safe shutdown;
+  then 0 TXWARM and 0 TX in 5 s, RAC.STATUS 0x0d000000, PAENCTRL 0x10000000.
+- QEMU (admission off, the default for QEMU times; every start checked against the
+  spec-derived deadlines, safe shutdown on a miss):
+
+| pair | shift 3 | shift 5 |
+|---|---|---|
+| hardware-configuration advertiser + scanner | 1328.5 s clean | 1329.0 s clean |
+| hardware-configuration advertiser + QEMU-configuration active scanner | 1247.4 s clean, 12474/12474 SCAN_RSP | 1244.6 s clean, 12445/12445 |
+| QEMU-configuration advertiser + active scanner | advertiser stops at ~68 s: QEMU TIFS turnaround started 16.8 us past its 2 us-tolerance start-by, 88.5 us after its early release | same, ~68 s |
+
+  Before this section the hardware-configuration pair stopped at 11.3 s and the mixed pair at
+  25.8 s (ULL worker 1-3 us past the 61 us window), and the mixed pair answered ~0.2 % of
+  SCAN_REQs; the QEMU-configuration pair ran clean only against the 61 us window, which the
+  2 us active-clock tolerance replaces.
+- QEMU with admission on: unsat at the first turnaround in every pair, as derived above.
+
+**Open.** The QEMU M33 timing model (radio paths 1.2-4x slower than silicon) makes the
+turnaround deadlines infeasible in QEMU; the QEMU-configuration seam cannot be spec-timed (its
+T_IFS starts at the callback); the K_RX completion budget is the QEMU figure (never observed on
+silicon); RX launch for a connection peripheral (window widening) and the connection roles are
+not derived (their profiles count misses, QEMU only); the prepare lead (XTAL 1500 + START 300 us)
+is still the OpenISA placeholder; the hardware scanner receives nothing on silicon.
