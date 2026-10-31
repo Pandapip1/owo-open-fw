@@ -92,7 +92,26 @@ esac
 
 "$QEMU_BIN" "${qemu_args[@]}" > "$RUNTIME_DIR/qemu.out" 2>&1 &
 qemu_pid=$!
-sleep 2
+# The probe is usable once QEMU listens (rbb) or once the host has enumerated
+# the simulated J-Link and udev has applied its permissions (jlink).
+probe_ready() {
+  if [[ $PROBE == jlink ]]; then
+    local dev
+    for dev in /sys/bus/usb/devices/*; do
+      [[ $(cat "$dev/serial" 2>/dev/null) == "$JLINK_SERIAL" ]] || continue
+      [[ -w /dev/bus/usb/$(printf %03d "$(cat "$dev/busnum")")/$(printf %03d "$(cat "$dev/devnum")") ]]
+      return
+    done
+    return 1
+  fi
+  # Look for the listener without connecting: the probe serves one client.
+  ss -Hltn "sport = :$PORT" | grep -q .
+}
+for _ in $(seq 1 100); do
+  probe_ready && break
+  sleep 0.1
+done
+probe_ready || { echo "FAIL: probe not ready 10 s after QEMU start"; exit 1; }
 
 ocd() {
   local log=$1
