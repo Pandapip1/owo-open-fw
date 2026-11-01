@@ -7737,3 +7737,76 @@ qtests 98/98 and 28/28 (new `released-rx-srcchf-follows-channel`).
 **Open.** 2M and Coded rates are derived from their tables, not measured on silicon; the 25/24
 stage-2 limit is a bracketed fit, not a documented constant; all-40-channel rates need a longer
 lived connection or a test transmitter.
+
+### 7.85 The synthesizer below and above the 2.4 GHz band; amateur Morse identification on silicon
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548). Code and context:
+`docs/amateur-radio.md`, `hal/amateur.c`, `hal/amateur_rules.c`, `hal/radio.c`
+(`efr32_radio_cw_transmit()`, `EFR32_AMATEUR_SYNTH_MIN/MAX_KHZ`), `tests/amateur-port`
+(`prj-probe.conf`, `prj-txcheck.conf`). Logs: `scratch/amateur/hw-*.log` of the worktree; every
+transmission outside the plain Bluetooth plan is in the main checkout's
+`scratch/amateur/tx-log.txt` (amateur operation under the user's licence, KD3APL, with his
+go-ahead for 2300-2310 and 2390-2450 MHz).
+
+**Question.** The BGM220P datasheet specifies the 2.4 GHz radio for 2400-2483.5 MHz (Tables 4.5,
+4.6) and the reference manual says only that the synthesizer covers "the supported frequency
+bands" (5.1.1). Amateur operation in the 13 cm band needs 2302-2308 and 2392-2400 MHz too.
+
+**Receive-only probe [F].** A passive scanner (`EFR32_RADIO_AMATEUR_SYNTH_PROBE`: any
+transmission stops the radio) moved its three advertising channels across 2290-2500 MHz in
+5 MHz steps (0.9 s per three carriers) and sampled every 0.5 ms in RXSEARCH: `SYNTH.FREQ`,
+`SYNTH.STATUS`, `SYNTH.VCOTUNING`. 488-1644 samples per carrier. The M0+'s successive-
+approximation VCO calibration (7.60) converged everywhere, far from both ends of the 11-bit code
+(VCAPSEL 16 throughout); `CAPCALERROR` never set. VCOTUNING (low 11 bits, min-max over the
+samples):
+
+| MHz | 2290 | 2300 | 2310 | 2350 | 2370 | 2375 | 2380 | 2390 | 2400 | 2450 | 2480 | 2500 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| code | 1418-1420 | 1367-1372 | 1325-1329 | 1142-1144 | 1065-1066 | 931-1049 | 913-914 | 868-869 | 826-836 | 626-628 | 487-526 | 424-425 |
+
+About -4.7 codes/MHz, monotonic, with a ~130-code step between 2370 and 2380 MHz (the 2375 MHz
+samples show both sides) and a smaller one near 2480 MHz [I: VCO sub-band boundaries]. On this
+slope the code would reach its ends (0x7FF, 0) near 2160 and 2590 MHz [I, extrapolated, not
+measured]. `STATUS.INLOCK` was never set in receive, as 7.64/7.72 found on every channel: lock
+is not observable in RXSEARCH.
+
+**Transmit checks [F].** Single-carrier images (`prj-txcheck.conf`): 2 s of non-connectable
+advertising with the call sign as the Complete Local Name, then `efr32_amateur_disable()`, which
+sends the closing Morse identification (KD3APL, 20 WPM, 200 Bd OOK, 104 octets) and returns to
+Part 15. A 0.5 ms sampler in the RAC TX state:
+
+| carrier | TX samples | INLOCK | CAPCALERROR | VCOTUNING | identification end |
+|---|---|---|---|---|---|
+| 2445 MHz | 8328 | 8328 | 0 | 0x28C-0x290 | 6372 ms after boot |
+| 2395 MHz | 8328 | 8328 | 0 | 0x354-0x358 | 6372 ms |
+| 2304 MHz | 8328 | 8328 | 0 | 0x54C-0x54D | 6372 ms |
+
+8328 samples x 0.5 ms = 4.16 s in TX, almost all of it the identification frame (4.32 s
+including its 160 ms sync; the advertising PDUs are each well under 1 ms): the OOK frame is sent
+at the configured rate and length, and the synthesizer reports lock for all of it at all three
+carriers. The TX codes match the receive probe's (the receive LO sits 0.7 MHz higher, f_IF).
+The identification's job, ticker slot and safe-shutdown watchdog ran as in QEMU, and the
+on-target API checks passed (27/27) on silicon.
+
+**Periodic identification [F].** 660 s of advertising on 2445 MHz (in the ISM band) under
+amateur rules: the periodic identification ended at 570.0 s after boot (QEMU, same image
+configuration: 570.2 s), the closing one at 664.4 s after the advertising stopped; 22415 TX
+samples, 22414 with INLOCK (the other at a TX edge [I]); no shutdown. This ran the fixed slot
+handling (the reservation held until the frame ends; docs/amateur-radio.md section 5); the three
+short checks above ran before that fix, with the radio otherwise idle during their
+identification.
+
+**In-band standard channels [F].** Default amateur plan (2402 and 2426 MHz kept, channel 39 and
+the data channels on spare in-band carriers): the laptop's passive scan (BlueZ) reported the kit
+as "KD3APL" during its 20 s of advertising.
+
+**Consequence.** `EFR32_AMATEUR_SYNTH_MIN/MAX_KHZ` = 2290-2500 MHz (the probed range); the
+QEMU model's `EFR32_SYNTH_LOCK_MIN/MAX_HZ` the same. Beyond it nothing was measured and
+everything is refused.
+
+**Not shown.** That the OOK frame actually keys the carrier (key-down power, on/off ratio,
+edges): only the TX state, its duration and the synthesizer lock were observed. Output power,
+occupied bandwidth, harmonics and spurious emissions at any carrier, and receive sensitivity off
+the Bluetooth channels: no RF instrument was used. The SDR captures that would settle these are
+in `docs/amateur-radio.md` section 8. Lock in transmit was checked at three carriers, not across
+the band.
