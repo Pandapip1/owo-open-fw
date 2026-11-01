@@ -55,3 +55,71 @@ extern "C" fn owo_sim_poll() {
         write_volatile(addr_of_mut!((*m).done), seq);
     }
 }
+
+/// TEST ONLY: the supervisor's outcomes, for the simulation harness to read
+/// (`sim/scripts/adapter_ours.py` status): pulses fired, the last in-phase reading, and the last
+/// fault (`kind`, `a`, `b`, the number of faults) and skip (`kind`).
+#[repr(C)]
+pub struct Outcomes {
+    pub fired: u32,
+    pub measured: u32,
+    pub faults: u32,
+    pub fault_kind: u32,
+    pub fault_a: u32,
+    pub fault_b: u32,
+    pub skip_kind: u32,
+}
+
+#[no_mangle]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static mut owo_sim_outcomes: Outcomes = Outcomes {
+    fired: 0,
+    measured: 0,
+    faults: 0,
+    fault_kind: 0,
+    fault_a: 0,
+    fault_b: 0,
+    skip_kind: 0,
+};
+
+#[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+pub fn note_outcome(o: &owo_stim::stim::Outcome) {
+    use owo_stim::hw::HwError;
+    use owo_stim::stim::{Fault, Outcome};
+    // SAFETY: written only by the pump (this call), read by the debugger while the VM is paused.
+    unsafe {
+        let r = addr_of_mut!(owo_sim_outcomes);
+        match *o {
+            Outcome::Fired { measured } => {
+                (*r).fired += 1;
+                (*r).measured = measured as u32;
+            }
+            Outcome::Skipped(s) => (*r).skip_kind = s as u32 + 1,
+            Outcome::Faulted(f) => {
+                let (k, a, b) = match f {
+                    Fault::Cancelled => (1, 0, 0),
+                    Fault::Hw(e) => (2, match e {
+                        HwError::SwitchVerify => 1,
+                        HwError::Bus => 2,
+                        HwError::BridgeShoot => 3,
+                        HwError::Adc => 4,
+                    }, 0),
+                    Fault::Overdrive { measured, commanded } => (3, measured as u32, commanded as u32),
+                    Fault::UnderDelivery { measured, commanded } => {
+                        (4, measured as u32, commanded as u32)
+                    }
+                    Fault::SenseNotZero { measured } => (5, measured as u32, 0),
+                    Fault::SenseTimeout => (6, 0, 0),
+                    Fault::PhaseOverrun { elapsed_us } => (7, elapsed_us as u32, 0),
+                    Fault::Unmeasured => (9, 0, 0),
+                    Fault::BatteryLow { mv } => (8, mv, 0),
+                };
+                (*r).faults += 1;
+                (*r).fault_kind = k;
+                (*r).fault_a = a;
+                (*r).fault_b = b;
+            }
+        }
+    }
+}

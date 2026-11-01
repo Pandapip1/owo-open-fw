@@ -20,18 +20,14 @@ extern "C" {
     fn owo_dac_channel_setup(d: *const c_void, ch: u8, resolution: u8) -> c_int;
     fn owo_dac_write(d: *const c_void, ch: u8, value: u32) -> c_int;
     fn owo_pwm_set_percent(p: *const c_void, percent: u8) -> c_int;
-    fn owo_sense_start(a: *const c_void, interval_us: u32) -> c_int;
-    fn owo_sense_wait_first(timeout_us: u32) -> c_int;
-    fn owo_sense_stop();
-    fn owo_sense_latest(raw: *mut u16, stamp: *mut u64) -> c_int;
+    fn owo_adc_setup(a: *const c_void) -> c_int;
+    fn owo_adc_start(a: *const c_void) -> c_int;
+    fn owo_adc_poll(raw: *mut u16) -> c_int;
     fn owo_adc_raw_to_mv(a: *const c_void, raw: u16) -> i32;
     fn owo_counter_start(d: *const c_void) -> c_int;
     fn owo_counter_stop(d: *const c_void);
     fn owo_counter_mark(d: *const c_void) -> u32;
     fn owo_counter_since_us(d: *const c_void, mark: u32) -> u32;
-    fn owo_timing_start();
-    fn owo_timing_stamp() -> u64;
-    fn owo_timing_to_us(cycles: u64) -> u64;
     fn owo_busy_wait_us(us: u32);
     fn owo_suit_post() -> c_int;
     fn owo_suit_handle(kind: c_int) -> *const c_void;
@@ -68,6 +64,7 @@ pub enum SuitHandle {
     BoostPwm = 6,
     SenseAdc = 7,
     PhaseTimer = 8,
+    BatteryAdc = 9,
 }
 
 /// Board parameters from the `owo,suit-output` node (kinds understood by `owo_suit_param`).
@@ -84,6 +81,8 @@ pub enum SuitParam {
     BoostDutyPercent = 7,
     SupplyCount = 8,
     SwitchRouteCount = 9,
+    BatteryDividerNum = 10,
+    BatteryDividerDen = 11,
 }
 
 /// The suit's devicetree node, if the board describes one. Null when the node is absent or its
@@ -267,59 +266,40 @@ impl Switchable for Regulator {
     }
 }
 
-/// Free-running ADC sampler built on Zephyr's standard ADC API: one asynchronous sequence that
-/// repeats from its own completion callback (interrupt context), which stores each conversion
-/// with a timestamp from Zephyr's timing API in a depth-1 message queue. Reading never blocks.
-pub struct Sampler(*const c_void);
-// SAFETY: static spec; the shim's state is a kernel message queue.
-unsafe impl Send for Sampler {}
-impl Sampler {
+/// One ADC channel (`struct adc_dt_spec`). Conversions run one at a time across all channels:
+/// the caller starts one and polls for its result; the shim's completion callback (the ADC
+/// interrupt) publishes it. Nothing converts unless asked.
+pub struct AdcChannel(*const c_void);
+// SAFETY: static spec; the shim's state is an atomic.
+unsafe impl Send for AdcChannel {}
+impl AdcChannel {
     /// # Safety
     /// `p` must be a `struct adc_dt_spec *` with static lifetime, from the shim.
     pub unsafe fn from_raw(p: *const c_void) -> Self {
         Self(p)
     }
-    /// Start the timing source and sampling every `interval_us` (thread context; may block
-    /// briefly if a previous run is still finishing).
-    pub fn start(&mut self, interval_us: u32) -> Result<(), Errno> {
-        // SAFETY: plain call.
-        unsafe { owo_timing_start() };
+    /// Configure the channel (once, before its first conversion).
+    pub fn setup(&mut self) -> Result<(), Errno> {
         // SAFETY: valid handle by construction.
-        check(unsafe { owo_sense_start(self.0, interval_us) })
+        check(unsafe { owo_adc_setup(self.0) })
     }
-    /// Wait in thread context until the ADC callback has published the first sample.
-    /// Returns false when the Zephyr timeout expires.
-    pub fn wait_first(&self, timeout_us: u32) -> bool {
-        // SAFETY: blocks only the calling thread on the shim's static semaphore.
-        unsafe { owo_sense_wait_first(timeout_us) == 0 }
+    /// Start one conversion (thread context). `-EBUSY` while an earlier conversion, of any
+    /// channel, has not completed.
+    pub fn start(&mut self) -> Result<(), Errno> {
+        // SAFETY: valid handle by construction.
+        check(unsafe { owo_adc_start(self.0) })
     }
-    /// Ask the sampler to stop; after its next conversion it finishes and releases the timing source.
-    pub fn stop(&mut self) {
-        // SAFETY: only sets a flag / releases the timer.
-        unsafe { owo_sense_stop() }
+    /// The raw result of the conversion started last, once (`None` while it runs).
+    pub fn poll() -> Option<u16> {
+        let mut raw = 0u16;
+        // SAFETY: the out-pointer is a live local.
+        (unsafe { owo_adc_poll(&mut raw) } == 1).then_some(raw)
     }
-    /// The newest conversion `(raw, millivolts at the pin, timestamp in us)`, or `None` if none
-    /// completed since `start`.
-    pub fn latest(&self) -> Option<(u16, i32, u64)> {
-        let (mut raw, mut stamp) = (0u16, 0u64);
-        // SAFETY: both out-pointers are live locals written once.
-        let r = unsafe { owo_sense_latest(&mut raw, &mut stamp) };
-        if r != 0 {
-            return None;
-        }
+    /// Millivolts at the pin for a raw result of this channel (`-1` if it cannot be converted).
+    pub fn raw_to_mv(&self, raw: u16) -> i32 {
         // SAFETY: valid handle; pure conversion.
-        let mv = unsafe { owo_adc_raw_to_mv(self.0, raw) };
-        // SAFETY: pure conversion.
-        let us = unsafe { owo_timing_to_us(stamp) };
-        Some((raw, mv, us))
+        unsafe { owo_adc_raw_to_mv(self.0, raw) }
     }
-}
-
-/// Monotonic microseconds from Zephyr's timing API (valid while the timing source is running,
-/// i.e. between `Sampler::start` and `stop`; `Suit` keeps it running whenever the supply is on).
-pub fn now_us() -> u64 {
-    // SAFETY: plain read.
-    unsafe { owo_timing_to_us(owo_timing_stamp()) }
 }
 
 pub fn busy_wait_us(us: u32) {

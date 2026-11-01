@@ -28,7 +28,7 @@ from collections import OrderedDict
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 FILE_LIMIT = 1 << 30  # bound every file QEMU writes
-WALL_LIMIT_S = 1800
+WALL_LIMIT_S = int(os.environ.get("STIM_WALL_S", "1800"))  # host seconds per run
 
 
 def free_port():

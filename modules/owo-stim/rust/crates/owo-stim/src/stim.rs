@@ -18,12 +18,26 @@
 //! 9. **[stock]** Closed-loop over-delivery trip using the sense ADC, per-channel latch.
 //! 10. **[stock]** Channel switch read-back verification.
 //! 11. **[stock]** Break-before-make on the bridge, bridge off before the channel changes.
-//! 12. **[new]** Sense freshness: the feedback ADC free-runs in interrupt context and stamps every
-//!     conversion. The bridge is only closed, and only stays closed, while the newest conversion
-//!     is at most `sense_max_age_us` old; a stalled ADC or an interrupt that starves the pulse
-//!     thread therefore ends the pulse. No interrupt lock is needed, so the ADC interrupt can run.
+//! 12. **[new]** Supervisor-timed sensing: the supervisor starts every conversion itself, so
+//!     nothing samples while it is not looking and no conversion's completion interrupt can
+//!     land at the end of a phase (conversions are only started while `sense_guard_us` of the
+//!     phase remains, after the first). Before each pulse, with the bridge off and the DAC at
+//!     zero, a conversion must complete within `sense_timeout_us` and read zero (within
+//!     `over_margin`): a dead or stuck-high sense path never gets the bridge closed. Every phase
+//!     starts a conversion `settle_us` in; one that does not complete within `sense_timeout_us`
+//!     is an ADC stall. A phase that an interrupt carried past its width before its conversion
+//!     could start ends unmeasured; a pulse needs at least one measured phase.
 //! 13. **[new]** Overrun check: a phase that took longer than `width + overrun_slack_us` (the
 //!     thread was preempted) is a fault, which latches the channel.
+//! 14. **[new]** Under-delivery stops the output: an in-phase conversion more than
+//!     `under_margin` below the commanded level (open electrode, lost contact, sense stuck at
+//!     zero, a rail that sagged out of compliance) locks the whole output until the user starts
+//!     again. The stock firmware notes the same condition ("status 4") and keeps driving.
+//!     The lock covers every channel because one reading cannot tell an open pad from a dead
+//!     sense path, and a dead sense path blinds the over-delivery trip on every channel.
+//! 15. **[new]** Battery: a session only starts with the pack at or above `battery_start_mv`,
+//!     and stops below `battery_stop_mv` (read at least every `battery_interval_us` while
+//!     pulses fire); either needs an explicit user start to try again.
 
 use crate::hw::{Bridge, Hw, HwError};
 
@@ -41,23 +55,38 @@ pub struct Config {
     pub soft_start_us: u64,
     pub max_duty_permille: u32,
     pub fault_lockout: u8,
-    /// Trip when measured exceeds commanded by more than this (stock: 8).
+    /// Trip when measured exceeds commanded by more than this (stock: 8). Also the largest
+    /// reading accepted from the zero check before a pulse.
     pub over_margin: u16,
-    /// Report open circuit when measured is below commanded by more than this.
+    /// Under-delivery: stop when an in-phase reading is more than this below the commanded
+    /// level (stock open-circuit tolerance: 14, its default and this unit's stored value).
     pub under_margin: u16,
-    /// Samples that completed less than this long after the bridge closed are ignored for the
-    /// over-delivery check (the output is still rising).
+    /// The first conversion of a phase is started this long after the bridge closed (the
+    /// output is still rising before). Phases no longer than this are not delivered: they could
+    /// not be measured.
     pub settle_us: u32,
-    /// Longest the newest conversion may be while the bridge is (about to be) closed.
-    pub sense_max_age_us: u32,
-    /// How long to wait for the first conversion after the supply comes on.
-    pub sense_startup_us: u32,
+    /// Time from starting a conversion to its result being seen by the pulse loop (driver start
+    /// path, conversion, completion interrupt). Further conversions in a phase are only started
+    /// while at least this much of it remains, so their completion interrupts stay clear of the
+    /// phase's end.
+    pub sense_guard_us: u32,
+    /// A conversion not done this long after its start means the ADC is stalled (the output
+    /// locks). A phase still ends at its width meanwhile; this only bounds how long a missing
+    /// result is waited for, and must exceed the longest interrupt latency the ADC's completion
+    /// interrupt can see, so that latency is never mistaken for a stall.
+    pub sense_timeout_us: u32,
     /// A phase may take this much longer than its width before it counts as an overrun.
     pub overrun_slack_us: u32,
-    /// How often the pulse loop looks at the sampler while a phase is running.
+    /// How often the pulse loop looks at the clock and the ADC while a phase is running.
     pub poll_step_us: u32,
     /// Burst allowance of the duty bucket, in on-time microseconds.
     pub duty_burst_us: u32,
+    /// A session (the first pulse after arming) needs the pack at or above this.
+    pub battery_start_mv: u32,
+    /// A running session stops when the pack reads below this.
+    pub battery_stop_mv: u32,
+    /// While pulses fire, the pack is read again once the last reading is this old.
+    pub battery_interval_us: u64,
 }
 
 impl Config {
@@ -72,13 +101,16 @@ impl Config {
             max_duty_permille: 40,
             fault_lockout: 3,
             over_margin: 8,
-            under_margin: 15,
+            under_margin: 14,
             settle_us: 20,
-            sense_max_age_us: 500,
-            sense_startup_us: 3_000,
+            sense_guard_us: 60,
+            sense_timeout_us: 500,
             overrun_slack_us: 150,
             poll_step_us: 10,
             duty_burst_us: 4_000,
+            battery_start_mv: 7_200,
+            battery_stop_mv: 6_840,
+            battery_interval_us: 1_000_000,
         }
     }
 }
@@ -98,12 +130,34 @@ pub enum Fault {
     Hw(HwError),
     /// Measured output exceeded the commanded level by more than the margin.
     Overdrive { measured: u16, commanded: u8 },
-    /// The newest conversion was older than `sense_max_age_us` while the output was live.
-    StaleSense { age_us: u64 },
-    /// No conversion arrived after the supply came on.
+    /// Measured output was below the commanded level by more than the margin: open electrode,
+    /// no contact, sense stuck at zero, or the rail out of compliance. Locks the output.
+    UnderDelivery { measured: u16, commanded: u8 },
+    /// With the bridge off and the DAC at zero the sense input read above `over_margin`: the
+    /// sense path is stuck high or leaking. Locks the output.
+    SenseNotZero { measured: u16 },
+    /// A conversion did not complete within `sense_timeout_us`. Locks the output.
     SenseTimeout,
     /// A phase ran longer than its width plus the slack.
     PhaseOverrun { elapsed_us: u64 },
+    /// Neither phase of the pulse could start a conversion before its width ended (the loop was
+    /// preempted past it): the pulse went unsupervised. Latches the channel.
+    Unmeasured,
+    /// The pack read below the start (session start) or stop threshold. Stops the output.
+    BatteryLow { mv: u32 },
+}
+
+impl Fault {
+    /// Faults of the shared sense path or ADC: no channel can be supervised after them.
+    fn locks_output(&self) -> bool {
+        matches!(
+            self,
+            Fault::UnderDelivery { .. }
+                | Fault::SenseNotZero { .. }
+                | Fault::SenseTimeout
+                | Fault::Hw(HwError::Adc)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,11 +170,16 @@ pub enum Skip {
     BadChannel,
     Zero,
     DutyBudget,
+    /// A phase this short could not be measured (`settle_us`).
+    TooShort,
+    /// Stopped for a low battery; needs an explicit user start.
+    BatteryLow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Fired { measured: u16, open_circuit: bool },
+    /// Delivered; `measured` is the last in-phase reading of the second phase.
+    Fired { measured: u16 },
     Skipped(Skip),
     Faulted(Fault),
 }
@@ -136,6 +195,10 @@ pub struct Stimulator {
     credit_us: [u32; CHANNELS],
     credit_at: [u64; CHANNELS],
     supply_on: bool,
+    /// Stopped for a low battery (cleared by [`Stimulator::reset`]).
+    battery_low: bool,
+    /// When the pack was last read, if it has been in this session.
+    battery_at: Option<u64>,
 }
 
 impl Stimulator {
@@ -151,6 +214,8 @@ impl Stimulator {
             credit_us: [0; CHANNELS],
             credit_at: [0; CHANNELS],
             supply_on: false,
+            battery_low: false,
+            battery_at: None,
         }
     }
 
@@ -162,6 +227,9 @@ impl Stimulator {
     }
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+    pub fn is_battery_low(&self) -> bool {
+        self.battery_low
     }
     pub fn channel_latched(&self, ch: usize) -> bool {
         self.latched.get(ch).copied().unwrap_or(true)
@@ -178,20 +246,24 @@ impl Stimulator {
         self.safe_off(hw);
     }
 
-    /// Clear fault latches and the lockout. Call only on an explicit user Stop/Start.
+    /// Clear fault latches, the lockout and a low-battery stop. Call only on an explicit user
+    /// Stop/Start. The battery is read again before the next session's first pulse.
     pub fn reset(&mut self) {
         self.locked = false;
         self.faults = 0;
         self.latched = [false; CHANNELS];
+        self.battery_low = false;
     }
 
     /// Note that a valid frame has just arrived that asks for `covers_us` of output after any
     /// frames already queued. Arms the output on the first one.
     pub fn feed(&mut self, now_us: u64, covers_us: u64) {
         self.valid_until = self.valid_until.max(now_us).saturating_add(covers_us);
-        if !self.armed && !self.locked {
+        if !self.armed && !self.locked && !self.battery_low {
             self.armed = true;
             self.armed_at = now_us;
+            // A new session: its first pulse needs a reading against the start threshold.
+            self.battery_at = None;
         }
     }
 
@@ -218,11 +290,17 @@ impl Stimulator {
 
     fn fault<H: Hw>(&mut self, hw: &mut H, ch: usize, f: Fault) -> Outcome {
         self.safe_off(hw);
+        if let Fault::BatteryLow { .. } = f {
+            // Not a fault of the stage: stop, and stay stopped until the user starts again.
+            self.battery_low = true;
+            self.armed = false;
+            return Outcome::Faulted(f);
+        }
         if let Some(l) = self.latched.get_mut(ch) {
             *l = true;
         }
         self.faults = self.faults.saturating_add(1);
-        if self.faults >= self.cfg.fault_lockout {
+        if self.faults >= self.cfg.fault_lockout || f.locks_output() {
             self.locked = true;
             self.armed = false;
         }
@@ -238,10 +316,32 @@ impl Stimulator {
         l as u8
     }
 
+    /// Read the pack if this session has no reading yet (against the start threshold) or the
+    /// last one is `battery_interval_us` old (against the stop threshold).
+    fn battery_check<H: Hw>(&mut self, hw: &mut H, now_us: u64) -> Result<(), Fault> {
+        let floor = match self.battery_at {
+            None => self.cfg.battery_start_mv,
+            Some(at) if now_us.saturating_sub(at) >= self.cfg.battery_interval_us => {
+                self.cfg.battery_stop_mv
+            }
+            Some(_) => return Ok(()),
+        };
+        hw.battery_start().map_err(Fault::Hw)?;
+        let mv = self.wait_for(hw, H::battery_poll)?;
+        self.battery_at = Some(now_us);
+        if mv < floor {
+            return Err(Fault::BatteryLow { mv });
+        }
+        Ok(())
+    }
+
     /// Execute one biphasic pulse. Blocks for roughly `2*width + gap` plus bus time.
     pub fn fire<H: Hw>(&mut self, hw: &mut H, now_us: u64, cmd: &PulseCmd) -> Outcome {
         if self.locked {
             return Outcome::Skipped(Skip::Locked);
+        }
+        if self.battery_low {
+            return Outcome::Skipped(Skip::BatteryLow);
         }
         if !self.armed {
             return Outcome::Skipped(Skip::Disarmed);
@@ -260,7 +360,10 @@ impl Stimulator {
         if level == 0 {
             return Outcome::Skipped(Skip::Zero);
         }
-        let width = cmd.width_us.clamp(1, self.cfg.max_phase_us);
+        let width = cmd.width_us.min(self.cfg.max_phase_us);
+        if width <= self.cfg.settle_us {
+            return Outcome::Skipped(Skip::TooShort);
+        }
         let gap = cmd.gap_us.min(self.cfg.max_gap_us);
 
         // Duty budget: refill by elapsed * permille, spend 2*width per pulse.
@@ -279,6 +382,9 @@ impl Stimulator {
         if hw.cancelled() {
             return self.fault(hw, ch, Fault::Cancelled);
         }
+        if let Err(f) = self.battery_check(hw, now_us) {
+            return self.fault(hw, ch, f);
+        }
         // Setup (slow, interrupts enabled): supply, routing with read-back, amplitude.
         if !self.supply_on {
             if let Err(e) = hw.supply(true) {
@@ -292,24 +398,27 @@ impl Stimulator {
         if let Err(e) = hw.select(Some(cmd.channel)) {
             return self.fault(hw, ch, Fault::Hw(e));
         }
+        // Zero check, bridge off and DAC still at zero: the sense path must answer, and with
+        // nothing driven it must read nothing. The bridge never closes on a dead or stuck sense.
+        match self.convert(hw) {
+            Ok(v) if v > self.cfg.over_margin => {
+                return self.fault(hw, ch, Fault::SenseNotZero { measured: v })
+            }
+            Ok(_) => {}
+            Err(f) => return self.fault(hw, ch, f),
+        }
         if let Err(e) = hw.dac_level(level) {
             return self.fault(hw, ch, Fault::Hw(e));
         }
 
-        // The sampler starts with the supply; wait (bounded) for its first conversion so the
-        // bridge never closes without live feedback.
-        if !hw.wait_first_sample(self.cfg.sense_startup_us) {
-            return self.fault(hw, ch, Fault::SenseTimeout);
-        }
-
-        let r: Result<Option<u16>, Fault> = (|| {
+        let r: Result<u16, Fault> = (|| {
             let a = self.phase(hw, Bridge::Positive, level, width)?;
             if gap > 0 {
                 hw.delay_us(gap);
                 if hw.cancelled() { return Err(Fault::Cancelled); }
             }
             let b = self.phase(hw, Bridge::Negative, level, width)?;
-            Ok(b.or(a))
+            b.or(a).ok_or(Fault::Unmeasured)
         })();
 
         match r {
@@ -317,26 +426,56 @@ impl Stimulator {
                 // Leave the stage de-energised between pulses.
                 let _ = hw.dac_level(0);
                 let _ = hw.select(None);
-                let open_circuit =
-                    level >= 10 && m.is_some_and(|m| m + self.cfg.under_margin < level as u16);
-                Outcome::Fired { measured: m.unwrap_or(0), open_circuit }
+                Outcome::Fired { measured: m }
             }
             Err(f) => self.fault(hw, ch, f),
         }
     }
 
-    /// The newest conversion, or the fault that its absence/staleness is.
-    fn fresh<H: Hw>(&self, hw: &mut H) -> Result<(crate::hw::Sample, u64), Fault> {
-        let s = hw.sense_latest().ok_or(Fault::SenseTimeout)?;
-        let age = hw.now_us().saturating_sub(s.at_us);
-        if age > self.cfg.sense_max_age_us as u64 {
-            return Err(Fault::StaleSense { age_us: age });
-        }
-        Ok((s, age))
+    /// Start a sense conversion and wait (busy) for it, at most `sense_timeout_us`.
+    fn convert<H: Hw>(&self, hw: &mut H) -> Result<u16, Fault> {
+        hw.sense_start().map_err(Fault::Hw)?;
+        self.wait_for(hw, H::sense_poll)
     }
 
-    /// One phase: close the bridge (only with fresh feedback), watch the output until the width
-    /// has elapsed, open the bridge. Returns the newest in-phase reading, if any arrived.
+    /// Wait (busy) for the running conversion, at most `sense_timeout_us` from now. The clock is
+    /// read before the result is polled, so time spent in unrelated interrupts between the two
+    /// can never turn a completed conversion into a timeout.
+    fn wait_for<H: Hw, T>(&self, hw: &mut H, poll: fn(&mut H) -> Option<T>) -> Result<T, Fault> {
+        let m = hw.fine_mark();
+        loop {
+            let waited = hw.fine_since_us(m);
+            if let Some(v) = poll(hw) {
+                return Ok(v);
+            }
+            if waited >= self.cfg.sense_timeout_us {
+                return Err(Fault::SenseTimeout);
+            }
+            hw.delay_us(self.cfg.poll_step_us.min(self.cfg.sense_timeout_us - waited));
+        }
+    }
+
+    /// Judge one in-phase reading against the commanded level.
+    fn judge(&self, v: u16, level: u8) -> Result<(), Fault> {
+        if v > level as u16 + self.cfg.over_margin {
+            return Err(Fault::Overdrive { measured: v, commanded: level });
+        }
+        if v + self.cfg.under_margin < level as u16 {
+            return Err(Fault::UnderDelivery { measured: v, commanded: level });
+        }
+        Ok(())
+    }
+
+    /// One phase: close the bridge, measure the output while the width elapses, open the bridge.
+    /// Returns the last in-phase reading, `None` if the width had elapsed before the first
+    /// conversion could start (the loop was preempted across `settle_us`).
+    ///
+    /// Timing: the phase's clock starts before the bridge closes, so the measured length is never
+    /// shorter than the time the bridge was closed. The first conversion starts `settle_us` in;
+    /// later ones only while `sense_guard_us` of the width remains, so when the width allows one
+    /// conversion plus the guard the end of the phase never waits for a conversion's interrupt:
+    /// the bridge opens within one poll step of the width, plus whatever unrelated interrupts
+    /// take (the overrun check bounds those).
     fn phase<H: Hw>(
         &self,
         hw: &mut H,
@@ -344,54 +483,67 @@ impl Stimulator {
         level: u8,
         width: u32,
     ) -> Result<Option<u16>, Fault> {
-        let limit = level as u16 + self.cfg.over_margin;
         if hw.cancelled() { return Err(Fault::Cancelled); }
-        self.fresh(hw)?;
+        let f0 = hw.fine_mark();
         if let Err(e) = hw.bridge(pol) {
             let _ = hw.bridge(Bridge::Off);
             return Err(Fault::Hw(e));
         }
-        // Widths come from the fine clock; sample ages from the (possibly coarser) timestamp clock.
-        // Each is only ever used as a difference of its own readings.
-        let f0 = hw.fine_mark();
-        let settle = self.cfg.settle_us.min(width) as u64;
+        let mut pending = false;
         let mut measured = None;
+        let mut fail = None;
         loop {
-            hw.delay_us(self.cfg.poll_step_us);
-            if hw.cancelled() {
-                let _ = hw.bridge(Bridge::Off);
-                return Err(Fault::Cancelled);
-            }
-            let elapsed = hw.fine_since_us(f0);
-            // The newest conversion is judged before the width ends the phase: one that
-            // completed inside the phase is often first seen at the poll that finds the width
-            // elapsed (the poll after a conversion waits out its interrupts), and skipping it
-            // there left a stuck-high or overdriven sense unchecked for every pulse.
-            match self.fresh(hw) {
-                Ok((s, age)) => {
-                    // The conversion happened `age` ago: it is in the settled part of the phase
-                    // if the phase had been running for at least `settle` by then.
-                    if age + settle <= elapsed as u64 {
-                        measured = Some(s.value);
-                        if s.value > limit {
-                            let _ = hw.bridge(Bridge::Off);
-                            return Err(Fault::Overdrive { measured: s.value, commanded: level });
-                        }
+            if pending {
+                if let Some(v) = hw.sense_poll() {
+                    pending = false;
+                    measured = Some(v);
+                    if let Err(f) = self.judge(v, level) {
+                        fail = Some(f);
+                        break;
                     }
                 }
-                Err(f) => {
-                    let _ = hw.bridge(Bridge::Off);
-                    return Err(f);
-                }
             }
+            if hw.cancelled() {
+                fail = Some(Fault::Cancelled);
+                break;
+            }
+            let elapsed = hw.fine_since_us(f0);
             if elapsed >= width {
                 break;
             }
+            let remaining = width - elapsed;
+            if !pending
+                && elapsed >= self.cfg.settle_us
+                && (measured.is_none() || remaining >= self.cfg.sense_guard_us)
+            {
+                if let Err(e) = hw.sense_start() {
+                    fail = Some(Fault::Hw(e));
+                    break;
+                }
+                pending = true;
+                continue;
+            }
+            hw.delay_us(self.cfg.poll_step_us.min(remaining));
         }
-        if let Err(e) = hw.bridge(Bridge::Off) {
-            return Err(Fault::Hw(e));
-        }
+        let off = hw.bridge(Bridge::Off);
         let elapsed = hw.fine_since_us(f0) as u64;
+        // A conversion started inside the phase sampled the output there: wait for it and judge
+        // it, even after a fault (the next conversion must find the converter free).
+        if pending {
+            match self.wait_for(hw, H::sense_poll) {
+                Ok(v) => {
+                    measured = Some(v);
+                    if fail.is_none() {
+                        fail = self.judge(v, level).err();
+                    }
+                }
+                Err(f) => fail = fail.or(Some(f)),
+            }
+        }
+        if let Some(f) = fail {
+            return Err(f);
+        }
+        off.map_err(Fault::Hw)?;
         if elapsed > width as u64 + self.cfg.overrun_slack_us as u64 {
             return Err(Fault::PhaseOverrun { elapsed_us: elapsed });
         }

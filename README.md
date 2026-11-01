@@ -82,20 +82,23 @@ callback, and Zephyr's timing API needs a source (CPU cycle counter, or `zephyr,
 part has no Zephyr driver yet, write that driver (one crate, one binding) and nothing else changes.
 The boards verified to build are `bg22_ek4108a` and `owo_suit`; no second MCU family has been tried.
 
-Idle power: the ADC sampler and the timing counter run only while the supply is on. The timing backend never
-blocks sleep: it needs a counter that keeps counting in the sleep states in use, and arms an alarm half a
-counter period ahead so a flush always happens in time. The stand-in overlay uses BURTC (32768 Hz, counts in every sleep state)
-for timestamps, and TIMER0 (1 us) as a separate `phase-timer` for pulse widths, started and stopped with the supply.
-Sample ages therefore have 30 us resolution; phase widths do not.
+Idle power: nothing samples between pulses. The supervisor starts every ADC conversion itself (a zero
+check before each pulse, conversions inside each phase, the battery once a second while pulses fire);
+phase widths come from the system clock's cycle counter.
 
 
 - Interlocks (see `docs/stock-stim-path.md` for which the stock firmware has and which are new): hard
   level ceiling (default 40 of 126), coverage window + dead-man, soft start, per-channel duty budget,
-  phase/gap limits, charge-balanced phases, fault latch + lockout, supply off when idle, sense freshness (the bridge closes and stays closed only while the newest ADC conversion is recent), phase-overrun check,
-  break-before-make bridge, switch read-back.
+  phase/gap limits, charge-balanced phases, fault latch + lockout, supply off when idle, supervisor-timed
+  sensing (a zero check before each pulse, in-phase conversions that keep clear of the phase end, an ADC
+  stall locks the output), under-delivery stop (open electrode, sense stuck at zero), battery start/stop
+  thresholds, phase-overrun check, break-before-make bridge, switch read-back.
 - Kconfig: `OWO_STIM_UNVALIDATED_HARDWARE` (set by `-DOWO_HW=ON`), `OWO_STIM_HARD_MAX_LEVEL`,
   `OWO_STIM_DEADMAN_MS`, `OWO_STIM_MAX_PHASE_US`, `OWO_STIM_SOFT_START_MS`, `OWO_STIM_MAX_DUTY_PERMILLE`,
-  `OWO_STIM_WIDTH_SCALE_PERCENT`, `OWO_STIM_SENSE_INTERVAL_US`, `OWO_STIM_SENSE_MAX_AGE_US`, `OWO_STIM_FAULT_LOCKOUT`.
+  `OWO_STIM_WIDTH_SCALE_PERCENT`, `OWO_STIM_SENSE_GUARD_US`, `OWO_STIM_SENSE_TIMEOUT_US`,
+  `OWO_STIM_SETTLE_US`, `OWO_STIM_UNDER_MARGIN`, `OWO_STIM_BATTERY_START_MV`, `OWO_STIM_BATTERY_STOP_MV`,
+  `OWO_STIM_BATTERY_INTERVAL_MS`, `OWO_STIM_FAULT_LOCKOUT` (each help text says which values still need a
+  silicon measurement).
 
 ### Bench checklist (before any skin contact)
 1. Dummy load only (resistor network, a few kOhm per channel), current-limited bench supply in place of the

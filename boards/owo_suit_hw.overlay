@@ -95,6 +95,22 @@
 		zephyr,resolution = <12>;
 		zephyr,vref-mv = <3300>;
 	};
+
+	/*
+	 * Battery divider on PD3 (pack x 33/133, as the stock firmware scales it). Unlike the stock
+	 * firmware (VDD reference) it is measured against the IADC's internal 1.21 V band-gap
+	 * reference, so the reading does not depend on the supply that sags with the pack. Gain 1/2
+	 * gives a 2.42 V full scale: a 2-cell pack at 8.4 V puts 2.08 V on the pin.
+	 */
+	channel@1 {
+		reg = <1>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,gain = "ADC_GAIN_1_2";
+		zephyr,input-positive = <IADC_INPUT_PD3>;
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,resolution = <12>;
+		zephyr,vref-mv = <1210>;
+	};
 };
 
 /* Supply enables behind the expander (P2, P3): plain regulators. */
@@ -128,8 +144,9 @@
 				 0x00010001 0x00200020 0x00040004 0x02000200 0x04000400>;
 		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
 		boost-duty-percent = <50>;
-		io-channels = <&suit_dac 15>, <&adc0 0>;
-		io-channel-names = "amplitude", "sense";
+		io-channels = <&suit_dac 15>, <&adc0 0>, <&adc0 1>;
+		io-channel-names = "amplitude", "sense", "battery";
+		battery-divider = <133 33>;
 		amplitude-resolution = <12>;
 		amplitude-scale = <0x12FED 0x9C4>;
 		max-level = <126>;

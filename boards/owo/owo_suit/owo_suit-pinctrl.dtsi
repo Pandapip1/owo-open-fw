@@ -54,10 +54,16 @@
 		};
 	};
 
-	/* Sense input PD3 (feedback) is an odd pin of ports C/D: the CD odd analog bus. */
+	/*
+	 * IADC inputs: the sense (feedback) input PD2 is an even pin of ports C/D, the battery
+	 * divider PD3 an odd one; each needs its analog bus allocated to the IADC
+	 * (GPIO_CDBUSALLOC), as the stock firmware does (CDEVEN0 for PD2, CDODD0 for PD3). The IADC
+	 * flags an input on an unallocated bus (IF.PORTALLOCERR). The QEMU model does not check the
+	 * allocation, which is how the PD2 sense input ran there with only CDODD0 allocated.
+	 */
 	iadc0_suit_sense: iadc0_suit_sense {
 		group0 {
-			silabs,analog-bus = <ABUS_CDODD0_IADC0>;
+			silabs,analog-bus = <ABUS_CDEVEN0_IADC0>, <ABUS_CDODD0_IADC0>;
 		};
 	};
 };

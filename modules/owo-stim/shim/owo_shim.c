@@ -15,8 +15,12 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/timing/timing.h>
+#include <zephyr/drivers/pinctrl.h>
+#include <zephyr/init.h>
 #include <em_device.h>
+#include <sl_clock_manager.h>
+#include <sl_hal_gpio.h>
+#include <sl_hal_i2c.h>
 
 int owo_gpio_configure(const void *g, int active)
 {
@@ -111,104 +115,73 @@ uint32_t owo_counter_since_us(const void *d, uint32_t mark)
 	return k_cyc_to_us_floor32(k_cycle_get_32() - mark);
 }
 
-/* ---- timing (Zephyr timing API; the backend is the board's choice) ---- */
+/*
+ * ---- conversions started by the supervisor (feedback and battery) ----
+ *
+ * One conversion at a time, of the channel the caller names: Zephyr's asynchronous read of a
+ * one-sample sequence, whose completion callback (the ADC interrupt) publishes the result. The
+ * supervisor starts each conversion at a point of the pulse it chooses and polls for the result,
+ * so the ADC only interrupts where it was asked to; between pulses nothing samples.
+ */
+enum { CONV_IDLE, CONV_RUNNING, CONV_DONE };
+static atomic_t conv_state;
+static uint16_t conv_buf;
+static struct adc_sequence_options conv_opts;
+static struct adc_sequence conv_seq;
 
-void owo_timing_start(void)
+static enum adc_action conv_cb(const struct device *dev, const struct adc_sequence *seq,
+			       uint16_t index)
 {
-	timing_init();
-	timing_start();
-}
-
-uint64_t owo_timing_stamp(void)
-{
-	return timing_counter_get();
-}
-
-uint64_t owo_timing_to_us(uint64_t cycles)
-{
-	return timing_cycles_to_ns(cycles) / 1000U;
-}
-
-/* ---- feedback stream: Zephyr ADC async sequence that repeats from its own callback ---- */
-
-struct sample {
-	uint64_t stamp;
-	uint16_t raw;
-};
-
-/* Depth 1, "latest wins": the ISR drops the old entry and stores the new; readers peek. */
-K_MSGQ_DEFINE(sample_q, sizeof(struct sample), 1, 8);
-K_SEM_DEFINE(sample_first, 0, 1);
-static uint16_t sample_buf;
-static atomic_t sample_stop;
-static struct adc_sequence_options sample_opts;
-static struct adc_sequence sample_seq;
-
-static enum adc_action sample_cb(const struct device *dev, const struct adc_sequence *seq,
-				 uint16_t index)
-{
-	struct sample s;
-	struct sample old;
-
 	ARG_UNUSED(dev);
+	ARG_UNUSED(seq);
 	ARG_UNUSED(index);
-	if (atomic_get(&sample_stop)) {
-		timing_stop(); /* last conversion: release the timing source (PM lock, power) */
-		return ADC_ACTION_FINISH;
-	}
-	s.stamp = timing_counter_get();
-	s.raw = *(const uint16_t *)seq->buffer;
-	(void)k_msgq_get(&sample_q, &old, K_NO_WAIT);
-	(void)k_msgq_put(&sample_q, &s, K_NO_WAIT);
-	k_sem_give(&sample_first);
-	return ADC_ACTION_REPEAT;
+	atomic_set(&conv_state, CONV_DONE);
+	return ADC_ACTION_FINISH;
 }
 
-int owo_sense_start(const void *p, uint32_t interval_us)
+/* Once per channel, before its first conversion (its gain, reference and input). */
+int owo_adc_setup(const void *p)
+{
+	return adc_channel_setup_dt((const struct adc_dt_spec *)p);
+}
+
+/*
+ * Start one conversion; thread context. -EBUSY while an earlier one has not completed: its
+ * asynchronous read still holds the driver, and a new read would block on it for ever.
+ */
+int owo_adc_start(const void *p)
 {
 	const struct adc_dt_spec *a = p;
-	int r = adc_channel_setup_dt(a);
+	int r;
 
-	if (r < 0) {
-		return r;
+	if (atomic_get(&conv_state) == CONV_RUNNING) {
+		return -EBUSY;
 	}
-	k_msgq_purge(&sample_q);
-	k_sem_reset(&sample_first);
-	atomic_set(&sample_stop, 0);
-	sample_opts = (struct adc_sequence_options){.interval_us = interval_us, .callback = sample_cb};
-	sample_seq = (struct adc_sequence){
-		.options = &sample_opts,
+	atomic_set(&conv_state, CONV_RUNNING);
+	conv_opts = (struct adc_sequence_options){.callback = conv_cb};
+	conv_seq = (struct adc_sequence){
+		.options = &conv_opts,
 		.channels = BIT(a->channel_id),
-		.buffer = &sample_buf,
-		.buffer_size = sizeof(sample_buf),
+		.buffer = &conv_buf,
+		.buffer_size = sizeof(conv_buf),
 		.resolution = a->resolution,
+		.oversampling = a->oversampling,
 	};
-	/* Blocks briefly if a previous run is still finishing. No signal: nobody waits for it. */
-	return adc_read_async(a->dev, &sample_seq, NULL);
-}
-
-/* Thread context only. The ADC completion callback gives this after publishing the sample. */
-int owo_sense_wait_first(uint32_t timeout_us)
-{
-	return k_sem_take(&sample_first, K_USEC(timeout_us));
-}
-
-void owo_sense_stop(void)
-{
-	atomic_set(&sample_stop, 1); /* the next conversion returns ADC_ACTION_FINISH */
-}
-
-/* 0 and *raw/*stamp set, or -ENODATA if nothing completed since owo_sense_start(). */
-int owo_sense_latest(uint16_t *raw, uint64_t *stamp)
-{
-	struct sample s;
-
-	if (k_msgq_peek(&sample_q, &s) != 0) {
-		return -ENODATA;
+	r = adc_read_async(a->dev, &conv_seq, NULL);
+	if (r < 0) {
+		atomic_set(&conv_state, CONV_IDLE); /* refused: nothing is running */
 	}
-	*raw = s.raw;
-	*stamp = s.stamp;
-	return 0;
+	return r;
+}
+
+/* 1 and *raw once the conversion completed, 0 while it runs or if none was started. */
+int owo_adc_poll(uint16_t *raw)
+{
+	if (!atomic_cas(&conv_state, CONV_DONE, CONV_IDLE)) {
+		return 0;
+	}
+	*raw = conv_buf;
+	return 1;
 }
 
 /* Zephyr's own conversion: the channel's resolution, gain and reference. */
@@ -246,10 +219,13 @@ static const struct device *const dac_dev =
 	DEVICE_DT_GET(DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude));
 static const struct pwm_dt_spec boost = PWM_DT_SPEC_GET_BY_IDX(SUIT, 0);
 static const struct adc_dt_spec sense = ADC_DT_SPEC_GET_BY_NAME(SUIT, sense);
+static const struct adc_dt_spec battery = ADC_DT_SPEC_GET_BY_NAME(SUIT, battery);
+BUILD_ASSERT(DT_PROP_LEN(SUIT, battery_divider) == 2, "battery-divider is <num den>");
 #if defined(CONFIG_ADC_SILABS_IADC)
-/* owo-suit-hw.conf sizes the IADC driver's channel table for this channel. */
-BUILD_ASSERT(DT_IO_CHANNELS_INPUT_BY_NAME(SUIT, sense) < CONFIG_ADC_SILABS_IADC_CHANNELS,
-	     "raise CONFIG_ADC_SILABS_IADC_CHANNELS to cover the sense channel");
+/* owo-suit-hw.conf sizes the IADC driver's channel table for these channels. */
+BUILD_ASSERT(DT_IO_CHANNELS_INPUT_BY_NAME(SUIT, sense) < CONFIG_ADC_SILABS_IADC_CHANNELS &&
+	     DT_IO_CHANNELS_INPUT_BY_NAME(SUIT, battery) < CONFIG_ADC_SILABS_IADC_CHANNELS,
+	     "raise CONFIG_ADC_SILABS_IADC_CHANNELS to cover the sense and battery channels");
 #endif
 
 /*
@@ -355,7 +331,8 @@ int owo_suit_post(void)
 		}
 	}
 	if (!device_is_ready(switch_dev) || !device_is_ready(dac_dev) ||
-	    !device_is_ready(boost.dev) || !device_is_ready(sense.dev)) {
+	    !device_is_ready(boost.dev) || !device_is_ready(sense.dev) ||
+	    !device_is_ready(battery.dev)) {
 		return -ENODEV;
 	}
 	for (i = 0; i < ARRAY_SIZE(supplies); ++i) {
@@ -380,6 +357,8 @@ uint32_t owo_suit_param(int kind)
 	case 7: return DT_PROP(SUIT, boost_duty_percent);
 	case 8: return ARRAY_SIZE(supplies);
 	case 9: return ARRAY_SIZE(switch_routes);
+	case 10: return DT_PROP_BY_IDX(SUIT, battery_divider, 0);
+	case 11: return DT_PROP_BY_IDX(SUIT, battery_divider, 1);
 	default: return 0;
 	}
 }
@@ -515,37 +494,56 @@ BUILD_ASSERT(DT_SAME_NODE(DT_GPIO_CTLR(DAC_NODE, reset_gpios), EXPANDER),
 /* 7-bit address and R/W = 0 (write) in the address byte (I2C-bus specification, 3.1.10). */
 #define I2C_ADDRESS_BYTE_WRITE(addr) ((uint32_t)(addr) << 1)
 
-/* Wait for the follower's acknowledge of the byte on the bus. False on a NACK. */
-static bool i2c_raw_acked(I2C_TypeDef *i2c)
+/* No bound on a wait: the warning interrupt's waits end with the watchdog reset. */
+#define I2C_RAW_UNBOUNDED 0U
+
+/*
+ * Wait for the follower's acknowledge of the byte on the bus. False on a NACK, a lost
+ * arbitration or a bus error, and once @limit CPU cycles (DWT CYCCNT) have passed since @start
+ * unless @limit is I2C_RAW_UNBOUNDED.
+ */
+static bool i2c_raw_acked(I2C_TypeDef *i2c, uint32_t start, uint32_t limit)
 {
+	const uint32_t done = I2C_IF_ACK | I2C_IF_NACK | I2C_IF_ARBLOST | I2C_IF_BUSERR;
 	uint32_t f;
 
 	do {
-		f = i2c->IF & (I2C_IF_ACK | I2C_IF_NACK);
+		f = i2c->IF & done;
+		if (f == 0 && limit != I2C_RAW_UNBOUNDED && DWT->CYCCNT - start >= limit) {
+			return false;
+		}
 	} while (f == 0);
 	i2c->IF_CLR = f;
 	return f == I2C_IF_ACK;
 }
 
-static void expander_safe_raw(void)
+/* One port write of the expander's safe pin levels on an enabled leader. */
+static void expander_write_safe(I2C_TypeDef *i2c, uint32_t limit)
 {
-	I2C_TypeDef *const i2c = (I2C_TypeDef *)DT_REG_ADDR(DT_BUS(EXPANDER));
 	uint32_t pins = EXPANDER_SAFE;
+	uint32_t start = DWT->CYCCNT;
 
-	if (!(i2c->EN & I2C_EN_EN)) {
-		return; /* never brought up: the expander still has its reset state */
-	}
-	/* End whatever the interrupted thread had on the bus (RM SS23.3.8). */
+	/* End whatever was on the bus (RM SS23.3.8). */
 	i2c->CMD = I2C_CMD_ABORT | I2C_CMD_CLEARTX | I2C_CMD_CLEARPC;
 	i2c->IF_CLR = _I2C_IF_MASK;
 	i2c->TXDATA = I2C_ADDRESS_BYTE_WRITE(DT_REG_ADDR(EXPANDER));
 	i2c->CMD = I2C_CMD_START;
-	for (size_t i = 0; i < EXPANDER_PORTS && i2c_raw_acked(i2c); ++i) {
+	for (size_t i = 0; i < EXPANDER_PORTS && i2c_raw_acked(i2c, start, limit); ++i) {
 		i2c->TXDATA = pins & BIT_MASK(EXPANDER_PORT_BITS);
 		pins >>= EXPANDER_PORT_BITS;
 	}
-	(void)i2c_raw_acked(i2c);
+	(void)i2c_raw_acked(i2c, start, limit);
 	i2c->CMD = I2C_CMD_STOP;
+}
+
+static void expander_safe_raw(void)
+{
+	I2C_TypeDef *const i2c = (I2C_TypeDef *)DT_REG_ADDR(DT_BUS(EXPANDER));
+
+	if (!(i2c->EN & I2C_EN_EN)) {
+		return; /* not up yet: owo_suit_early_safe_off() has written the safe levels at boot */
+	}
+	expander_write_safe(i2c, I2C_RAW_UNBOUNDED);
 }
 
 void owo_suit_force_safe_from_isr(void)
@@ -554,6 +552,79 @@ void owo_suit_force_safe_from_isr(void)
 	boost_safe_raw();
 	expander_safe_raw();
 }
+
+/*
+ * ---- the earliest safe-off after a reset ----
+ *
+ * The expander (supply enables, the DAC's /CLR) and the DAC keep their state across an MCU
+ * reset: after a reset with the stage live, the boost supply stayed enabled until the reset
+ * safe-off at APPLICATION level (docs/stim-simulation.md). This runs at the first init level
+ * (EARLY, before the SoC's clock setup and every driver), with register writes only:
+ *  1. Bridge: the safe gate levels on the output latches, then the pins to push-pull (they float
+ *     from the reset until here).
+ *  2. Expander: the I2C leader brought up from its reset state (bus clocks, the I2C0 pinctrl
+ *     state, standard-mode divider from the clock the bus actually has now) and the same port
+ *     write as the warning interrupt's (supply enables off, DAC /CLR asserted, so the DAC goes
+ *     to zero scale). The watchdog does not run yet, so every wait is bounded by the cycle
+ *     counter: EARLY_I2C_BYTE_TIMES byte times of the divider actually programmed.
+ *  3. The leader is reset again so the I2C driver starts from the state it expects.
+ * The boost PWM pin is disabled from reset until its driver configures it (off).
+ */
+/* The I2C leader's default pin control state, as its driver applies it later. */
+static const pinctrl_soc_pin_t early_i2c_pins[] =
+	Z_PINCTRL_STATE_PINS_INIT(DT_BUS(EXPANDER), pinctrl_0);
+
+/* I2C byte: 8 data bits and the acknowledge (I2C-bus specification, 3.1.6). */
+#define I2C_BITS_PER_BYTE 9U
+/*
+ * The whole write is START + address + the port bytes + STOP; allow its byte count plus one
+ * for the START/STOP conditions, twice over for a follower that stretches the clock (a PCF857x
+ * does not; the factor only keeps a slow but working bus from being cut off).
+ */
+#define EARLY_I2C_BYTE_TIMES (2U * (1U + 1U + EXPANDER_PORTS + 1U))
+
+static int owo_suit_early_safe_off(void)
+{
+	I2C_TypeDef *const i2c = (I2C_TypeDef *)DT_REG_ADDR(DT_BUS(EXPANDER));
+	uint32_t i2c_clk, scl, cpu = SystemCoreClockGet();
+
+	sl_clock_manager_enable_bus_clock(SL_BUS_CLOCK_GPIO);
+	for (size_t i = 0; i < BRIDGE_N; ++i) {
+		const sl_gpio_t pin = {
+			.port = (bridge_raw[i].port - (uintptr_t)&GPIO->P[0]) / sizeof(GPIO->P[0]),
+			.pin = bridge_raw[i].pin,
+		};
+
+		raw_pin_drive(&bridge_raw[i], i >= BRIDGE_HIGH_SIDES);
+		sl_hal_gpio_set_pin_mode(&pin, SL_GPIO_MODE_PUSH_PULL,
+					 (i >= BRIDGE_HIGH_SIDES) != bridge_raw[i].active_low);
+	}
+
+	sl_clock_manager_enable_bus_clock(SL_BUS_CLOCK_I2C0);
+	if (sl_clock_manager_get_clock_branch_frequency(SL_CLOCK_BRANCH_LSPCLK, &i2c_clk) != 0 ||
+	    pinctrl_configure_pins(early_i2c_pins, ARRAY_SIZE(early_i2c_pins),
+				   PINCTRL_REG_NONE) < 0) {
+		return 0; /* the reset safe-off and the warning still follow */
+	}
+	sl_hal_i2c_reset(i2c);
+	sl_hal_i2c_init(i2c, SL_I2C_LEADER_MODE);
+	sl_hal_i2c_set_clock_frequency(i2c, i2c_clk, SL_HAL_I2C_FREQ_STANDARD_MAX,
+				       SL_I2C_CLK_HLR_STANDARD);
+	scl = sl_hal_i2c_get_clock_frequency(i2c, i2c_clk);
+	sl_hal_i2c_enable(i2c);
+
+	DCB->DEMCR |= DCB_DEMCR_TRCENA_Msk;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+	if (scl != 0) {
+		expander_write_safe(i2c, (uint32_t)((uint64_t)cpu * EARLY_I2C_BYTE_TIMES *
+						    I2C_BITS_PER_BYTE / scl));
+	}
+	sl_hal_i2c_reset(i2c);
+	sl_hal_i2c_disable(i2c);
+	return 0;
+}
+
+SYS_INIT(owo_suit_early_safe_off, EARLY, 0);
 
 const void *owo_suit_handle(int kind)
 {
@@ -568,6 +639,7 @@ const void *owo_suit_handle(int kind)
 	case 6: h = &boost; dev = boost.dev; break;
 	case 7: h = &sense; dev = sense.dev; break;
 	case 8: return &fine_clock; /* the system clock: nothing to be ready */
+	case 9: h = &battery; dev = battery.dev; break;
 	default:
 		/* 16 + i: supply regulator i */
 		if (kind >= 16 && (size_t)(kind - 16) < ARRAY_SIZE(supplies)) {

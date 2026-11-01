@@ -9,7 +9,7 @@
 //! | amplitude DAC | here (scaling) | DAC API; `ltc2634` is the Rust driver for the part |
 //! | supply enables | here | regulator (`regulator-fixed`) |
 //! | boost converter | here | PWM |
-//! | feedback | here (scaling) | ADC async sequence; timestamps from the timing API |
+//! | feedback, battery | here (scaling) | ADC: one asynchronous read per conversion, started by the supervisor |
 //! | phase widths | here | Counter API (a 32-bit counter with <= 1 us ticks, running only while the supply is on) |
 
 #![no_std]
@@ -18,11 +18,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use owo_hal::Switchable as _;
 use owo_hbridge::{HBridge, State};
-use owo_stim::hw::{Bridge, Hw, HwError, Sample};
+use owo_stim::hw::{Bridge, Hw, HwError};
 use owo_switch::Switch;
 use zephyr_io::{
-    now_us, suit_handle, suit_param, suit_post, suit_supply_handle, suit_switch_routes, Dac, Gpio, Port, Pwm,
-    FineCounter, Regulator, Sampler, SuitHandle, SuitParam,
+    suit_handle, suit_param, suit_post, suit_supply_handle, suit_switch_routes, AdcChannel, Dac, Gpio,
+    Port, Pwm, FineCounter, Regulator, SuitHandle, SuitParam,
 };
 
 /// The DAC driver's entry points are called only from C (`drivers/dac/dac_ltc2634.c`); this keeps
@@ -39,8 +39,6 @@ static LTC2634_DRIVER: (
     ltc2634::zephyr::ltc2634_rs_write_value,
 );
 
-/// Sampling interval while the supply is on; see CONFIG_OWO_STIM_SENSE_INTERVAL_US.
-const SENSE_INTERVAL_US: u32 = 100;
 /// Maximum number of supply regulators the binding allows.
 const MAX_SUPPLIES: usize = 4;
 static RESOURCE_LEASES: ResourceLeaseGate = ResourceLeaseGate::new();
@@ -257,6 +255,8 @@ pub struct Scale {
     pub max_level: u8,
     pub uv_per_level: u32,
     pub sense_offset: u32,
+    pub battery_num: u32,
+    pub battery_den: u32,
 }
 
 impl Scale {
@@ -269,7 +269,18 @@ impl Scale {
             max_level: suit_param(SuitParam::MaxLevel) as u8,
             uv_per_level: suit_param(SuitParam::SenseUvPerLevel),
             sense_offset: suit_param(SuitParam::SenseOffset),
+            battery_num: suit_param(SuitParam::BatteryDividerNum),
+            battery_den: suit_param(SuitParam::BatteryDividerDen),
         }
+    }
+
+    /// Pack millivolts for millivolts at the battery pin (0 for an unconvertible reading, which
+    /// then reads as a flat battery).
+    pub fn battery_mv(&self, pin_mv: i32) -> u32 {
+        if pin_mv <= 0 || self.battery_den == 0 {
+            return 0;
+        }
+        (pin_mv as u64 * self.battery_num as u64 / self.battery_den as u64).min(u32::MAX as u64) as u32
     }
 
     /// DAC code for a commanded level, `None` if above the board's range.
@@ -295,7 +306,8 @@ pub struct Suit {
     switch: Switch<'static, Port>,
     dac: Dac,
     boost: Pwm,
-    sense: Sampler,
+    sense: AdcChannel,
+    battery: AdcChannel,
     fine: FineCounter,
     supplies: [Option<Regulator>; MAX_SUPPLIES],
     scale: Scale,
@@ -364,20 +376,24 @@ impl Suit {
         let dp = suit_handle(SuitHandle::Dac);
         let pp = suit_handle(SuitHandle::BoostPwm);
         let ap = suit_handle(SuitHandle::SenseAdc);
+        let bp = suit_handle(SuitHandle::BatteryAdc);
         let fp = suit_handle(SuitHandle::PhaseTimer);
-        if sw.is_null() || dp.is_null() || pp.is_null() || ap.is_null() || fp.is_null() {
+        if sw.is_null() || dp.is_null() || pp.is_null() || ap.is_null() || bp.is_null() || fp.is_null() {
             return Err(InitError::NoDevice);
         }
         // SAFETY: non-null handles from the shim have the types named by their SuitHandle kind.
-        let (port, mut dac, mut boost, sense, fine) = unsafe {
+        let (port, mut dac, mut boost, mut sense, mut battery, fine) = unsafe {
             (
                 Port::from_raw(sw),
                 Dac::from_raw(dp),
                 Pwm::from_raw(pp),
-                Sampler::from_raw(ap),
+                AdcChannel::from_raw(ap),
+                AdcChannel::from_raw(bp),
                 FineCounter::from_raw(fp),
             )
         };
+        ok(sense.setup())?;
+        ok(battery.setup())?;
         let scale = Scale::from_dt();
         ok(boost.set_percent(0))?;
         ok(dac.channel_setup(scale.dac_channel, scale.dac_resolution))?;
@@ -388,6 +404,7 @@ impl Suit {
             dac,
             boost,
             sense,
+            battery,
             fine,
             supplies,
             scale,
@@ -410,10 +427,8 @@ impl Suit {
             .map_err(InitError::Errno);
         let switch = self.switch.select(None).map_err(|_| InitError::Errno(-5));
 
-        // These calls are infallible at the Rust interface, but they must
-        // still run before PWM/regulator shutdown even when an earlier driver
-        // rejected its command.
-        self.sense.stop();
+        // Infallible, but it must still run before PWM/regulator shutdown even when an earlier
+        // driver rejected its command.
         self.fine.stop();
         let boost = self.boost.set_percent(0).map_err(InitError::Errno);
         let supplies = self.supplies_set(false).map_err(InitError::Errno);
@@ -459,10 +474,6 @@ impl Hw for Suit {
         })
     }
 
-    fn now_us(&mut self) -> u64 {
-        now_us()
-    }
-
     fn fine_mark(&mut self) -> u32 {
         self.fine.mark()
     }
@@ -471,13 +482,22 @@ impl Hw for Suit {
         self.fine.since_us(mark)
     }
 
-    fn sense_latest(&mut self) -> Option<Sample> {
-        let (_raw, mv, at_us) = self.sense.latest()?;
-        Some(Sample { value: self.scale.level_from_mv(mv), at_us })
+    fn sense_start(&mut self) -> Result<(), HwError> {
+        self.sense.start().map_err(|_| HwError::Adc)
     }
 
-    fn wait_first_sample(&mut self, timeout_us: u32) -> bool {
-        self.sense.wait_first(timeout_us)
+    fn sense_poll(&mut self) -> Option<u16> {
+        let raw = AdcChannel::poll()?;
+        Some(self.scale.level_from_mv(self.sense.raw_to_mv(raw)))
+    }
+
+    fn battery_start(&mut self) -> Result<(), HwError> {
+        self.battery.start().map_err(|_| HwError::Adc)
+    }
+
+    fn battery_poll(&mut self) -> Option<u32> {
+        let raw = AdcChannel::poll()?;
+        Some(self.scale.battery_mv(self.battery.raw_to_mv(raw)))
     }
 
     fn supply(&mut self, on: bool) -> Result<(), HwError> {
@@ -488,8 +508,7 @@ impl Hw for Suit {
             let r = self
                 .supplies_set(true)
                 .and_then(|_| self.boost.set_percent(self.boost_duty))
-                .and_then(|_| self.fine.start())
-                .and_then(|_| self.sense.start(SENSE_INTERVAL_US));
+                .and_then(|_| self.fine.start());
             if r.is_ok() {
                 self.supply_on = true;
                 return Ok(());
@@ -497,7 +516,6 @@ impl Hw for Suit {
             // Fall through and switch everything back off.
         }
         // Always runs fully when asked to turn off (also after a failed turn-on).
-        self.sense.stop();
         self.fine.stop();
         // Boost first so the rail collapses, then the enables.
         let r1 = self.boost.set_percent(0);
@@ -528,7 +546,17 @@ mod tests {
         max_level: 126,
         uv_per_level: 19150,
         sense_offset: 3,
+        battery_num: 133,
+        battery_den: 33,
     };
+
+    #[test]
+    fn battery_scaling_matches_stock_formula() {
+        // stock: mV = raw * 3300 / 4095 * 133 / 33
+        assert_eq!(STOCK.battery_mv(1885), 7597);
+        assert_eq!(STOCK.battery_mv(0), 0);
+        assert_eq!(STOCK.battery_mv(-1), 0);
+    }
 
     #[test]
     fn dac_code_matches_stock_endpoint() {

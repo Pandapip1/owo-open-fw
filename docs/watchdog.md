@@ -44,8 +44,8 @@ after the OTA reboot in the model no WDOG0 event follows]. `EMU_RSTCTRL.LOCKUPRM
 ## Who feeds, and what a feed certifies
 
 Only the pump feeds (`src/wdt.rs`), once per loop iteration **after its supervision pass**:
-every pulse that was due has gone through the supervisor (each phase with its sense-freshness,
-overdrive and overrun checks) and the supervisor's dead-man poll has run for the current time.
+every pulse that was due has gone through the supervisor (the zero check and each phase with its in-phase sense,
+over- and under-delivery and overrun checks) and the supervisor's dead-man poll has run for the current time.
 `wdt::feed` grants the feed only if
 
 1. every live lease's safety predicate holds (an armed session holds one: not resetting), and
@@ -174,7 +174,7 @@ logged as unimplemented. Trace events: `config`, `enable`, `lock`, `clear` (with
 
 ## Blockers (outside this change, found while measuring) [E]
 
-- **Kernel timeouts stop in the model with PM on.** The default image (no output stage, no
+- **Kernel timeouts stop in the model with PM on** (resolved since: a 630 s PM-on run with stimulation fed the watchdog with a longest interval of 24.50 ms, `stim-simulation.md` Results). Was: the default image (no output stage, no
   radio safe shutdown) stops waking the pump about 600 ms after boot: the pump and the 1 ms
   mailbox work item both sit in the timeout list, the idle thread runs, nothing fires. Same
   image with `CONFIG_PM=n`: no stall over 60 s. Before this change the pump slept without a

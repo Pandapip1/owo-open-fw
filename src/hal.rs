@@ -39,7 +39,7 @@ impl DryRun {
 #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
 mod real {
     use super::*;
-    use owo_stim::stim::{Config, Outcome, PulseCmd, Skip, Stimulator};
+    use owo_stim::stim::{Config, Fault, Outcome, PulseCmd, Skip, Stimulator};
     use owo_suit::{LeaseError, Suit};
     use zephyr::kconfig as k;
 
@@ -64,6 +64,13 @@ mod real {
         c.soft_start_us = k::CONFIG_OWO_STIM_SOFT_START_MS as u64 * 1000;
         c.max_duty_permille = k::CONFIG_OWO_STIM_MAX_DUTY_PERMILLE as u32;
         c.fault_lockout = k::CONFIG_OWO_STIM_FAULT_LOCKOUT as u8;
+        c.sense_guard_us = k::CONFIG_OWO_STIM_SENSE_GUARD_US as u32;
+        c.sense_timeout_us = k::CONFIG_OWO_STIM_SENSE_TIMEOUT_US as u32;
+        c.settle_us = k::CONFIG_OWO_STIM_SETTLE_US as u32;
+        c.under_margin = k::CONFIG_OWO_STIM_UNDER_MARGIN as u16;
+        c.battery_start_mv = k::CONFIG_OWO_STIM_BATTERY_START_MV as u32;
+        c.battery_stop_mv = k::CONFIG_OWO_STIM_BATTERY_STOP_MV as u32;
+        c.battery_interval_us = k::CONFIG_OWO_STIM_BATTERY_INTERVAL_MS as u64 * 1000;
         c
     }
 
@@ -140,13 +147,20 @@ mod real {
             let outcome = self.sup.fire(hw, now_us, &cmd);
             // SAFETY: as above.
             unsafe { zephyr::raw::k_sched_unlock() };
+            #[cfg(CONFIG_OWO_SIM_INJECT)]
+            crate::sim_inject::note_outcome(&outcome);
             match outcome {
-                Outcome::Fired { open_circuit: true, .. } => {
-                    warn!("ch{}: sense reads far below command (open circuit / no contact?)", p.channel)
-                }
                 Outcome::Fired { .. } => {}
                 Outcome::Skipped(Skip::DutyBudget) | Outcome::Skipped(Skip::Zero) => {}
                 Outcome::Skipped(s) => log::debug!("ch{} skipped: {:?}", p.channel, s),
+                Outcome::Faulted(Fault::UnderDelivery { measured, commanded }) => warn!(
+                    "ch{}: sense {} far below command {} (open electrode, no contact or dead \
+                     sense); output stopped until Start",
+                    p.channel, measured, commanded
+                ),
+                Outcome::Faulted(Fault::BatteryLow { mv }) => {
+                    warn!("battery {} mV too low; output stopped until Start", mv)
+                }
                 Outcome::Faulted(f) => warn!("ch{} FAULT: {:?}; output off", p.channel, f),
             }
         }

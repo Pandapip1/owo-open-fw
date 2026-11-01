@@ -42,10 +42,21 @@ SCENARIOS = {
                  {"t": 6000, "do": "cmd", "name": "run", "hex": "00"}],
     "expander-nack": [fault(SUIT, "fault-expander-nack", "1")],
     "i2c-stuck": [fault("/machine/soc/i2c0", "x-sda-stuck", "1")],
+    # irqs-off: the core masks interrupts itself (cpsid i) and spins; mid-pulse: stopped with
+    # the bridge closed (stock: in its stimulation interrupt, interrupts masked the same way;
+    # open firmware: the pump thread, interrupts running), mid-pulse-irqs-off: the same with
+    # interrupts masked; mid-pulse-irq-lock: inside irq_lock() (BASEPRI).
     "hang-irqs-off": [{"t": FAULT_T, "do": "hang", "kind": "irqs-off"}],
     "hang-mid-pulse": [{"t": FAULT_T, "do": "hang", "kind": "mid-pulse"}],
+    "hang-mid-pulse-irqs-off": [{"t": FAULT_T, "do": "hang", "kind": "mid-pulse-irqs-off"}],
+    "hang-mid-pulse-irq-lock": [{"t": FAULT_T, "do": "hang", "kind": "mid-pulse-irq-lock"}],
     "hang-irqs-off-gates-float-on": [{"t": FAULT_T, "do": "hang", "kind": "irqs-off"}],
     "battery-low": [fault(SUIT, "battery-mv", "6500"), fault(SUIT, "battery-mv", "5000", 6000)],
+    # Pack between the open firmware's stop (6840) and start (7200) thresholds during a session,
+    # then below the stop threshold.
+    "battery-sag": [fault(SUIT, "battery-mv", "7000"), fault(SUIT, "battery-mv", "6800", 6000)],
+    # Session started with the pack already below the start threshold (board property).
+    "battery-start-low": [],
     "button-power": [fault(SUIT, "expander-ext-low", "0x1")],
     "disconnect": [{"t": FAULT_T, "do": "disconnect"}],
     "radio-shutdown": [{"t": FAULT_T, "do": "radio_shutdown"}],
@@ -54,7 +65,8 @@ SCENARIOS = {
     "early-stop": [{"t": 4100, "do": "cmd", "name": "run", "hex": "00"}],
     "early-radio-shutdown": [{"t": 4040, "do": "radio_shutdown"}],
 }
-BOARD = {"hang-irqs-off-gates-float-on": {"gate-float-on": "on"}}
+BOARD = {"hang-irqs-off-gates-float-on": {"gate-float-on": "on"},
+         "battery-start-low": {"battery-mv": "7000"}}
 
 
 def main():

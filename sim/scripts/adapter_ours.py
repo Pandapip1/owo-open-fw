@@ -86,6 +86,19 @@ def _write_loop():
                                THUMB2_MSR_SYSM_BASEPRI, THUMB_B_SELF))
 
 
+# The supervisor reads its phase clock (owo_counter_since_us) in every pass of the phase loop,
+# and also while waiting for a conversion with the bridge open; the condition picks a read with
+# high side A (PB0, active high in boards/owo_suit_hw.overlay) driven: the positive phase.
+# GPIO port B is at 0x5003C030, its DOUT at +0x10 (CMSIS GPIO_PORT_TypeDef).
+GPIO_PB_DOUT = 0x5003C030 + 0x10
+HS_A = 1 << 0
+
+
+def mid_phase_break():
+    bp = gdb.Breakpoint("owo_counter_since_us", internal=True, temporary=True)
+    bp.condition = f"(*(unsigned int *){GPIO_PB_DOUT:#x} & {HS_A:#x}) != 0"
+
+
 def hang(kind):
     _write_loop()
     if kind == "irqs-off":
@@ -93,16 +106,16 @@ def hang(kind):
         gdb.execute(f"set $pc = {HANG_IRQOFF:#x}")
         return "pc=hang-loop primask=1"
     if kind in ("mid-pulse", "thread-mid-pulse"):
-        # The pump thread stops right after closing the bridge for a phase
-        # (owo_counter_mark is the phase's first timestamp, taken after bridge(pol)).
-        bp = gdb.Breakpoint("owo_counter_mark", internal=True, temporary=True)
+        # The pump thread stops inside a positive phase: at a phase-loop clock read with the
+        # bridge's high side A driven (MID_PHASE_BREAK).
+        bp = mid_phase_break()
         gdb.execute("continue")
         gdb.execute(f"set $pc = {HANG_LOOP:#x}")
         return "pump thread spinning mid-phase, interrupts enabled"
     if kind == "mid-pulse-irqs-off":
         # As mid-pulse, with every configurable interrupt masked (PRIMASK): no warning
         # interrupt can run, only the watchdog reset ends it.
-        gdb.Breakpoint("owo_counter_mark", internal=True, temporary=True)
+        mid_phase_break()
         gdb.execute("continue")
         gdb.execute(f"set $pc = {HANG_IRQOFF:#x}")
         return "pump spinning mid-phase, primask=1"
@@ -116,7 +129,7 @@ def hang(kind):
     if kind == "mid-pulse-irq-lock":
         # As mid-pulse, but inside irq_lock(): BASEPRI masks every interrupt but the
         # zero-latency levels (Zephyr ARMv8-M Mainline; CONFIG_ZERO_LATENCY_LEVELS).
-        gdb.Breakpoint("owo_counter_mark", internal=True, temporary=True)
+        mid_phase_break()
         gdb.execute("continue")
         basepri = ZLI_LEVELS << (8 - NVIC_PRIO_BITS)
         gdb.execute(f"set $pc = {HANG_IRQLOCK:#x}")
@@ -136,10 +149,33 @@ def poke(addr, size, value):
 
 
 def radio_shutdown():
-    # The radio's deadline-miss safe shutdown with an empty miss record, as the scheduler
-    # calls it (modules/efr32-radio/hal/radio.c k_deadline_miss_handler).
-    gdb.execute("call (void)k_deadline_miss_handler(&efr32_radio_miss)")
-    return "k_deadline_miss_handler called"
+    # The radio's deadline-miss safe shutdown with its (empty) miss record, through the kernel's
+    # report as a missed deadline reaches it (modules/efr32-radio/hal/radio.c
+    # k_deadline_miss_handler, inlined into z_deadline_miss_report under LTO). Needs an image
+    # whose miss policy is the radio's handler (CONFIG_SCHED_DEADLINE_MISS_CUSTOM: the hardware
+    # timing; sim/product-qemu.conf only counts misses).
+    for call in ("call (void)k_deadline_miss_handler(&efr32_radio_miss)",
+                 "call (void)z_deadline_miss_report(&'efr32_radio_miss.lto_priv.0')"):
+        try:
+            gdb.execute(call)
+            return call
+        except gdb.error:
+            continue
+    raise gdb.error("no callable radio safe shutdown in this image")
+
+
+# src/sim_inject.rs `Outcomes` (repr(C), u32 fields in this order) and the fault kinds of
+# `note_outcome`.
+OUTCOME_FIELDS = ("fired", "measured", "faults", "fault_kind", "fault_a", "fault_b", "skip_kind")
+FAULT_KINDS = {1: "Cancelled", 2: "Hw", 3: "Overdrive", 4: "UnderDelivery", 5: "SenseNotZero",
+               6: "SenseTimeout", 7: "PhaseOverrun", 8: "BatteryLow", 9: "Unmeasured"}
+
+
+def outcomes():
+    base = int(gdb.parse_and_eval("(unsigned int)&owo_sim_outcomes"))
+    out = {f: _word(base + 4 * i) for i, f in enumerate(OUTCOME_FIELDS)}
+    out["fault"] = FAULT_KINDS.get(out["fault_kind"])
+    return out
 
 
 def status():
@@ -149,6 +185,10 @@ def status():
             out[expr] = int(gdb.parse_and_eval(expr))
         except gdb.error:
             pass
+    try:
+        out["outcomes"] = outcomes()
+    except gdb.error:
+        pass
     try:
         out["pc"] = int(gdb.parse_and_eval("$pc"))
     except gdb.error:

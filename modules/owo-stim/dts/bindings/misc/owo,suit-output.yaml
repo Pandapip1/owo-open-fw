@@ -60,13 +60,21 @@ properties:
     type: phandle-array
     required: true
     description: |
-      The "amplitude" DAC channel (output cell) and the "sense" ADC channel (a channel child node
-      of the ADC, with its resolution, gain and reference).
+      The "amplitude" DAC channel (output cell), the "sense" ADC channel and the "battery" ADC
+      channel (channel child nodes of the ADC, with their resolution, gain and reference). Both
+      ADC channels must be on the same ADC: the supervisor runs one conversion at a time.
 
   io-channel-names:
     type: string-array
     required: true
-    description: Must be "amplitude", "sense" in the order of io-channels.
+    description: Must be "amplitude", "sense", "battery" in the order of io-channels.
+
+  battery-divider:
+    type: array
+    required: true
+    description: |
+      <num den>: pack millivolts = millivolts at the battery ADC pin * num / den (the resistor
+      divider in front of the pin). The stock firmware scales its battery input by 133/33.
 
   amplitude-resolution:
     type: int

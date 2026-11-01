@@ -69,16 +69,86 @@ config OWO_STIM_WIDTH_SCALE_PERCENT
 	default 100
 	range 25 200
 
-config OWO_STIM_SENSE_INTERVAL_US
-	int "Feedback ADC sampling interval while the supply is on"
-	default 100
+config OWO_STIM_SENSE_GUARD_US
+	int "Longest time from starting a sense conversion to seeing its result"
+	default 60
+	range 10 200
 	help
-	  Zephyr's ADC interval is driven by a kernel timer, so the real period is rounded to the
-	  system tick resolution.
+	  The supervisor starts every feedback conversion itself (owo-stim, interlock 12): the first
+	  one of a phase OWO_STIM_SETTLE_US after the bridge closed, later ones only while at least
+	  this much of the phase remains, so a conversion's completion interrupt never lands at the
+	  end of a phase. A conversion still not done this long after its start is an ADC stall
+	  (the output locks). It must cover the driver's start path, the IADC's warm-up and
+	  conversion and its completion interrupt. 60 us is a NOMINAL value: in the QEMU model a
+	  conversion completes at its start command, and a conversion started 20 us into a 50 us
+	  phase has its result before the width ends (phases 53.1 us median, the rest is the
+	  bridge-off path; docs/stim-simulation.md); the IADC's warm-up
+	  and conversion time on silicon are not modelled. NEEDS A SILICON MEASUREMENT before any
+	  hardware use.
 
-config OWO_STIM_SENSE_MAX_AGE_US
-	int "Longest age of the newest ADC conversion while the bridge is closed"
+config OWO_STIM_SENSE_TIMEOUT_US
+	int "A conversion not done this long after its start is an ADC stall"
 	default 500
+	range 50 5000
+	help
+	  The output locks on a stall. A phase still ends at its width meanwhile, so this does not
+	  lengthen any energised time; it only bounds how long a missing result is waited for, and
+	  must exceed the longest latency the ADC's completion interrupt can see, so that an
+	  interrupt is never mistaken for a dead ADC. 500 us is the bound the free-running sampler's
+	  freshness check used before (OWO_STIM_SENSE_MAX_AGE_US); the longest interrupts measured
+	  on silicon are the TIMER0 clock event (39.4 us steady state, 90.6 us at boot) and BURTC
+	  (34.2 us) (docs/radio-tables.md 7.76), so even two back to back stay below a third of it.
+
+config OWO_STIM_SETTLE_US
+	int "Time after the bridge closes before the first in-phase conversion"
+	default 20
+	range 1 200
+	help
+	  The output's rise time after the bridge closes is not measured; until it is, the stock
+	  firmware's habit of sampling into the phase is kept with this nominal value. Phases no
+	  longer than this are not delivered (they could not be measured). NEEDS A SILICON
+	  MEASUREMENT (rise time of the sense signal at the lowest load impedance).
+
+config OWO_STIM_UNDER_MARGIN
+	int "Under-delivery: stop when the sense reads more than this below the command"
+	default 14
+	range 1 126
+	help
+	  Open electrode, lost contact, a sense stuck at zero or a rail out of compliance: an
+	  in-phase reading more than this many levels below the commanded level locks the output
+	  (every channel) until the user starts again. 14 is the stock firmware's open-circuit
+	  tolerance (its config byte 6 maps 0/1 to 14; this unit stores 14). A zero reading is
+	  therefore only distinguishable from a valid one above level 14. NEEDS A SILICON
+	  MEASUREMENT of the sense reading against the commanded level (sense offset, gain, the
+	  stock firmware's calibration table) before it can be narrowed.
+
+config OWO_STIM_BATTERY_START_MV
+	int "Battery: a session only starts with the pack at or above this (mV)"
+	default 7200
+	help
+	  Two-cell pack ([I] from the stock firmware's level curve, 6800 mV = 0 % to 8101 mV =
+	  100 %). 7200 mV (3.6 V per cell) is the stock curve's 20 % knee. It must exceed
+	  OWO_STIM_BATTERY_STOP_MV by at least the pack's sag under stimulation load, so that a
+	  session that starts does not stop at once: that sag (internal resistance times the boost
+	  converter's input current) is NOT MEASURED.
+
+config OWO_STIM_BATTERY_STOP_MV
+	int "Battery: a running session stops below this (mV)"
+	default 6840
+	help
+	  The stock firmware powers the unit down when its battery level falls below 2 %, which its
+	  curve puts at 6840 mV (3.42 V per cell): below it the manufacturer does not operate the
+	  unit at all. The open firmware stops the output there (it does not power down: the
+	  power-hold line is not identified). Read between pulses with the supply on, so it is the
+	  loaded voltage.
+
+config OWO_STIM_BATTERY_INTERVAL_MS
+	int "Battery: read interval while pulses fire"
+	default 1000
+	range 10 10000
+	help
+	  The stock firmware reads its battery once per second (every 20000 ticks of its 20 kHz
+	  stimulation timer). The pack is also read before the first pulse of every session.
 
 config OWO_STIM_MONITOR_INTERVAL_MS
 	int "Safety-supervision scheduling period"

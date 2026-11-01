@@ -9,50 +9,87 @@ recipes and raw stock recordings are kept outside this repository, next to the s
 
 ## Safety findings first
 
-1. **The open firmware stopped after two soft-start pulses; fixed, it now stimulates for the
-   whole frame** [E]. Two causes (section *Open firmware in the model*): the system timer driver
-   could leave the kernel's timeout unarmed (work stopped, and the 100 us sense sampler, a
-   kernel timer, stalled for 3.5 ms, which the freshness check correctly turned into a
-   safe-off), and once that was fixed the pump was preempted mid-phase by the system work queue,
-   which the overrun check turned into a safe-off after five pulses. With both fixed: 173 pulses
-   from 4.04 to 7.48 s on pad 7, 50 Hz (19.2-20.2 ms), level 20 after the soft start (DAC 622,
-   8.08 mA), no sense gap over 400 us. The radio still misses its start-by deadline at boot in
-   the model and shuts itself down; the rest of the system now keeps running after that. The
-   sustained run then exposed that the over-delivery check skipped the conversions it most often
-   sees (a 1.5 V stuck sense never tripped); fixed, it trips on the first pulse.
-2. **The open firmware sampled the battery divider as its sense input** [F, fixed here]. The
-   stock firmware reads feedback on PD2 and its x133/33 battery divider on PD3 (IADC positive
-   inputs 0xB2/0xB3); `owo_suit_hw.overlay` sensed PD3. On a 2-cell pack PD3 sits near 1.9 V,
-   about level 95, so every pulse would have tripped the over-delivery check; a sense signal on
-   PD2 was never seen. `docs/stock-stim-path.md` had the two pins swapped.
-3. **The open firmware drove a different electrode than stock for the same command**
-   [E, fixed here]. Stock maps wire channel 0 to pad 7 (its wire-to-slot map, then the switch
-   table); the open firmware used the table in wire order and drove pad 8. The overlay's
-   `switch-routes` are now in the stock slot order; both firmwares then select pad 7.
-4. **A stuck bridge lasts until the watchdog, in both firmwares** [E]. Open firmware, before
-   the short watchdog: with the pump thread stopped right after it closed the bridge (interrupts
-   running), the bridge stayed closed with current flowing for **2047 ms**, until the 2 s
-   watchdog reset; its sense-freshness, overrun and interrupt-window interlocks all run in that
-   same thread. Stock: with its stimulation interrupt stopped after closing the bridge, 62.3 ms,
-   until its watchdog (PERSEL 8 on the 32.768 kHz LFRCO, 62.5 ms). At 8 mA (the test level in
-   the model) 62 ms is about 0.5 mC of one-polarity charge, 2 s about 16 mC; a normal phase is
-   under 1 uC. **Now** (`docs/watchdog.md`): the open firmware's watchdog is fixed at 62.5 ms and
-   locked, and its warning at 46.9 ms after the last feed forces the output safe from a
-   zero-latency interrupt with raw register writes. The same hang ends after 34.9 ms of live
-   bridge, at the warning (bridge shorted-off, DAC 0, supplies off, boost stopped), also inside
-   `irq_lock()`; with interrupts masked by PRIMASK the warning cannot run and the reset ends it
-   at 62.5 ms after the last feed, as in stock.
-5. **Stock keeps stimulating for 1.47 s after Stop** [E]: 72 live pulses after the Stop write,
-   consistent with its stop state waiting for its 10 Hz counter to reach 15 [F weak].
-6. **Stock leaves the high-voltage rail up and keeps driving an open electrode** [E]: with both
-   pads of the channel open it drives the bridge at full level for the rest of the frame into
-   no load; the rail stays at its full value. Re-contact gets full level at once.
-7. **Neither firmware detects a sense input stuck at zero** [E stock / I open]: stock carries on
-   at full level (nothing to compare against). The open firmware's freshness check does not
-   catch a wrong value either; its hard level cap and duty budget still bound the output.
-8. **Reset window**: if the gate drivers turn on while their pins float (`gate-float-on`, a PCB
-   property nobody has measured), every MCU reset — including each watchdog reset above —
-   shoots through both legs [E with that parameter]. Both firmwares share this window.
+Current state (2026-11-01, master f8982fe plus the stim2 changes; full matrix below). Earlier
+findings that are fixed keep a short entry.
+
+1. **Open electrode and sense stuck at zero now stop the open firmware** [E]. Before, neither
+   firmware stopped (stock notes "status 4" only for 0 < reading < level - 14 and keeps driving;
+   the open firmware only logged a flag): 125 more live pulses in the model. Now an in-phase
+   reading more than `OWO_STIM_UNDER_MARGIN` (14 levels, the stock firmware's own open-circuit
+   tolerance) below the command locks every channel until the user starts again: one reading
+   cannot tell an open pad from a dead sense path, and a dead sense path blinds the over-delivery
+   trip on every channel. Sense stuck at zero: one live phase after the fault (the positive phase
+   of the next pulse, 0.29 uC), then stopped; open pads: no current flows, stopped at the next
+   pulse. Below level 15 a zero reading lies inside the tolerance band and cannot be told from a
+   valid one (the first 0.375 s of a soft start to level 20); narrowing the margin needs a silicon
+   measurement of the sense reading against the command.
+2. **The open firmware now watches the battery; the stock firmware's filter hides a sag** [E/F].
+   Open firmware: a session starts only at or above 7200 mV and stops below 6840 mV (the stock
+   firmware's own 2 % power-down point), on single readings of PD3 against the IADC's internal
+   1.21 V reference (independent of the supply that sags), before every session and once a second
+   while pulses fire. Model: 6.5 V at 5.0 s stopped it at the next reading (2 live pulses, 24.5 ms
+   after the step); 7.0 V (between the thresholds) let the running session go on, 6.8 V then
+   stopped it; a session asked for at 7.0 V never started. Stock: its filter ignores any reading
+   more than 500 mV below its running value [F], so a step from 7.6 V to 6.5 V and then 5.0 V is
+   never acted on: it stimulated to the end of the run in every battery row. How the boost rail
+   behaves as the cells sag is not modelled (the model's rail does not depend on the battery); a
+   rail that sags out of compliance shows as under-delivery, which finding 1 now stops.
+3. **External parts after an MCU reset: safe after 4.65 ms instead of 12.3 ms** [E]. The expander
+   and the DAC keep their state across a reset: after a reset with the stage live (interrupts
+   masked, so the watchdog warning could not run first) the boost supply stayed enabled and the
+   gates floated until the application's safe-off. The open firmware now re-asserts the safe levels
+   at Zephyr's first init level (EARLY, before the SoC's clock setup and every driver) with
+   register writes only, every wait bounded by the cycle counter (no watchdog runs yet): gates
+   driven 4.39 ms and boost supply off with the DAC cleared (/CLR) 4.65 ms after the reset, against
+   11.2 / 12.3 ms before. About 2.6 ms of that is the stock bootloader before the application's
+   first instruction; the C runtime's .bss/.data initialisation took 6.2 ms with byte-wise string
+   routines and 1.7 ms with the word-wise ones that are now the product setting. Stock after the
+   same reset: gates floating 81.0 ms, boost supply enabled 80.2 ms. Model times: the clocks the
+   bootloader leaves and the flash timing on silicon differ.
+4. **Phase lengths no longer depend on the sense sampler** [E]. The free-running 100 us sampler
+   (a kernel timer plus the ADC interrupt, about 58 us of interrupts per conversion in the model)
+   stretched a commanded 50 us phase to 118 / 123 us (+ / -). The supervisor now starts every
+   conversion itself: a zero check before the pulse, one conversion 20 us into each phase, more
+   only while 60 us of the phase remain, so no conversion's interrupt lands at a phase end; nothing
+   samples between pulses. Model, 150 full-level pulses: phases 53.1 / 53.9 us median (maximum
+   71.8 / 59.5 us: other interrupts, bounded by the overrun check), gap 65.9 us (commanded 50),
+   median |net charge| 6.7 nC per pulse. Two supporting changes: the IADC driver no longer
+   re-initialises the converter for a read with unchanged settings (vendor/zephyr; that alone took
+   a phase from 50 to about 85 us), and a phase that an unrelated interrupt carries past its width
+   before its conversion could start ends unmeasured (a pulse needs one measured phase, else a
+   channel fault) instead of being taken for an ADC stall. **These figures depend on the model's
+   IADC, which completes a conversion at its start command (no warm-up, no conversion time):
+   re-run them once the IADC timing model lands**, and measure `OWO_STIM_SENSE_GUARD_US` and
+   `OWO_STIM_SETTLE_US` on silicon.
+5. **The power button does not stop the open firmware** [E]. Expander P0 low (stock: power-off
+   request, stops within 78 ms) is not read by the open firmware: it stimulated to the end of the
+   run. P0's meaning is inferred from the stock code only [I]. Open item.
+6. **After a radio safe shutdown the open firmware keeps stimulating the frames it has** [E]:
+   125 live pulses after the shutdown, to the end of the run, with no way left for the user to send
+   Stop until the coverage window plus the 1.5 s dead-man ends (up to 27 s for a 25.5 s frame). A
+   disconnect stops it at once. The radio module has no hook to the output yet. Open item: treat a
+   radio safe shutdown like a disconnect.
+7. **Expander faults leave the boost supply as it was** in both firmwares [E]: with the expander
+   not acknowledging, or SDA stuck, stimulation goes on and the supply enable cannot be switched
+   off afterwards (the open firmware's regulator calls and its warning-interrupt write fail the
+   same way). Open item: an independent way to remove the rail.
+8. **A stuck bridge is bounded by the watchdog in both firmwares** [E] (`docs/watchdog.md`). Open
+   firmware, pump stopped inside a positive phase at level 20 (8.08 mA): with interrupts running or
+   inside `irq_lock()`, live 38.1-38.2 ms after the fault time, until the warning (0.31 mC); with
+   interrupts masked on the core (`cpsid i`), 56.8 ms, until the reset (0.46 mC). Stock, the same
+   masked hang in its stimulation interrupt: bridge held 62.5 ms, until its reset; the stopped slot
+   in these runs was a level-0 one (no current), so the stock rows show the time bound only.
+9. **The suit's sense input was not routed to the IADC on silicon** [F, fixed]: the sense input
+   moved to PD2 (an even C/D pin), but the board allocated only the C/D odd analog bus; the IADC
+   would have flagged a port allocation error. Both buses are now allocated, as the stock firmware
+   does. The QEMU model does not check the allocation, which is why the model never showed it.
+10. Fixed earlier, kept for the record: the open firmware stopped after two soft-start pulses (the
+    system timer could leave the kernel timeout unarmed; the work queue preempted a phase); it
+    sampled the battery divider as its sense input; it drove pad 8 for wire channel 0 (stock: pad
+    7); its over-delivery check skipped the conversions it most often saw. Stock keeps stimulating
+    1.47 s after Stop (72 live pulses) and drives an open electrode at full level with the rail up.
+    With `gate-float-on` every MCU reset is a shoot-through in both firmwares (a PCB property nobody
+    has measured).
 
 ## Architecture: emulated board and host passthrough
 
@@ -127,8 +164,13 @@ same virtual times; a gdb session does the writes at pauses the board schedules.
   plausible battery level (it stayed in that state with the 3.9 V first used).
 - Disconnect: the stock connection-closed handler restarts advertising, which fails in QEMU and
   ends in a halt loop; the watchdog then resets it. That reset is a model artifact.
-- The open firmware's radio safe shutdown is entered by calling its deadline-miss handler from
-  gdb.
+- The open firmware's radio safe shutdown is entered by calling the kernel's miss report from
+  gdb (`z_deadline_miss_report` with the radio's miss record; under LTO the radio's handler is
+  inlined into it), on an image whose miss policy is the radio's handler (silicon timing):
+  `sim/product-qemu.conf` only counts misses.
+- The open firmware's outcomes are read from a test-only record (`owo_sim_outcomes`,
+  `src/sim_inject.rs`): pulses fired, the last reading and the last fault, so a stop can be told
+  from a reset or a hang without a console.
 
 Tooling: `sim/scripts/run-suit-board.sh` (plain run), `stim_scenario.py` (QEMU + gdb, scenario
 JSON), `stim_gdb.py` (driver), `adapter_ours.py` (open firmware adapter; the stock adapter lives
@@ -137,71 +179,70 @@ a recording), `stim_report.py` (comparison table).
 
 ## Results
 
-Stimulus: wire channel 0, level 20, 50 Hz, table widths 0x49, 5 s frame from 4.0 s; faults at
-5.0 s; runs end at 7.5 s. Times are virtual; pulse timing reflects the model's instruction
-timing (icount shift 3), not measured silicon timing.
+Run 2026-11-01 on master f8982fe's model (vendor/qemu 58ec437, `build/qemu-new`) with the
+stim2 changes. Stimulus: wire channel 0, level 20, 50 Hz, table widths 0x49 (phases 50 us, gap
+50 us), 5 s frame from 4.0 s; faults at 5.0 s; runs end at 7.5 s. Open firmware: `owo_suit`,
+`-DOWO_HW=ON`, `sim/product-qemu.conf`, `CONFIG_OWO_SIM_INJECT=y` (PM on); the two radio rows use
+the same image without `sim/product-qemu.conf` (silicon timing; its miss policy is the radio's safe
+shutdown, the QEMU profile only counts misses). Stock: the unit's flash. Times are virtual; pulse
+timing reflects the model's instruction timing (icount shift 3) and its IADC, which converts at
+its start command, not measured silicon timing. The hangs now mask interrupts on the core itself
+in both adapters (`cpsid i`): the earlier gdb `$primask` writes reached the Non-secure bank and
+masked nothing. The full per-run table (`stim_report.py`) and the recordings are kept with the
+stock dump (`stim-sim-2026-11-01/`).
 
 ### Waveforms (no fault)
 
 | | stock | open firmware |
 |---|---|---|
-| Pad | 7 | 7 (after the route fix; 8 before) |
-| Round | 10 slots, one every 2.05 ms; slot period 20.52 ms (commanded 50 Hz) | one channel; 19.2-20.2 ms (commanded 50 Hz), 173 pulses from 4.04 to 7.48 s |
+| Pad | 7 | 7 |
+| Round | 10 slots, one every 2.05 ms; slot period 20.52 ms (commanded 50 Hz) | one channel, 20.03 ms; 168 pulses 4.04-7.48 s |
 | Bridge activity | every slot is pulsed biphasically, also at level 0 (DAC 0) | only the commanded channel |
-| Phases (+ / gap / -) | 74.5 / 44.6 / 107.3 us: the second phase is 44 % longer (charge imbalance, the first phase includes the ADC sample code) | 118.0 / 122.7 / 120.8 us (before the over-delivery fix below: 104.5 / 134.6 / 136.7) |
-| DAC | code 622 = level 20 x 0x12FED/0x9C4 | soft start over 0.5 s (codes 31, 62, ...), then 622 |
+| Phases + / gap / -, median (min-max), 150+ full-level pulses | 74.4 (69.7-79.1) / 44.8 / 106.9 (102.3-111.5) us | 53.1 (53.1-71.8) / 65.9 (65.9-105.4) / 53.9 (53.9-59.5) us; before the stim2 changes 118.0 / 122.7 / 120.8 us |
+| DAC | code 622 = level 20 x 0x12FED/0x9C4, left set between pulses | soft start over 0.5 s, then 622; 0 between pulses |
 | Peak current | 8.08 mA (model) | 8.08 mA |
-| Boost PWM | PC7 at 4 kHz, 50 %, only for 0.2 s after Start | 4 kHz, 50 % while the supply is on |
-| Net charge per pulse | up to 9 nC (phase asymmetry) | -23 nC (phase 2 2.8 us longer) |
+| Net charge per pulse, median abs | 0.26 uC (the second phase is 44 % longer) | 6.7 nC (largest 144 nC: a phase stretched by an unrelated interrupt) |
+| Sense conversions | stock's own, mid-phase | zero check before the pulse, one 20 us into each phase; none between pulses |
 
 ### Failure matrix
 
-`live` = pulses with DAC > 0 and current; `safe after` = last live drive after the fault.
+`live` = pulses with DAC > 0 and current after the fault; `safe after` = last live drive after
+the fault; charge = delivered after the fault.
 
 | Fault at 5.0 s | stock | open firmware |
 |---|---|---|
-| Stop command | 72 live pulses, safe after 1474 ms | no further pulse; supply off 1.1 ms after the Stop |
-| Open electrode (pads 7, 8) | keeps driving into no load, DAC 622, rail up to the end; no stop | not re-run since the fixes below |
-| Short (pads 7, 8) | keeps stimulating (current regulated; nothing to detect) | not re-run since the fixes below |
-| Overcurrent (regulator fails, 3x) | trips after 1 pulse, 16 ms, channel latched | trips in the positive phase of the first pulse after the fault (24.2 mA peak), no negative phase, supply off |
-| Sense stuck high (1.5 V) | trips after 1 pulse, 16 ms | trips in the positive phase of the first pulse (before the over-delivery fix: never; 120 more pulses) |
-| Sense stuck at 0 | no detection, stimulates on | not re-run since the fixes below |
-| ADC stalls | main loop waits on the ADC, watchdog resets 64 ms later, then a reset every 145 ms (boot loop); outputs off | not re-run since the fixes below |
-| Switch read-back mismatch | stops at once (no live pulse) | not re-run since the fixes below |
-| DAC dead (ignores frames) | DAC stuck at the value it had (0 here) | not re-run since the fixes below |
-| Expander NACK / SDA stuck | stimulates on (I2C errors never stop it) | not re-run since the fixes below |
-| Hang, main loop (interrupts alive) | stimulation continues until the watchdog reset 63.6 ms later | before: WDT reset 1976 ms after the hang (output already off; that run did not in fact mask interrupts, see below). Now (pump spinning between pulses, supply on, t = 4.04 s): supplies off and boost stopped at the warning, 46.9 ms after the last feed; reset at 62.5 ms |
-| Hang, inside the pulse with the bridge closed | bridge held 62.4 ms until the watchdog reset | early-hang row |
-| Battery 6.5 V then 5.0 V | stimulates on to the end of the run (no shutdown within 2.5 s) | no battery monitoring |
-| Power button (expander P0 low) | stops after 78 ms | not re-run since the fixes below |
-| Disconnect | stops 57 ms later, via a watchdog reset (model artifact, see above) | not re-run since the fixes below |
-| Radio safe shutdown | n/a | early row |
+| Stop command | 72 live pulses, safe after 1474 ms | no further pulse |
+| Open electrode (pads 7, 8) | drives the open pads at full level (DAC 622) to the end, rail up; no stop | stopped at the first pulse (under-delivery, reading 0), output locked; no current flowed |
+| Short (pads 7, 8) | stimulates on (current regulated; nothing to detect) | the same: stimulates on |
+| Overcurrent (regulator fails, 3x) | trips after 1 pulse, 16.3 ms | trips in the positive phase of the first pulse (reading 56 against 20), 0.9 uC, supply off |
+| Sense stuck high (1.5 V) | trips after 1 pulse, 17.0 ms | the zero check before the next pulse reads 75: no closure at all, output locked |
+| Sense stuck at 0 | no detection, stimulates on (122 live pulses) | one live phase (0.29 uC), then stopped (under-delivery), output locked |
+| ADC stalls | waits on the ADC in its main loop; watchdog reset 62.5 ms later, then a reset every 145 ms (boot loop), output off | the zero check times out before any closure: output locked; no reset |
+| Switch read-back mismatch | stops at once (no live pulse) | stops at once (no live pulse), channel latched |
+| DAC dead (ignores frames) | stays at the code it had (0 here): no current | no current flows: under-delivery at the first pulse, output locked |
+| Expander NACK | stimulates on | stimulates on (the expander is not written during a session; switching the supply off afterwards fails) |
+| I2C SDA stuck | stimulates on | stimulates on (as above) |
+| Hang, interrupts masked (core spinning) | watchdog reset 62.6 ms after the fault | output already off between pulses; reset 58.3 ms after the fault |
+| Same with `gate-float-on` | reset; gates float until its init | reset; gates float for 4.39 ms after it (shoot-through counted per reset in both) |
+| Hang inside a positive phase, interrupts running | n/a (its pulses run in an interrupt) | live 38.2 ms, until the warning (0.31 mC); reset 60.6 ms after the fault |
+| Same inside `irq_lock()` | n/a | live 38.1 ms, until the warning (the zero-latency warning still runs) |
+| Same with interrupts masked | bridge held 62.5 ms until the reset (in a level-0 slot: no current) | live 56.8 ms, until the reset (0.46 mC) |
+| After the reset | gates floating 81.0 ms, boost supply enabled 80.2 ms | gates driven at 4.39 ms, boost supply off and DAC cleared at 4.65 ms |
+| Battery 6.5 V, then 5.0 V at 6.0 s | stimulates on to the end (its filter ignores the step) | stopped at the next reading: 2 live pulses, 24.5 ms |
+| Battery 7.0 V, then 6.8 V at 6.0 s | stimulates on to the end | goes on at 7.0 V (above the stop threshold), stopped at 6.8 V (1047 ms after the first step) |
+| Battery 7.0 V from boot | stimulates | the session never starts (below 7200 mV) |
+| Power button (expander P0 low) | stops after 78 ms | no reaction: stimulates on (finding 5) |
+| Disconnect | stops 57 ms later via a watchdog reset (model artifact) | stops at once (no further live pulse) |
+| Radio safe shutdown (at 5.0 s, and at 4.04 s) | n/a | the radio stops; stimulation of the received frame goes on to the end of the run (finding 6) |
+| Stop at 4.10 s (soft start) | 28 live pulses, 571 ms | no further pulse |
+| Hang inside a pulse at 4.04 s (soft start) | bridge held 62.8 ms until the reset (a level-0 slot: no current) | live 35.5 ms at 0.40 mA (DAC 31), until the warning; reset 51.2 ms after the closure |
 
-Inside the open firmware's active window (4.05-4.15 s in the model), both firmwares:
+### Long product run with power management
 
-| Event | stock | open firmware |
-|---|---|---|
-| Hang inside a pulse with the bridge closed (t = 4.04 s; stock: the stimulation interrupt stops after the bridge routine closed it, interrupts masked; open: the pump thread spins right after closing the bridge, interrupts running) | bridge positive for 62.3 ms, until the watchdog reset | before: **bridge positive, current flowing, for 2047 ms**, until the 2 s watchdog reset (about 0.8 mC at the soft-start level of 1, about 33 mC at the hard cap of level 40). Now: bridge positive for 34.9 ms, until the watchdog warning 46.9 ms after the last feed puts it shorted-off with DAC 0, expander 0xFFD3 (supplies off, DAC /CLR) and the boost stopped; reset 15.6 ms later. Inside `irq_lock()`: the same. With PRIMASK set: bridge positive 50.5 ms, until the reset 62.5 ms after the last feed |
-| Stop (t = 4.10 s) | live pulses for another 1.47 s | no further pulse; supply off 42 ms after the Stop |
-| After the reset | pins float until the reboot drives them (a shoot-through with `gate-float-on`) | same; the external DAC kept its code and the expander kept the boost supply on for 13 ms, until the rebooted firmware's safe-off |
-| Radio safe shutdown (open firmware) | n/a | not run: under LTO the deadline-miss handler has no callable symbol; the boot-time miss above runs the same path |
-
-**The open firmware's bound on a stuck bridge is its watchdog** (`docs/watchdog.md`): the
-sense-freshness check, the overrun check and the bounded interrupt-off window all run in the
-pump thread, so a pump that stops with the bridge closed keeps it closed until the watchdog.
-That was 2 s; it is now the warning, at most 46.9 ms after the last feed, whenever a
-zero-latency interrupt can run, and the reset, at most 62.5 ms after it, when none can
-(PRIMASK, fault handler, lockup, debug halt). Stock bounds it at 62.5 ms by its reset only.
-A per-pulse hardware cut-off was set aside because of output shaping.
-
-These hang runs used a diagnostic image with `CONFIG_PM=n` (with PM the kernel stops waking
-the pump in the model, `docs/watchdog.md` "Blockers"). The adapter's earlier `irqs-off` hang
-wrote PRIMASK through gdb, which reaches the Non-secure bank while the firmware runs Secure:
-those runs never masked interrupts. The masked hangs now execute `cpsid i` or
-`msr basepri` themselves (`adapter_ours.py`).
-
-The full per-run table (pulses before and after, widths, current, charge, end state) is
-generated by `stim_report.py`; the recordings and the table are kept with the stock dump.
+`-DOWO_HW=ON` with `sim/product-qemu.conf` and the test mailbox, `CONFIG_PM=y`, 630 s virtual:
+two sessions (4.0 s and 300.1 s, 248 pulses each), advertising throughout. Watchdog: 27084
+clears, the longest interval 24.50 ms (warning at 46.9 ms), no warning, no reset; no supervisor
+fault. The PM-on kernel timeout stall of `docs/watchdog.md` ("Blockers") does not occur.
 
 ## Open firmware in the model
 
@@ -258,20 +299,34 @@ model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they ar
   conversion. It now judges the newest conversion first, then ends the phase. Both the stuck sense
   and a 3x overcurrent now trip in the positive phase of the first pulse after the fault, supply
   off. Host test `overdrive_first_seen_at_the_last_poll_still_trips` fails without the change.
-- **Phase lengths depend on interrupts** [E, open]: the phase ends at the first 10 us poll that
-  finds the width elapsed, and the sampler's interrupts (each ~122 us in this model: the TIMER0
-  clock event of the ADC interval timer, then the IADC completion, about 58 us together) decide
-  when that poll runs. Sustained run: 118.0 / 122.7 / 120.8 us for a commanded 0x49, -23 nC net
-  per pulse at 8.08 mA (before the over-delivery fix 104.5 / 134.6 / 136.7 us, -0.26 uC). A
-  hardware timer ending each phase (as recommended above for the stuck bridge) would bound both.
-- **Power management** [E]: the watchdog investigation saw kernel timeouts stop ~600 ms after
-  boot with `CONFIG_PM=y` and not with it off, and the pump's timeout held back 288 ms during
-  key generation. [I] The same dropped arm is the likely cause (whether an arm is lost depends on
-  where it falls against a tick boundary and on the clock-read cost, which PM changes); not
-  shown arm by arm for those runs. With the fix the
-  injection mailbox is served at 11.5 s and the kernel-timeout client is armed, with PM on (default
-  image and the hardware image) and off (hardware image); the radio's boot miss occurs in all
-  three. The PM-specific timings of that report were not re-measured here.
+- **Phase lengths depended on the sampler's interrupts** [E, fixed]: the phase ended at the
+  first 10 us poll that found the width elapsed, and the free-running sampler's interrupts (the
+  TIMER0 clock event of the ADC interval timer, then the IADC completion, about 58 us together)
+  decided when that poll ran: 118.0 / 122.7 / 120.8 us for a commanded 50 / 50 / 50 us. Options
+  weighed: masking interrupts for the end of each phase (rejected: it delays the radio's meta-IRQ
+  jobs past their start-by deadlines), a per-pulse hardware end of phase (set aside earlier because
+  of output shaping), a hardware-timed sampler (the IADC's own timer; still one interrupt per
+  conversion, landing anywhere). Chosen: the supervisor owns the sampler. It starts each
+  conversion where it wants one (a zero check with the bridge open and the DAC at zero, then the
+  first in-phase conversion `OWO_STIM_SETTLE_US` into each phase, further ones only while
+  `OWO_STIM_SENSE_GUARD_US` of the phase remain) and polls for the result; the phase's clock
+  starts before the bridge closes and the last delay lands on the width. Compatible with output
+  shaping: everything stays in software, at points the supervisor chooses. Measured in the model:
+  in-phase start to result about 35 us with the driver re-initialising the IADC each read (phase
+  85 us), negligible once it keeps an unchanged configuration (`vendor/zephyr`
+  `adc_silabs_iadc.c`); phases 53.1 / 53.9 us median, the bridge-off path and one poll step being
+  the rest. The model converts at the start command; silicon adds the IADC warm-up and conversion
+  time, which `OWO_STIM_SENSE_GUARD_US` (60 us, nominal) must cover.
+- **Reset window** [E]: method: QEMU gdb breakpoints at chosen code addresses that set an expander
+  input low through `qom-set`, which the board records with its virtual time (`expander_pins`).
+  Cold reset to the application's reset handler 2.57 ms (the stock bootloader), to `z_prep_c`
+  2.95 ms; .bss clear 4.44 ms and .data copy 1.79 ms with byte-wise string routines (1.7 ms both
+  with word-wise); then the EARLY init level, where `owo_suit_early_safe_off` drives the gates and
+  writes the expander (0.25 ms for the I2C transfer).
+- **Power management** [E, resolved]: the watchdog investigation saw kernel timeouts stop
+  ~600 ms after boot with `CONFIG_PM=y`. With the clock-event timer fix, a 630 s run with PM on
+  and the watchdog active fed it 27084 times, the longest interval 24.50 ms, with no warning,
+  reset or fault, through two stimulation sessions (Results).
 - **Miss report and radio clocks** [F static, fixed]: the miss policy is global (late clock
   events and unsat releases reach it too), so it can run before `radio_setup()` enabled the
   radio bus clocks; gated, a radio read is a bus error and a write is dropped (§7.72), which
@@ -289,6 +344,10 @@ model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they ar
 Sense resistor and the output stage's regulation and compliance; boost converter topology,
 target voltage, time constants and what PC7 and P2/P3 really do; electrode/skin impedance;
 gate polarity and the gates' state while the MCU pins float; switch part and latch behaviour;
-DAC part (full scale, clear code); the 0x69 part; battery chemistry and divider; stock pulse
-timing on silicon (the model's instruction timing is not calibrated for these code paths); the
-stock boost/stop/battery behaviour on a unit.
+DAC part (full scale, clear code); the 0x69 part; battery chemistry and divider, the pack's sag
+under stimulation load (sets the gap between `OWO_STIM_BATTERY_START_MV` and `_STOP_MV`) and how
+the boost rail behaves as it sags; the sense reading against the command (sets
+`OWO_STIM_UNDER_MARGIN`); the output's rise time (`OWO_STIM_SETTLE_US`); the IADC's start-to-result
+time in the pulse loop (`OWO_STIM_SENSE_GUARD_US`); the time from reset to the early safe-off with
+the clocks the bootloader leaves; stock pulse timing on silicon (the model's instruction timing is
+not calibrated for these code paths); the stock boost/stop/battery behaviour on a unit.

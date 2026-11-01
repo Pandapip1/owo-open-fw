@@ -56,7 +56,8 @@
 
 	suit_sense: suit_sense {
 		group0 {
-			silabs,analog-bus = <ABUS_BODD0_IADC0>;
+			/* PD2 (sense) on the CD even bus, PD3 (battery) on the CD odd bus. */
+			silabs,analog-bus = <ABUS_CDEVEN0_IADC0>, <ABUS_CDODD0_IADC0>;
 		};
 	};
 };
@@ -141,10 +142,21 @@
 	#size-cells = <0>;
 	status = "okay";
 
-	/* The explorer kit already has channel@0 (PB0); point it at the suit's PD3. Gain 1, VDD
-	 * reference (3.3 V), 12 bit, like the stock firmware. */
+	/* The explorer kit already has channel@0 (PB0); point it at the suit's sense input PD2.
+	 * Gain 1, VDD reference (3.3 V), 12 bit, like the stock firmware. */
 	channel@0 {
+		zephyr,input-positive = <IADC_INPUT_PD2>;
+	};
+
+	/* The suit's battery divider on PD3, as boards/owo_suit_hw.overlay. */
+	channel@1 {
+		reg = <1>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,gain = "ADC_GAIN_1_2";
 		zephyr,input-positive = <IADC_INPUT_PD3>;
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,resolution = <12>;
+		zephyr,vref-mv = <1210>;
 	};
 };
 
@@ -169,13 +181,14 @@
 			       <&gpiob 2 GPIO_ACTIVE_HIGH>, <&gpiob 3 GPIO_ACTIVE_HIGH>;
 		supplies = <&suit_supply_a>, <&suit_supply_b>;
 		switch = <&suit_switch>;
-		/* One word per electrode channel 0..10 (stock table, recovered by emulation). */
-		switch-routes = <0x01000100 0x00100010 0x00400040 0x00010001 0x00040004 0x00800080
-				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
+		/* One word per protocol channel 0..10, in the stock slot order (owo_suit_hw.overlay). */
+		switch-routes = <0x00800080 0x01000100 0x00020002 0x00080008 0x00100010 0x00400040
+				 0x00010001 0x00200020 0x00040004 0x02000200 0x04000400>;
 		pwms = <&suit_boost_pwm 0 PWM_HZ(4000) PWM_POLARITY_NORMAL>;
 		boost-duty-percent = <50>;
-		io-channels = <&suit_dac 15>, <&adc0 0>;
-		io-channel-names = "amplitude", "sense";
+		io-channels = <&suit_dac 15>, <&adc0 0>, <&adc0 1>;
+		io-channel-names = "amplitude", "sense", "battery";
+		battery-divider = <133 33>;
 		amplitude-resolution = <12>;
 		amplitude-scale = <0x12FED 0x9C4>;
 		max-level = <126>;
