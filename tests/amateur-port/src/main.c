@@ -3,9 +3,11 @@
  *
  * The advertiser checks the amateur API (call-sign validation, out-of-band refusal, the switch
  * itself and the encryption policy), switches to amateur rules with a non-standard plan and
- * advertises its call sign as its Complete Local Name; after AMATEUR_PORT_ADV_SECONDS it stops
- * and returns to Part 15, which sends the closing Morse identification. The scanner switches to
- * the same plan and prints the names it receives.
+ * advertises its Complete Local Name (the call sign, or AMATEUR_PORT_ADV_NAME); after
+ * AMATEUR_PORT_ADV_SECONDS it stops and returns to Part 15, which sends the closing
+ * identification. The scanner switches to the same plan and prints the names and the BLE
+ * Amateur Station Identifications (docs/ble-amateur-station-id.md) it receives. The Peripheral
+ * and Central roles do the same in a connection, the Central scanning while connected.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,6 +16,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gap.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
@@ -22,6 +25,11 @@
 
 /* include/ll.h (BT_CTLR_LE_ENC_POLICY), implemented by the radio module. */
 bool ll_enc_policy_permitted(void);
+#if defined(CONFIG_EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES)
+/* hal/radio.c, test only. */
+uint32_t efr32_radio_test_ll_miss_count(void);
+#define MISS_REPORT_S 60
+#endif
 
 #define KHZ_PER_MHZ 1000U
 /* Core v6.1 Vol 6 Part B 1.4.1: RF channel k at 2402 + 2k MHz; advertising at k = 0, 12, 39. */
@@ -49,6 +57,8 @@ static uint32_t ble_khz(uint32_t ch)
 #define ODD_OFFSET_KHZ (1U * KHZ_PER_MHZ)
 #define ODD_TOP_KHZ (2447U * KHZ_PER_MHZ)
 #define ODD_FOLD_KHZ (47U * KHZ_PER_MHZ)
+/* The highest standard carrier a 2 MHz guard keeps inside 2450 MHz. */
+#define INBAND_TOP_KHZ (2448U * KHZ_PER_MHZ)
 static uint32_t plan[EFR32_AMATEUR_PLAN_CHANNELS];
 
 static void plan_build(void)
@@ -69,6 +79,13 @@ static const uint32_t *test_plan(void)
 		single[ch] = CONFIG_AMATEUR_PORT_SINGLE_KHZ;
 	}
 	return single;
+#elif defined(CONFIG_AMATEUR_PORT_PLAN_INBAND)
+	static uint32_t inband[EFR32_AMATEUR_PLAN_CHANNELS];
+
+	for (uint32_t ch = 0U; ch < EFR32_AMATEUR_PLAN_CHANNELS; ch++) {
+		inband[ch] = ble_khz(ch) <= INBAND_TOP_KHZ ? ble_khz(ch) : ble_khz(ADV37);
+	}
+	return inband;
 #else
 	return IS_ENABLED(CONFIG_AMATEUR_PORT_PLAN_ODD) ? plan : NULL;
 #endif
@@ -254,19 +271,60 @@ static void probe_print(const char *what, int err)
 }
 #endif
 
+#if defined(CONFIG_AMATEUR_PORT_ADVERTISER) || defined(CONFIG_AMATEUR_PORT_PERIPHERAL)
+/*
+ * The application's own advertising data: its name only, the call sign unless
+ * AMATEUR_PORT_ADV_NAME names something else (the data identification's runs).
+ */
+static const char app_name[] = "" CONFIG_AMATEUR_PORT_ADV_NAME;
+static const char call_name[] = CONFIG_AMATEUR_PORT_CALLSIGN;
+
+static int app_adv_start(void)
+{
+	const char *name = sizeof(app_name) > 1U ? app_name : call_name;
+	size_t len = sizeof(app_name) > 1U ? sizeof(app_name) - 1U : sizeof(call_name) - 1U;
+	/* The Complete Local Name (Core Specification Supplement A 1.2). */
+	const struct bt_data ad[] = {
+		BT_DATA(BT_DATA_NAME_COMPLETE, name, len),
+	};
+	/* 100 ms, identity address; connectable in the Peripheral role. */
+	const struct bt_le_adv_param param = BT_LE_ADV_PARAM_INIT(
+		BT_LE_ADV_OPT_USE_IDENTITY |
+			(IS_ENABLED(CONFIG_AMATEUR_PORT_PERIPHERAL) ? BT_LE_ADV_OPT_CONN : 0U),
+		BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MIN_2 + 8U, NULL);
+
+	return bt_le_adv_start(&param, ad, ARRAY_SIZE(ad), NULL, 0);
+}
+#endif
+
+#if defined(CONFIG_AMATEUR_PORT_PERIPHERAL)
+static void peripheral_connected(struct bt_conn *conn, uint8_t err)
+{
+	ARG_UNUSED(conn);
+	printk("peripheral: connected %u at %lld ms\n", err, k_uptime_get());
+}
+
+static void peripheral_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+	printk("peripheral: disconnected 0x%02x at %lld ms\n", reason, k_uptime_get());
+}
+
+BT_CONN_CB_DEFINE(peripheral_callbacks) = {
+	.connected = peripheral_connected,
+	.disconnected = peripheral_disconnected,
+};
+
+static void advertise(void)
+{
+	printk("adv_start: %d\n", app_adv_start());
+}
+#endif
+
 #if defined(CONFIG_AMATEUR_PORT_ADVERTISER)
 static void advertise(void)
 {
-	static const char name[] = CONFIG_AMATEUR_PORT_CALLSIGN;
-	/* The call sign as the Complete Local Name (Core Specification Supplement A 1.2). */
-	const struct bt_data ad[] = {
-		BT_DATA(BT_DATA_NAME_COMPLETE, name, sizeof(name) - 1U),
-	};
-	/* 100 ms, non-connectable, identity address. */
-	const struct bt_le_adv_param param =
-		BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_USE_IDENTITY, BT_GAP_ADV_FAST_INT_MIN_2,
-				     BT_GAP_ADV_FAST_INT_MIN_2 + 8U, NULL);
-	int err = bt_le_adv_start(&param, ad, ARRAY_SIZE(ad), NULL, 0);
+	int err = app_adv_start();
 
 	printk("adv_start: %d\n", err);
 	if (err != 0 || CONFIG_AMATEUR_PORT_ADV_SECONDS == 0) {
@@ -277,7 +335,14 @@ static void advertise(void)
 	probe_block[0].khz = CONFIG_AMATEUR_PORT_SINGLE_KHZ;
 	k_timer_start(&probe_timer, K_USEC(PROBE_SAMPLE_US), K_USEC(PROBE_SAMPLE_US));
 #endif
+#if CONFIG_AMATEUR_PORT_EOC_EVERY_S > 0
+	for (int s = 0; s < CONFIG_AMATEUR_PORT_ADV_SECONDS; s += CONFIG_AMATEUR_PORT_EOC_EVERY_S) {
+		k_sleep(K_SECONDS(CONFIG_AMATEUR_PORT_EOC_EVERY_S));
+		(void)efr32_amateur_end_of_communication();
+	}
+#else
 	k_sleep(K_SECONDS(CONFIG_AMATEUR_PORT_ADV_SECONDS));
+#endif
 	err = bt_le_adv_stop();
 	printk("adv_stop: %d\n", err);
 	if (efr32_amateur_active()) {
@@ -293,26 +358,157 @@ static void advertise(void)
 }
 #endif
 
-#if defined(CONFIG_AMATEUR_PORT_SCANNER)
-static bool print_name(struct bt_data *data, void *user_data)
+#if defined(CONFIG_AMATEUR_PORT_SCANNER) || defined(CONFIG_AMATEUR_PORT_CENTRAL)
+/*
+ * A BLE Amateur Station Identification receiver (docs/ble-amateur-station-id.md section 8),
+ * written from the document, not from the module's sender: AD type 0x21 (Service Data -
+ * 128-bit UUID), the UUID 47cf0097-0119-4de0-b1e0-ca1151600073 as sent (little-endian), the
+ * header (version 1 in bits 7-4, FINAL in bit 0), then the call sign (A-Z, 0-9, '/').
+ */
+static const uint8_t asi_uuid_le[16] = {
+	0x73, 0x00, 0x60, 0x51, 0x11, 0xCA, 0xE0, 0xB1,
+	0xE0, 0x4D, 0x19, 0x01, 0x97, 0x00, 0xCF, 0x47,
+};
+#define ASI_HEADER_INDEX sizeof(asi_uuid_le)
+#define ASI_CALL_INDEX (ASI_HEADER_INDEX + 1U)
+#define ASI_VERSION 1U
+#define ASI_VERSION_SHIFT 4U
+#define ASI_FINAL 0x01U
+#define ASI_CALL_MAX 12U
+
+struct rx_report {
+	const struct bt_le_scan_recv_info *info;
+	char addr[BT_ADDR_LE_STR_LEN];
+};
+
+static bool asi_char(uint8_t c)
 {
-	ARG_UNUSED(user_data);
+	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/';
+}
+
+static bool print_ad(struct bt_data *data, void *user_data)
+{
+	struct rx_report *r = user_data;
+
 	if (data->type == BT_DATA_NAME_COMPLETE || data->type == BT_DATA_NAME_SHORTENED) {
-		printk("rx_name: %.*s\n", data->data_len, (const char *)data->data);
+		printk("rx_name: %.*s addr=%s type=%u\n", data->data_len,
+		       (const char *)data->data, r->addr, r->info->adv_type);
+	} else if (data->type == BT_DATA_SVC_DATA128 && data->data_len > ASI_CALL_INDEX &&
+		   memcmp(data->data, asi_uuid_le, sizeof(asi_uuid_le)) == 0 &&
+		   (data->data[ASI_HEADER_INDEX] >> ASI_VERSION_SHIFT) == ASI_VERSION) {
+		size_t n = data->data_len - ASI_CALL_INDEX;
+		bool ok = n <= ASI_CALL_MAX;
+
+		for (size_t i = 0U; ok && i < n; i++) {
+			ok = asi_char(data->data[ASI_CALL_INDEX + i]);
+		}
+		printk("rx_asi: %.*s final=%u header=0x%02x addr=%s type=%u %s at %lld ms\n",
+		       (int)n, (const char *)&data->data[ASI_CALL_INDEX],
+		       (data->data[ASI_HEADER_INDEX] & ASI_FINAL) != 0U,
+		       data->data[ASI_HEADER_INDEX], r->addr, r->info->adv_type,
+		       ok ? "ok" : "MALFORMED", k_uptime_get());
+	}
+	return true;
+}
+
+static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_simple *buf);
+
+static struct bt_le_scan_cb scan_callbacks = {
+	.recv = scan_recv,
+};
+#endif
+
+#if defined(CONFIG_AMATEUR_PORT_CENTRAL)
+/* Connect once to the device advertising AMATEUR_PORT_PEER_NAME, then keep scanning. */
+static struct bt_conn *central_conn;
+static bool central_connecting;
+static const char peer_name[] = CONFIG_AMATEUR_PORT_PEER_NAME;
+
+static bool find_peer(struct bt_data *data, void *user_data)
+{
+	bool *match = user_data;
+
+	if (data->type == BT_DATA_NAME_COMPLETE && data->data_len == sizeof(peer_name) - 1U &&
+	    memcmp(data->data, peer_name, data->data_len) == 0) {
+		*match = true;
 		return false;
 	}
 	return true;
 }
 
-static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_simple *buf)
+static const struct bt_le_scan_param central_scan = {
+	.type = BT_LE_SCAN_TYPE_PASSIVE,
+	.interval = BT_GAP_SCAN_FAST_INTERVAL_MIN,
+	.window = BT_GAP_SCAN_FAST_WINDOW,
+};
+
+static void central_connect(const bt_addr_le_t *addr)
 {
-	ARG_UNUSED(info);
-	bt_data_parse(buf, print_name, NULL);
+	int err;
+
+	central_connecting = true;
+	(void)bt_le_scan_stop();
+	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT,
+				&central_conn);
+	printk("central: create %d\n", err);
+	if (err != 0) {
+		central_connecting = false;
+		(void)bt_le_scan_start(&central_scan, NULL);
+	}
 }
 
-static struct bt_le_scan_cb scan_callbacks = {
-	.recv = scan_recv,
+static void central_connected(struct bt_conn *conn, uint8_t err)
+{
+	ARG_UNUSED(conn);
+	printk("central: connected %u at %lld ms\n", err, k_uptime_get());
+	/* Observe the advertising channels between connection events. */
+	printk("central: scan_start %d\n", bt_le_scan_start(&central_scan, NULL));
+}
+
+static void central_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+	printk("central: disconnected 0x%02x at %lld ms\n", reason, k_uptime_get());
+}
+
+BT_CONN_CB_DEFINE(central_callbacks) = {
+	.connected = central_connected,
+	.disconnected = central_disconnected,
 };
+#endif
+
+#if defined(CONFIG_AMATEUR_PORT_SCANNER) || defined(CONFIG_AMATEUR_PORT_CENTRAL)
+static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_simple *buf)
+{
+	struct rx_report r = { .info = info };
+	struct net_buf_simple_state state;
+
+	bt_addr_le_to_str(info->addr, r.addr, sizeof(r.addr));
+	net_buf_simple_save(buf, &state);
+	bt_data_parse(buf, print_ad, &r);
+	net_buf_simple_restore(buf, &state);
+#if defined(CONFIG_AMATEUR_PORT_CENTRAL)
+	bool match = false;
+
+	if (!central_connecting && info->adv_type == BT_GAP_ADV_TYPE_ADV_IND) {
+		bt_data_parse(buf, find_peer, &match);
+		if (match) {
+			central_connect(info->addr);
+		}
+	}
+#endif
+}
+#endif
+
+#if defined(CONFIG_AMATEUR_PORT_CENTRAL)
+static void central(void)
+{
+	bt_le_scan_cb_register(&scan_callbacks);
+	printk("scan_start: %d\n", bt_le_scan_start(&central_scan, NULL));
+}
+#endif
+
+#if defined(CONFIG_AMATEUR_PORT_SCANNER)
 
 #if defined(CONFIG_AMATEUR_PORT_SYNTH_PROBE)
 static void probe(void)
@@ -392,10 +588,20 @@ int main(void)
 	if (!IS_ENABLED(CONFIG_AMATEUR_PORT_SYNTH_PROBE)) {
 		amateur_on();
 	}
-#if defined(CONFIG_AMATEUR_PORT_ADVERTISER)
+#if defined(CONFIG_AMATEUR_PORT_ADVERTISER) || defined(CONFIG_AMATEUR_PORT_PERIPHERAL)
 	advertise();
+#elif defined(CONFIG_AMATEUR_PORT_CENTRAL)
+	central();
 #else
 	scan();
+#endif
+#if defined(CONFIG_EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES)
+	/* The QEMU connection profile: link-layer misses are counted, not fatal. */
+	for (;;) {
+		k_sleep(K_SECONDS(MISS_REPORT_S));
+		printk("status: %lld ms, identifications %u, link-layer misses counted %u\n",
+		       k_uptime_get(), efr32_amateur_id_count(), efr32_radio_test_ll_miss_count());
+	}
 #endif
 	return 0;
 }

@@ -157,4 +157,82 @@ bool efr32_amateur_id_next(const struct efr32_amateur_id_state *state,
 			   const struct efr32_amateur_admin *admin, uint32_t end_idle_ms,
 			   uint32_t lead_ms, uint32_t airtime_ms, struct efr32_amateur_id_due *due);
 
+/*
+ * Identification methods, a bit set (Kconfig EFR32_RADIO_AMATEUR_ID_CW and _ID_DATA). CW: 47
+ * CFR 97.119(b)(1). DATA: BLE-ASI, the call sign in ASCII in its own advertising PDU
+ * (docs/ble-amateur-station-id.md; its legal basis under 97.119(b)(3) is unconfirmed).
+ */
+#define EFR32_AMATEUR_ID_METHOD_CW (1U << 0)
+#define EFR32_AMATEUR_ID_METHOD_DATA (1U << 1)
+#define EFR32_AMATEUR_ID_METHODS_ALL (EFR32_AMATEUR_ID_METHOD_CW | EFR32_AMATEUR_ID_METHOD_DATA)
+
+/* A Bluetooth device address (Core v6.1 Vol 6 Part B 1.3), least significant octet first. */
+#define EFR32_AMATEUR_BDADDR_SIZE 6U
+/* The three advertising channels: one data-identification PDU on each. */
+#define EFR32_AMATEUR_ADV_CHANNELS 3U
+/*
+ * The data identification is BLE Amateur Station Identification v1 (docs/ble-amateur-station-
+ * id.md, "BLE-ASI"): one Service Data - 128-bit UUID AD structure, 19 + N octets for a call
+ * sign of N, alone in a dedicated ADV_NONCONN_IND. Largest PDU: header and length (2), AdvA
+ * (6), the structure with a 12-octet call sign (31).
+ */
+#define EFR32_AMATEUR_DATA_ID_AD_MAX (19U + EFR32_AMATEUR_CALLSIGN_MAX)
+/* The advertising PDU's header: the header octet and the length octet. */
+#define EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS 2U
+#define EFR32_AMATEUR_DATA_ID_PDU_MAX \
+	(EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + EFR32_AMATEUR_BDADDR_SIZE + EFR32_AMATEUR_DATA_ID_AD_MAX)
+
+/*
+ * The BLE-ASI AD structure for @p callsign (A-Z, 0-9, '/', 1-12 octets); @p final sets the
+ * FINAL flag (the end-of-communication identification). Returns its octets, or 0 when the call
+ * sign is not valid for BLE-ASI or @p out_size is too small.
+ */
+size_t efr32_amateur_data_id_ad(const char *callsign, bool final, uint8_t *out, size_t out_size);
+
+/*
+ * The data-identification PDU: an ADV_NONCONN_IND (Core v6.1 Vol 6 Part B 2.3.1.3) from
+ * @p addr (@p addr_random: TxAdd) whose AdvData is only the BLE-ASI structure. Written as the
+ * radio sends it: header octet, length octet, payload. Returns the PDU's octets, or 0.
+ */
+size_t efr32_amateur_data_id_pdu(const char *callsign, bool final, const uint8_t *addr,
+				 bool addr_random, uint8_t *out, size_t out_size);
+
+/*
+ * A BLE-ASI receiver (BLE-ASI 8): finds the structure in advertising data @p ad by AD type and
+ * UUID, checks the version and the call sign's characters, and copies the call sign to
+ * @p callsign (EFR32_AMATEUR_CALLSIGN_MAX + 1 bytes) and the FINAL flag to @p final.
+ */
+bool efr32_amateur_data_id_parse_ad(const uint8_t *ad, size_t octets, char *callsign, bool *final);
+/* The same for a whole PDU, which must be an ADV_NONCONN_IND. */
+bool efr32_amateur_data_id_parse(const uint8_t *pdu, size_t octets, char *callsign, bool *final);
+
+/*
+ * A static random device address (Core v6.1 Vol 6 Part B 1.3.2.1) from 6 random octets: the
+ * identification's own address (BLE-ASI 6). False when the random part is all 0 or all 1.
+ */
+bool efr32_amateur_static_addr(const uint8_t *random, uint8_t *addr);
+
+/* Air time of a PDU of @p pdu_octets on LE 1M: preamble, access address, PDU, CRC; 1 us a bit. */
+uint32_t efr32_amateur_le1m_airtime_us(size_t pdu_octets);
+
+/* What bounds an identification's span (struct efr32_amateur_id_timing). */
+struct efr32_amateur_id_timing {
+	/* TXEN to the first bit on air. */
+	uint32_t tx_ready_us;
+	/* Latest TXEN of a part after the previous part's TXEN (the advertising PDU spacing). */
+	uint32_t spacing_us;
+	/* Air time of one data-identification PDU. */
+	uint32_t data_pdu_us;
+	/* Air time of the Morse frame (its sync included). */
+	uint32_t cw_us;
+};
+
+/*
+ * The longest time from an identification's first TXEN to the end of its last frame, for the
+ * methods in @p methods: the data PDUs (one per advertising channel) first, then the Morse
+ * frame, each part started at most spacing_us after the previous one's TXEN. Returns 0 when
+ * @p methods is empty or unknown, or a part before the last does not fit its spacing.
+ */
+uint32_t efr32_amateur_id_span_us(uint32_t methods, const struct efr32_amateur_id_timing *timing);
+
 #endif /* EFR32_RADIO_AMATEUR_RULES_H_ */

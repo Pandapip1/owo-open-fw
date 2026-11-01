@@ -687,6 +687,19 @@ config EFR32_RADIO_TIMING_PROBE
 	  in TIMER0 counts), for a debugger or the QEMU monitor to read.
 	  Measurement builds only (docs/radio-tables.md 7.79).
 
+config EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES
+	bool "Test only (QEMU): count link-layer deadline misses, stop on broken rules"
+	depends on EFR32_RADIO_TIMING_QEMU && SCHED_DEADLINE_MISS_CUSTOM
+	help
+	  In QEMU every connection-event turnaround misses its spec-derived
+	  start-by (docs/radio-tables.md 7.79), so the QEMU connection
+	  profiles count misses (SCHED_DEADLINE_MISS_COUNT). That policy
+	  cannot carry amateur operation, whose broken rules (an
+	  identification not started by its latest start) must still stop
+	  the radio. With this, the safe-shutdown handler counts every
+	  scheduler miss (efr32_radio_test_ll_miss_count()) and shuts down
+	  only on efr32_radio_policy_stop(). Never in a hardware image.
+
 config EFR32_RADIO_TEST_OVERRUN_US
 	int "Test only: one injected TX launch job overrun (us)"
 	default 0
@@ -723,6 +736,101 @@ menuconfig EFR32_RADIO_AMATEUR
 
 if EFR32_RADIO_AMATEUR
 
+config EFR32_RADIO_AMATEUR_ID_DATA
+	bool "Identify by a data emission too (BLE-ASI; UNCONFIRMED legal basis)"
+	help
+	  Each station identification also sends (or, with
+	  EFR32_RADIO_AMATEUR_ID_CW off, sends only) the call sign as BLE
+	  Amateur Station Identification v1 (docs/ble-amateur-station-id.md):
+	  a dedicated non-connectable, non-scannable ADV_NONCONN_IND (Core
+	  v6.1 Vol 6 Part B 2.3.1.3) whose only AD structure is Service Data
+	  with the BLE-ASI UUID, a header (FINAL on the end-of-communication
+	  identification) and the call sign in ASCII, on each advertising
+	  channel of the active plan. It is the identification job's own
+	  frame, in its reserved radio slot, independent of the
+	  application's advertising; about 1 ms on air, so it also fits
+	  between connection events. Same schedule, admission and safe
+	  shutdown as the CW identification (docs/amateur-radio.md
+	  section 5).
+
+	  LEGAL CAVEAT, not confirmed: 47 CFR 97.119(b)(3) allows
+	  identification "by a RTTY emission using a specified digital code
+	  when all or part of the communications are transmitted by a RTTY or
+	  data emission", and 97.309(a)(3) specifies ASCII (ITU-T T.50, IA5).
+	  This frame is a data emission (F1D, GFSK, about 1 MHz wide), not a
+	  narrow-band RTTY one, and its ASCII octets are carried in Bluetooth
+	  framing (preamble, access address, header, UUID, CRC, whitening:
+	  publicly documented, cf. 97.309(a)(4)). Whether it satisfies
+	  97.119(b)(3) is an open question for the licensee to settle (for
+	  example with the ARRL) before relying on it. Until then keep
+	  EFR32_RADIO_AMATEUR_ID_CW on.
+
+config EFR32_RADIO_AMATEUR_ID_CW
+	bool "Identify in Morse code (CW) as well" if EFR32_RADIO_AMATEUR_ID_DATA
+	default y
+	help
+	  The call sign in Morse code by on-off keying the carrier, 47 CFR
+	  97.119(b)(1): the default identification, always on unless the data
+	  identification is chosen. With both, each identification sends the
+	  data frames and then the Morse frame in one reserved slot (the radio
+	  is busy for the Morse frame's 4.3 s). Turning it off leaves only
+	  the data identification, whose legal basis is unconfirmed.
+
+choice EFR32_RADIO_AMATEUR_ID_DATA_ADDRESS
+	prompt "Data identification's device address"
+	depends on EFR32_RADIO_AMATEUR_ID_DATA
+	default EFR32_RADIO_AMATEUR_ID_DATA_ADDRESS_OWN
+
+config EFR32_RADIO_AMATEUR_ID_DATA_ADDRESS_OWN
+	bool "An address used only for identification"
+	help
+	  A static random address drawn when amateur rules are enabled and
+	  used only by identification frames (BLE-ASI 6), so receivers that
+	  cache names by address do not mix the identification with the
+	  application's advertising.
+
+config EFR32_RADIO_AMATEUR_ID_DATA_ADDRESS_STATION
+	bool "The station's usual address"
+	help
+	  The controller's public address, or else its random (identity)
+	  address, as the application's advertising uses.
+
+endchoice
+
+config EFR32_RADIO_WCET_AMATEUR_ID_COMPLETION_NS
+	int "Data identification: completion callback of one PDU (ns)"
+	depends on EFR32_RADIO_AMATEUR_ID_DATA
+	default 157700 if EFR32_RADIO_TIMING_QEMU && EFR32_RADIO_AMATEUR_ID_CW
+	default 36400 if EFR32_RADIO_TIMING_QEMU
+	default 184700 if EFR32_RADIO_AMATEUR_ID_CW
+	default 49500
+	help
+	  The identification's callback in the completion of one of its PDUs:
+	  the next advertising channel's PDU tuned, staged and launched, or
+	  after the last one the radio returned to its Bluetooth configuration
+	  (with EFR32_RADIO_AMATEUR_ID_CW, the Morse frame set up and
+	  launched). The completion's budget is this plus the measured
+	  completion of a transmit (EFR32_RADIO_WCET_COMPLETION_TX_NS, which
+	  already includes an LLL callback of its own, so the sum bounds it
+	  from above). Its start-by deadline is the advertising PDU spacing,
+	  10 ms after the previous TXEN (Core v6.1 Vol 6 Part B 4.4.2.1).
+	  Measured (EFR32_RADIO_AMATEUR_ID_PROBE, docs/radio-tables.md 7.85),
+	  longest of 12 (6 with CW) identifications: silicon 49.4 us, 184.6 us
+	  with the Morse launch; QEMU 36.4 us, 157.6 us.
+
+config EFR32_RADIO_AMATEUR_ID_PROBE
+	bool "Test only: measure the identification's runs and airtime"
+	select SCHED_DEADLINE_STATS
+	select SCHED_THREAD_USAGE
+	select THREAD_RUNTIME_STATS
+	help
+	  Records, per identification, the identification job's longest run
+	  (its own CPU time from thread usage, and its wall time with the radio
+	  jobs that preempt it),
+	  the longest LLL start and completion of its frames, the TXEN to
+	  TXEN spacing and the whole identification's span, and prints them
+	  with each identification's report. Measurement builds only.
+
 config EFR32_RADIO_AMATEUR_CW_WPM
 	int "Morse identification speed (words per minute, PARIS)"
 	range 5 20
@@ -750,11 +858,18 @@ config EFR32_RADIO_AMATEUR_ID_STACK_SIZE
 
 config EFR32_RADIO_WCET_AMATEUR_ID_NS
 	int "Identification job budget (ns)"
-	default 200000
+	default 63500 if EFR32_RADIO_TIMING_QEMU
+	default 89800
 	help
-	  [P] Placeholder, unmeasured: one run of the identification job (a
-	  ticker request, or the bookkeeping after the identification). Its
-	  airtime is not CPU time: the ticker reserves the radio for it.
+	  One run of the identification job (a ticker request with the data
+	  identification's PDU built, or the bookkeeping after the
+	  identification; the console report runs on the system work queue).
+	  Its airtime is not CPU time: the ticker reserves the radio for it.
+	  Measured as the job thread's own CPU time (thread usage,
+	  EFR32_RADIO_AMATEUR_ID_PROBE; docs/radio-tables.md 7.85), longest of
+	  12 identifications with the data identification, whose PDU build
+	  the CW-only job does not do: silicon 89.7 us (wall time with the
+	  radio jobs that preempt it 967 us), QEMU 63.5 us.
 
 config EFR32_RADIO_AMATEUR_SYNTH_PROBE
 	bool "Test only: receive-only synthesizer probe, 2290-2500 MHz"

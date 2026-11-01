@@ -11,6 +11,12 @@
  * borrows the radio), and watched by a timer at its latest start. If it has not started then,
  * the obligation cannot be met and the radio stops transmitting: the safe shutdown.
  *
+ * With CONFIG_EFR32_RADIO_AMATEUR_ID_DATA the same job, in the same slot, first sends the call
+ * sign as a BLE Amateur Station Identification (docs/ble-amateur-station-id.md): its own
+ * ADV_NONCONN_IND on each of the plan's advertising channels, independent of the application's
+ * advertising; with CONFIG_EFR32_RADIO_AMATEUR_ID_CW off it is the only identification (legal
+ * basis unconfirmed, docs/amateur-radio.md section 5).
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <errno.h>
@@ -22,6 +28,7 @@
 #include <zephyr/spinlock.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/random/random.h>
 #include <soc.h>
 
 #include "util/memq.h"
@@ -33,6 +40,7 @@
 #include "ll.h"
 #include "hal/efr32/amateur.h"
 #include "hal/efr32/ll_threads.h"
+#include "hal/efr32/ll_deadlines.h"
 #include "amateur_radio.h"
 
 /* ull_conn_internal.h needs most of the controller's headers; only this is used. */
@@ -76,6 +84,76 @@ BUILD_ASSERT(CONFIG_BT_CTLR_USER_TICKER_ID_RANGE >= 2, "amateur identification n
 BUILD_ASSERT(CONFIG_EFR32_RADIO_AMATEUR_CW_WPM <= 20,
 	     "47 CFR 97.119(b)(1): an automatic CW identification must not exceed 20 WPM");
 
+/* Kconfig EFR32_RADIO_AMATEUR_ID_CW, EFR32_RADIO_AMATEUR_ID_DATA: what an identification sends. */
+#define EFR32_AMATEUR_ID_METHODS                                                                 \
+	((IS_ENABLED(CONFIG_EFR32_RADIO_AMATEUR_ID_CW) ? EFR32_AMATEUR_ID_METHOD_CW : 0U) | \
+	 (IS_ENABLED(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA) ? EFR32_AMATEUR_ID_METHOD_DATA : 0U))
+BUILD_ASSERT(EFR32_AMATEUR_ID_METHODS != 0U, "an identification must send something");
+#define EFR32_AMATEUR_ID_METHOD_NAME                                                     \
+	(EFR32_AMATEUR_ID_METHODS == EFR32_AMATEUR_ID_METHODS_ALL ? "data+CW" :           \
+	 EFR32_AMATEUR_ID_METHODS == EFR32_AMATEUR_ID_METHOD_DATA ? "data" : "CW")
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+BUILD_ASSERT(EFR32_AMATEUR_BDADDR_SIZE == BT_ADDR_SIZE, "a device address is 6 octets");
+/* ll_addr_get(): the controller's public (0) and random (1) addresses. */
+#define EFR32_AMATEUR_ADDR_PUBLIC 0U
+#define EFR32_AMATEUR_ADDR_RANDOM 1U
+/*
+ * The latest TXEN of an identification part after the previous part's: the advertising PDU
+ * spacing (Core v6.1 Vol 6 Part B 4.4.2.1), the start-by deadline of the completion that
+ * launches it (hal/radio.c, efr32_dl_adv_next_start_by()).
+ */
+#define EFR32_AMATEUR_ID_SPACING_US BT_ADV_PDU_SPACING_MAX_US
+#endif
+
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_PROBE)
+/* Test only: the identification's runs and airtime, scheduler-clock cycles. */
+static struct {
+	uint32_t start_cyc;     /* LLL start: entry to the first TXEN */
+	uint32_t completion_cyc; /* longest completion callback of an identification frame */
+	uint32_t spacing_cyc;   /* longest TXEN to TXEN of consecutive parts */
+	uint32_t span_cyc;      /* first TXEN to the end of the last frame */
+	uint32_t first_txen;
+	uint32_t last_txen;
+	uint64_t job_cyc;       /* the job thread's own CPU time in one run (thread usage) */
+	uint64_t job_start;
+} efr32_amateur_probe;
+#define EFR32_AMATEUR_PROBE_MAX(field, value) \
+	(efr32_amateur_probe.field = MAX(efr32_amateur_probe.field, (value)))
+static void efr32_amateur_probe_txen(bool first)
+{
+	uint32_t now = k_cycle_get_32();
+
+	if (first) {
+		efr32_amateur_probe.first_txen = now;
+	} else {
+		EFR32_AMATEUR_PROBE_MAX(spacing_cyc, now - efr32_amateur_probe.last_txen);
+	}
+	efr32_amateur_probe.last_txen = now;
+}
+/* The job's own CPU time: the radio's meta-IRQ jobs that preempt it are not counted. */
+static uint64_t efr32_amateur_probe_usage(void)
+{
+	k_thread_runtime_stats_t stats;
+
+	(void)k_thread_runtime_stats_get(k_current_get(), &stats);
+	return stats.execution_cycles;
+}
+static void efr32_amateur_probe_job_start(void)
+{
+	efr32_amateur_probe.job_start = efr32_amateur_probe_usage();
+}
+static void efr32_amateur_probe_job_end(void)
+{
+	EFR32_AMATEUR_PROBE_MAX(job_cyc,
+				efr32_amateur_probe_usage() - efr32_amateur_probe.job_start);
+}
+#else
+#define EFR32_AMATEUR_PROBE_MAX(field, value)
+#define efr32_amateur_probe_txen(first)
+#define efr32_amateur_probe_job_start()
+#define efr32_amateur_probe_job_end()
+#endif
+
 static struct k_spinlock efr32_amateur_lock;
 static atomic_t efr32_amateur_on;
 static const struct efr32_amateur_admin *efr32_amateur_admin;
@@ -87,9 +165,28 @@ static uint32_t efr32_amateur_tuned_khz;
 static uint32_t efr32_amateur_tx_khz;
 
 static struct efr32_amateur_id_state efr32_amateur_id;
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_CW)
 static uint8_t efr32_amateur_cw[EFR32_AMATEUR_CW_OCTETS_MAX];
 static size_t efr32_amateur_cw_octets;
+#endif
 static uint32_t efr32_amateur_cw_airtime_us;
+/*
+ * The identification's longest span from its first TXEN to the end of its last frame
+ * (efr32_amateur_id_span_us()): what its slot reserves and its latest start allows for.
+ */
+static uint32_t efr32_amateur_span_us;
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+/* The data identification's PDU, rebuilt from the controller's address before each slot. */
+static uint8_t efr32_amateur_data_pdu[EFR32_AMATEUR_DATA_ID_PDU_MAX];
+static size_t efr32_amateur_data_pdu_octets;
+/* The advertising channel of the PDU on air. */
+static uint8_t efr32_amateur_data_chan;
+#endif
+/*
+ * An identification frame is on air (LLL context): the radio's TX notifications are the
+ * identification's own and do not count as a communication's transmissions.
+ */
+static bool efr32_amateur_id_on_air;
 static uint32_t efr32_amateur_ids;
 /* The identification has been handed to the radio; it completed (for the job). */
 static bool efr32_amateur_id_started;
@@ -100,6 +197,10 @@ static bool efr32_amateur_id_now;
 static bool efr32_amateur_id_failed;
 /* efr32_amateur_disable() waits for the last identification. */
 static bool efr32_amateur_closing;
+/* The identification requested is the end of a communication (BLE-ASI FINAL). */
+static bool efr32_amateur_id_final;
+/* efr32_amateur_end_of_communication() asked for it. */
+static bool efr32_amateur_eoc_requested;
 static atomic_t efr32_amateur_enc_refusals;
 
 K_DEADLINE_EVENT_DEFINE(efr32_amateur_id_event);
@@ -117,7 +218,7 @@ static K_TIMER_DEFINE(efr32_amateur_frame_timer, efr32_amateur_frame_expiry, NUL
  */
 static uint32_t efr32_amateur_slot_us(void)
 {
-	return efr32_amateur_cw_airtime_us + EVENT_OVERHEAD_START_US + EVENT_OVERHEAD_XTAL_US +
+	return efr32_amateur_span_us + EVENT_OVERHEAD_START_US + EVENT_OVERHEAD_XTAL_US +
 	       EVENT_OVERHEAD_END_US;
 }
 
@@ -153,7 +254,7 @@ static uint64_t efr32_amateur_now_ms(void)
 static void efr32_amateur_schedule(uint64_t now)
 {
 	struct efr32_amateur_id_due due;
-	uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_cw_airtime_us, USEC_PER_MSEC);
+	uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_span_us, USEC_PER_MSEC);
 
 	if (efr32_amateur_slot_requested ||
 	    !efr32_amateur_id_next(&efr32_amateur_id, efr32_amateur_admin,
@@ -187,7 +288,7 @@ static void efr32_amateur_release_expiry(struct k_timer *timer)
 	struct efr32_amateur_id_due due;
 	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
 	uint64_t now = efr32_amateur_now_ms();
-	uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_cw_airtime_us, USEC_PER_MSEC);
+	uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_span_us, USEC_PER_MSEC);
 	bool due_now = false;
 
 	ARG_UNUSED(timer);
@@ -241,7 +342,8 @@ void efr32_radio_amateur_tx_notify(void)
 {
 	k_spinlock_key_t key;
 
-	if (atomic_get(&efr32_amateur_on) == 0) {
+	if (atomic_get(&efr32_amateur_on) == 0 || efr32_amateur_id_on_air) {
+		/* Part 15, or the identification's own PDU. */
 		return;
 	}
 	if (IS_ENABLED(CONFIG_EFR32_RADIO_AMATEUR_SYNTH_PROBE)) {
@@ -295,12 +397,13 @@ bool efr32_radio_amateur_ccm_permitted(void)
 
 /* The identification in the radio slot --------------------------------------------------- */
 
-static void efr32_amateur_cw_done(void *param)
+/* The identification's last frame has ended (radio completion). */
+static void efr32_amateur_id_end(void)
 {
-	ARG_UNUSED(param);
-	efr32_radio_cw_finish();
+	EFR32_AMATEUR_PROBE_MAX(span_cyc, k_cycle_get_32() - efr32_amateur_probe.first_txen);
 	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
 
+	efr32_amateur_id_on_air = false;
 	efr32_amateur_id_completed = true;
 	if (efr32_amateur_closing) {
 		/*
@@ -313,23 +416,86 @@ static void efr32_amateur_cw_done(void *param)
 	efr32_amateur_post(EFR32_AMATEUR_LEAD_MS);
 }
 
-/* LLL context, the radio idle and the slot reserved. */
-static void efr32_amateur_cw_start(void *param)
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_CW)
+static void efr32_amateur_cw_done(void *param)
+{
+	uint32_t entry = k_cycle_get_32();
+
+	ARG_UNUSED(param);
+	efr32_radio_cw_finish();
+	efr32_amateur_id_end();
+	EFR32_AMATEUR_PROBE_MAX(completion_cyc, k_cycle_get_32() - entry);
+	ARG_UNUSED(entry);
+}
+
+/* The Morse frame on the station's last transmitting carrier. */
+static void efr32_amateur_cw_send(bool first)
 {
 	uint32_t khz;
+	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
+
+	khz = efr32_amateur_tx_khz;
+	k_spin_unlock(&efr32_amateur_lock, key);
+	efr32_amateur_probe_txen(first);
+	efr32_radio_cw_transmit(khz, efr32_amateur_cw, efr32_amateur_cw_octets,
+				efr32_amateur_cw_done, NULL);
+}
+#endif
+
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+/*
+ * Radio completion of a data-identification PDU: the next advertising channel's, then (with
+ * the CW method too) the Morse frame, each within the advertising PDU spacing of this TXEN
+ * (its start-by deadline, hal/radio.c).
+ */
+static void efr32_amateur_data_done(void *param)
+{
+	uint32_t entry = k_cycle_get_32();
+
+	ARG_UNUSED(param);
+	efr32_amateur_data_chan++;
+	if (efr32_amateur_data_chan < EFR32_AMATEUR_ADV_CHANNEL_FIRST + EFR32_AMATEUR_ADV_CHANNELS) {
+		efr32_amateur_probe_txen(false);
+		efr32_radio_id_adv_transmit(efr32_amateur_data_chan, efr32_amateur_data_pdu, false,
+					    efr32_amateur_data_done, NULL);
+	} else {
+		efr32_radio_id_adv_finish();
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_CW)
+		efr32_amateur_cw_send(false);
+#else
+		efr32_amateur_id_end();
+#endif
+	}
+	EFR32_AMATEUR_PROBE_MAX(completion_cyc, k_cycle_get_32() - entry);
+	ARG_UNUSED(entry);
+}
+#endif
+
+/* LLL context, the radio idle and the slot reserved. */
+static void efr32_amateur_id_start(void *param)
+{
+	uint32_t entry = k_cycle_get_32();
 
 	ARG_UNUSED(param);
 	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
 
 	efr32_amateur_id_started = true;
-	khz = efr32_amateur_tx_khz;
+	efr32_amateur_id_on_air = true;
 	k_spin_unlock(&efr32_amateur_lock, key);
 	k_timer_stop(&efr32_amateur_watchdog_timer);
-	/* The frame must end inside its reserved slot (efr32_amateur_slot_us()). */
+	/* The frames must end inside the reserved slot (efr32_amateur_slot_us()). */
 	k_timer_start(&efr32_amateur_frame_timer,
 		      K_USEC(efr32_amateur_slot_us() + EVENT_TICKER_RES_MARGIN_US), K_NO_WAIT);
-	efr32_radio_cw_transmit(khz, efr32_amateur_cw, efr32_amateur_cw_octets,
-				efr32_amateur_cw_done, NULL);
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	efr32_amateur_data_chan = EFR32_AMATEUR_ADV_CHANNEL_FIRST;
+	efr32_amateur_probe_txen(true);
+	efr32_radio_id_adv_transmit(efr32_amateur_data_chan, efr32_amateur_data_pdu, true,
+				    efr32_amateur_data_done, NULL);
+#else
+	efr32_amateur_cw_send(true);
+#endif
+	EFR32_AMATEUR_PROBE_MAX(start_cyc, k_cycle_get_32() - entry);
+	ARG_UNUSED(entry);
 }
 
 /*
@@ -363,7 +529,7 @@ static void efr32_amateur_slot_start(uint32_t ticks_at_expire, uint32_t ticks_dr
 				     void *context)
 {
 	static memq_link_t link;
-	static struct mayfly mfy = { 0, 0, &link, NULL, efr32_amateur_cw_start };
+	static struct mayfly mfy = { 0, 0, &link, NULL, efr32_amateur_id_start };
 
 	ARG_UNUSED(ticks_at_expire);
 	ARG_UNUSED(ticks_drift);
@@ -417,6 +583,95 @@ static int efr32_amateur_slot_request(void)
 	return (ret == TICKER_STATUS_SUCCESS || ret == TICKER_STATUS_BUSY) ? 0 : -EIO;
 }
 
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+/*
+ * The address the data identification is sent from (Kconfig EFR32_RADIO_AMATEUR_ID_DATA_
+ * ADDRESS): its own static random address (drawn at enable), or the station's: the
+ * controller's public address if it has one, else its random address (the host's identity, as
+ * the application's advertising with BT_LE_ADV_OPT_USE_IDENTITY uses). NULL when there is none.
+ */
+static uint8_t efr32_amateur_id_addr[BT_ADDR_SIZE];
+
+static const uint8_t *efr32_amateur_data_id_addr(bool *random)
+{
+	static const uint8_t none[BT_ADDR_SIZE];
+	const uint8_t *addr = efr32_amateur_id_addr;
+
+	*random = true;
+	if (IS_ENABLED(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA_ADDRESS_STATION)) {
+		addr = ll_addr_get(EFR32_AMATEUR_ADDR_PUBLIC);
+		*random = false;
+		if (memcmp(addr, none, sizeof(none)) == 0) {
+			addr = ll_addr_get(EFR32_AMATEUR_ADDR_RANDOM);
+			*random = true;
+		}
+	}
+	return memcmp(addr, none, sizeof(none)) == 0 ? NULL : addr;
+}
+#endif
+
+/*
+ * The data identification's PDU before its slot is requested (nothing is on air), FINAL when it
+ * ends the communication (BLE-ASI 4). False when there is no address to send it from. Without
+ * the data identification there is nothing to build.
+ */
+static bool efr32_amateur_data_id_build(bool final)
+{
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	bool random;
+	const uint8_t *addr = efr32_amateur_data_id_addr(&random);
+	size_t octets;
+
+	if (addr == NULL) {
+		return false;
+	}
+	octets = efr32_amateur_data_id_pdu(efr32_amateur_call, final, addr, random,
+					   efr32_amateur_data_pdu, sizeof(efr32_amateur_data_pdu));
+	efr32_amateur_data_pdu_octets = octets;
+	return octets != 0U;
+#else
+	ARG_UNUSED(final);
+	return true;
+#endif
+}
+
+static void efr32_amateur_probe_report(void)
+{
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_PROBE)
+	uint32_t run = 0U;
+	uint32_t latency = 0U;
+
+	k_deadline_event_stats_get(&efr32_amateur_id_event, &run, &latency);
+	printk("efr32-radio: id-probe job_cpu=%u ns job_run=%u ns lll_start=%u ns "
+	       "completion=%u ns spacing=%u ns span=%u us (reserved %u us)\n",
+	       (unsigned int)k_cyc_to_ns_ceil32((uint32_t)efr32_amateur_probe.job_cyc),
+	       (unsigned int)k_cyc_to_ns_ceil32(run),
+	       (unsigned int)k_cyc_to_ns_ceil32(efr32_amateur_probe.start_cyc),
+	       (unsigned int)k_cyc_to_ns_ceil32(efr32_amateur_probe.completion_cyc),
+	       (unsigned int)k_cyc_to_ns_ceil32(efr32_amateur_probe.spacing_cyc),
+	       (unsigned int)k_cyc_to_us_ceil32(efr32_amateur_probe.span_cyc),
+	       (unsigned int)efr32_amateur_span_us);
+#endif
+}
+
+/* The end of the last identification, for its report. */
+static uint64_t efr32_amateur_report_ms;
+
+static void efr32_amateur_report(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	/* CW: the station's last carrier; data: the first advertising channel's. */
+	printk("efr32-radio: identification %u (%s, %s) ended at %llu ms on %u kHz\n",
+	       efr32_amateur_ids, efr32_amateur_call, EFR32_AMATEUR_ID_METHOD_NAME,
+	       (unsigned long long)efr32_amateur_report_ms,
+	       (EFR32_AMATEUR_ID_METHODS & EFR32_AMATEUR_ID_METHOD_CW) != 0U ?
+		       efr32_amateur_tx_khz :
+		       efr32_amateur_plan_rf[EFR32_RF_ADV37]);
+	efr32_amateur_probe_report();
+}
+
+static K_WORK_DEFINE(efr32_amateur_report_work, efr32_amateur_report);
+
 static void efr32_amateur_id_job(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
@@ -431,15 +686,17 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 		uint64_t now;
 
 		k_deadline_event_wait(&efr32_amateur_id_event);
+		efr32_amateur_probe_job_start();
 		key = k_spin_lock(&efr32_amateur_lock);
 		now = efr32_amateur_now_ms();
 		if (efr32_amateur_id_failed) {
 			struct efr32_amateur_id_due due;
-			uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_cw_airtime_us,
+			uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_span_us,
 							   USEC_PER_MSEC);
 
 			efr32_amateur_id_failed = false;
 			efr32_amateur_id_started = false;
+			efr32_amateur_id_on_air = false;
 			release_slot = true;
 			/* Again, in a new slot, while the latest start allows. */
 			if (efr32_amateur_id_next(&efr32_amateur_id, efr32_amateur_admin,
@@ -464,6 +721,20 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 			report = true;
 		} else if (atomic_get(&efr32_amateur_on) != 0 && !efr32_amateur_slot_requested &&
 			   (efr32_amateur_id.unidentified || efr32_amateur_id_now)) {
+			struct efr32_amateur_id_due due;
+			uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_span_us, USEC_PER_MSEC);
+
+			/*
+			 * The end of the communication (BLE-ASI FINAL): the closing one, one the
+			 * application asked for, or one released by the communication's idle end.
+			 */
+			efr32_amateur_id_final =
+				efr32_amateur_closing || efr32_amateur_eoc_requested ||
+				(efr32_amateur_id_next(&efr32_amateur_id, efr32_amateur_admin,
+						       EFR32_AMATEUR_END_IDLE_MS,
+						       EFR32_AMATEUR_LEAD_MS, airtime_ms, &due) &&
+				 due.end_of_communication && now >= due.release_ms);
+			efr32_amateur_eoc_requested = false;
 			efr32_amateur_slot_requested = true;
 			efr32_amateur_id_now = false;
 			k_timer_stop(&efr32_amateur_release_timer);
@@ -482,13 +753,19 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 			efr32_radio_policy_stop(&efr32_amateur_id_event, efr32_amateur_id_rule);
 		}
 		if (report) {
-			printk("efr32-radio: identification %u (%s, CW) ended at %llu ms on %u kHz\n",
-			       efr32_amateur_ids, efr32_amateur_call, (unsigned long long)now,
-			       efr32_amateur_tx_khz);
+			/* The console is slow: reported from the system work queue, not this job. */
+			efr32_amateur_report_ms = now;
+			(void)k_work_submit(&efr32_amateur_report_work);
+		}
+		if (request && !efr32_amateur_data_id_build(efr32_amateur_id_final)) {
+			/* No device address to identify from: the station may not go unidentified. */
+			request = false;
+			efr32_radio_policy_stop(&efr32_amateur_id_event, efr32_amateur_id_rule);
 		}
 		if (request && efr32_amateur_slot_request() != 0) {
 			efr32_radio_policy_stop(&efr32_amateur_id_event, efr32_amateur_id_rule);
 		}
+		efr32_amateur_probe_job_end();
 	}
 }
 
@@ -543,6 +820,7 @@ static bool efr32_amateur_connected(void)
 	return false;
 }
 
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_CW)
 /* The Morse frame of @p call and its airtime. */
 static int efr32_amateur_cw_build(const char *call)
 {
@@ -568,6 +846,53 @@ static int efr32_amateur_cw_build(const char *call)
 						  octets * EFR32_AMATEUR_BITS_PER_OCTET) *
 						 USEC_PER_SEC / rate);
 	return 0;
+}
+#endif
+
+/* The identification's frames for @p call and the span its slot reserves. */
+static int efr32_amateur_id_build(const char *call)
+{
+	struct efr32_amateur_id_timing timing = { 0 };
+	int err;
+
+	ARG_UNUSED(err);
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_CW)
+	err = efr32_amateur_cw_build(call);
+	if (err != 0) {
+		return err;
+	}
+	timing.cw_us = efr32_amateur_cw_airtime_us;
+#endif
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	{
+		uint8_t draw[BT_ADDR_SIZE];
+		bool random;
+		const uint8_t *addr;
+		size_t octets;
+
+		/* The identification's own address (BLE-ASI 6), for this amateur session. */
+		do {
+			sys_rand_get(draw, sizeof(draw));
+		} while (!efr32_amateur_static_addr(draw, efr32_amateur_id_addr));
+		addr = efr32_amateur_data_id_addr(&random);
+		if (addr == NULL) {
+			return -EADDRNOTAVAIL;
+		}
+		/* Its length, and so its air time, is the same with or without FINAL. */
+		octets = efr32_amateur_data_id_pdu(call, false, addr, random, efr32_amateur_data_pdu,
+						   sizeof(efr32_amateur_data_pdu));
+		if (octets == 0U) {
+			return -EINVAL;
+		}
+		efr32_amateur_data_pdu_octets = octets;
+		timing.data_pdu_us = efr32_amateur_le1m_airtime_us(octets);
+		timing.spacing_us = EFR32_AMATEUR_ID_SPACING_US;
+		/* TXEN to the first bit, counted once: the parts after it fit their spacing. */
+		timing.tx_ready_us = efr32_radio_id_tx_ready_us();
+	}
+#endif
+	efr32_amateur_span_us = efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHODS, &timing);
+	return efr32_amateur_span_us != 0U ? 0 : -EINVAL;
 }
 
 int efr32_amateur_enable(const struct efr32_amateur_config *config)
@@ -620,7 +945,7 @@ int efr32_amateur_enable(const struct efr32_amateur_config *config)
 	if (efr32_amateur_connected()) {
 		return -EBUSY;
 	}
-	err = efr32_amateur_cw_build(call);
+	err = efr32_amateur_id_build(call);
 	if (err != 0) {
 		return err;
 	}
@@ -639,9 +964,27 @@ int efr32_amateur_enable(const struct efr32_amateur_config *config)
 	efr32_amateur_tx_khz = plan[EFR32_AMATEUR_ADV_CHANNEL_FIRST];
 	atomic_set(&efr32_amateur_on, 1);
 	k_spin_unlock(&efr32_amateur_lock, key);
-	printk("efr32-radio: amateur rules, %s, station %s; CW identification %u WPM, %u ms\n",
-	       admin->name, efr32_amateur_call, CONFIG_EFR32_RADIO_AMATEUR_CW_WPM,
-	       (unsigned int)DIV_ROUND_UP(efr32_amateur_cw_airtime_us, USEC_PER_MSEC));
+	if ((EFR32_AMATEUR_ID_METHODS & EFR32_AMATEUR_ID_METHOD_CW) != 0U) {
+		printk("efr32-radio: amateur rules, %s, station %s; CW identification %u WPM, "
+		       "%u ms\n", admin->name, efr32_amateur_call,
+		       CONFIG_EFR32_RADIO_AMATEUR_CW_WPM,
+		       (unsigned int)DIV_ROUND_UP(efr32_amateur_cw_airtime_us, USEC_PER_MSEC));
+	}
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	printk("efr32-radio: amateur rules, %s, station %s; data identification (BLE-ASI v1; "
+	       "legal basis unconfirmed, 97.119(b)(3)), %u us on air, %u us reserved, from "
+	       "%02x:%02x:%02x:%02x:%02x:%02x\n", admin->name, efr32_amateur_call,
+	       (unsigned int)(EFR32_AMATEUR_ADV_CHANNELS *
+			      efr32_amateur_le1m_airtime_us(efr32_amateur_data_pdu_octets)),
+	       (unsigned int)efr32_amateur_span_us,
+	       /* AdvA after the PDU header, least significant octet first. */
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + 5],
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + 4],
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + 3],
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + 2],
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS + 1],
+	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS]);
+#endif
 	return 0;
 }
 
@@ -655,6 +998,7 @@ int efr32_amateur_end_of_communication(void)
 	}
 	key = k_spin_lock(&efr32_amateur_lock);
 	post = efr32_amateur_id.unidentified && !efr32_amateur_slot_requested;
+	efr32_amateur_eoc_requested = post;
 	k_spin_unlock(&efr32_amateur_lock, key);
 	if (post) {
 		efr32_amateur_post(EFR32_AMATEUR_LEAD_MS);
@@ -687,7 +1031,7 @@ int efr32_amateur_disable(void)
 		k_sem_reset(&efr32_amateur_id_sem);
 		efr32_amateur_post(EFR32_AMATEUR_LEAD_MS);
 		wait_ms = CONFIG_EFR32_RADIO_AMATEUR_ID_LEAD_S * MSEC_PER_SEC +
-			  DIV_ROUND_UP(efr32_amateur_cw_airtime_us, USEC_PER_MSEC);
+			  DIV_ROUND_UP(efr32_amateur_span_us, USEC_PER_MSEC);
 		while (atomic_get(&efr32_amateur_on) != 0 &&
 		       k_sem_take(&efr32_amateur_id_sem, K_MSEC(wait_ms)) == 0) {
 		}
