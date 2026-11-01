@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+  "$openocd" -s "$scripts" "${adapter[@]}" "${no_servers[@]}" "$@" \
+    > "$RUNTIME_DIR/$log" 2>&1 || true#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
 # Rehearse the hardware debug and flashing procedures against QEMU, through
@@ -113,11 +114,17 @@ for _ in $(seq 1 100); do
 done
 probe_ready || { echo "FAIL: probe not ready 10 s after QEMU start"; exit 1; }
 
+# No GDB/Tcl/telnet listeners: concurrent sessions on one host would collide
+# on OpenOCD's default ports.  The flashing script does the same.
+no_servers=(-c 'gdb_port disabled' -c 'tcl_port disabled'
+            -c 'telnet_port disabled')
+export OWO_BG22_NO_SERVERS=1
+
 ocd() {
   local log=$1
   shift
-  "$openocd" -s "$scripts" "${adapter[@]}" "$@" > "$RUNTIME_DIR/$log" 2>&1 ||
-    true
+  "$openocd" -s "$scripts" "${adapter[@]}" "${no_servers[@]}" "$@" \
+    > "$RUNTIME_DIR/$log" 2>&1 || true
 }
 
 expect() {

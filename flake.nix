@@ -56,6 +56,10 @@
               rev = "cb0c224e936091156ecf3025ba05657408ed64c8";
               hash = "sha256-RKDOs7CaTAc61Ae6TPaG9oG8zHYfL62DvZXIxvXmGgA=";
             };
+            # Project fixes, each written to go upstream (see the patch headers).
+            patches = (old.patches or [ ]) ++ [
+              ./nix/openocd/0001-target-cortex_m-debug-entry-for-a-core-found-halted-from-unknown.patch
+            ];
             nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
               pkgs.autoconf
               pkgs.automake

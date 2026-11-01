@@ -1,0 +1,56 @@
+From: Gavin John <gavinnjohn@gmail.com>
+Subject: [PATCH] target/cortex_m: run debug entry when a core is first found halted
+
+cortex_m_poll_one() runs cortex_m_debug_entry() for a halted core only
+when the previous state was TARGET_RUNNING or TARGET_RESET.  A target
+leaves examine in TARGET_UNKNOWN.  Suppose something halts the core
+before the first poll that classifies it, for example a script that
+writes DHCSR.C_HALT right after 'init' (mww 0xe000edf0 0xa05f0003), or a
+core that was already halted when OpenOCD attached.  The next poll then
+sets TARGET_HALTED and skips debug entry.  The register cache is never
+read, DFSR is not examined, and the "halted" event does not fire.
+The halt report prints the never-read cache, an all-zero context:
+
+  [cpu] halted due to undefined, current mode: Thread
+  xPSR: 00000000 pc: 00000000 msp: 00000000
+
+Debug-entry state such as the DFSR-derived halt reason, the
+security state and the core mode is never established either.
+
+The fix is to treat TARGET_UNKNOWN like TARGET_RUNNING here, as
+cortex_a_poll() already does: it runs debug entry for every transition
+into HALTED except from HALTED.
+
+Reproduction (any Cortex-M; written for an EFR32BG22 with Zephyr):
+
+  openocd -f <adapter> -f target/silabs/xg21.cfg \
+    -c 'init; mww 0xe000edf0 0xa05f0003; sleep 10; poll; shutdown'
+
+Without the patch the result depends on whether the background poll ran
+before the mww.  If it did not, poll prints "xPSR: 00000000 pc: 00000000
+msp: 00000000".  With the patch it prints the real context.  Against
+QEMU with the owo-open-fw efr32bg22 machine and its swd-remote-bitbang
+probe, the unpatched build printed the all-zero context in 4 of 6 runs
+and the patched build in 0 of 6 (owo-open-fw docs/debug-port-model.md).
+
+---
+ src/target/cortex_m.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/target/cortex_m.c b/src/target/cortex_m.c
+--- a/src/target/cortex_m.c
++++ b/src/target/cortex_m.c
+@@ -1045,7 +1045,12 @@
+ 	if (cortex_m->dcb_dhcsr & S_HALT) {
+ 		target->state = TARGET_HALTED;
+
+-		if ((prev_target_state == TARGET_RUNNING) || (prev_target_state == TARGET_RESET)) {
++		/* A core found halted by the first poll after examine (state still
++		 * TARGET_UNKNOWN) has not been through debug entry either: without
++		 * it the register cache is never read and the target reports
++		 * TARGET_HALTED with an all-zero context. */
++		if (prev_target_state == TARGET_RUNNING || prev_target_state == TARGET_RESET
++				|| prev_target_state == TARGET_UNKNOWN) {
+ 			retval = cortex_m_debug_entry(target);
+
+ 			/* Errata 3092511 workaround

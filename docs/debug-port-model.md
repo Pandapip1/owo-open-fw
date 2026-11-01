@@ -191,8 +191,31 @@ quirk 4). A SYSRESETREQ written by the debugger reads back as RSTCAUSE
    RESET. When a script writes DHCSR.C_HALT before OpenOCD has polled the
    target (its state is still UNKNOWN after examine), the next `poll` marks
    it HALTED without reading the registers, and prints the empty cache. With
-   `-d3` no register read happens before the print. The SRAM-execution proof
-   is still the right guard: it does not trust OpenOCD's state.
+   `-d3` no register read happens before the print. Fixed in the flake's
+   OpenOCD by `nix/openocd/0001-target-cortex_m-debug-entry-for-a-core-found-halted-from-unknown.patch`,
+   written for upstream: a core first found halted from UNKNOWN goes through
+   debug entry too, as `cortex_a_poll()` already does. Against the simulator
+   (`init; mww 0xe000edf0 0xa05f0003; sleep 10; poll`) the unpatched build
+   printed the all-zero context in 4 of 6 runs and the patched build in 0 of
+   6. The SRAM-execution proof is still the right guard: it does not trust
+   OpenOCD's state.
+
+11. **Peripherals stop counting while the M33 is halted.** TIMER0-4, BURTC,
+   RTCC and WDOG0 have DEBUGRUN = 0 at reset ("Debug Mode Run Enable" in the
+   public headers; the SDK calls the field "Stop counter during debug
+   halt"). The debug unit's `halted` line (DHCSR.S_HALT) stops them in the
+   model. The model used to keep them running, and the SRAM fixture then
+   failed about 1 run in 4: a BURTC compare that passed during the halt was
+   taken on resume, and the firmware's clock-event scheduler found it
+   100 ms late and shut down safely. Unmeasured on silicon (TODO.md): the
+   clock edge at which a count stops and restarts, and STATUS.RUNNING
+   during the halt.
+
+12. **DHCSR.C_MASKINTS masks interrupts while the core runs**, not only for
+   a halting step (Armv8-M ARM, DHCSR). `bg22_require_sram_execution` resumes
+   its fixture with `cortex_m maskisr on`. An interrupt pending at resume is
+   otherwise taken before the fixture's first instruction (`cpsid i`). This
+   happens on silicon too, because the radio runs during a halt.
 
 6. **Zephyr's MPU makes SRAM execute-never.** Architectural (the M33 MPU
    model); `bg22_require_sram_execution` clears MPU_CTRL and passes.
