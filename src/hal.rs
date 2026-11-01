@@ -127,7 +127,20 @@ mod real {
                 width_us: p.width.a_us as u32 * WIDTH_PERCENT / 100,
                 gap_us: p.width.gap_us as u32,
             };
-            match self.sup.fire(hw, now_us, &cmd) {
+            // While a phase runs the bridge is closed and its length is this thread's own
+            // timing: another thread must not run inside it. The system work queue (a
+            // cooperative priority above the pump) did, once per pulse train, and a phase then
+            // overran its width by the work item and the interrupts around it (the supervisor's
+            // overrun check ended the session). A pulse is bounded by the supervisor's phase and
+            // gap limits, so holding the scheduler for it is bounded too; interrupts and the
+            // meta-IRQ radio jobs still preempt it, as they must.
+            // SAFETY: plain kernel calls, paired in this thread; `fire` blocks only on kernel
+            // objects, which a scheduler-locked thread may do.
+            unsafe { zephyr::raw::k_sched_lock() };
+            let outcome = self.sup.fire(hw, now_us, &cmd);
+            // SAFETY: as above.
+            unsafe { zephyr::raw::k_sched_unlock() };
+            match outcome {
                 Outcome::Fired { open_circuit: true, .. } => {
                     warn!("ch{}: sense reads far below command (open circuit / no contact?)", p.channel)
                 }

@@ -363,9 +363,10 @@ impl Stimulator {
                 return Err(Fault::Cancelled);
             }
             let elapsed = hw.fine_since_us(f0);
-            if elapsed >= width {
-                break;
-            }
+            // The newest conversion is judged before the width ends the phase: one that
+            // completed inside the phase is often first seen at the poll that finds the width
+            // elapsed (the poll after a conversion waits out its interrupts), and skipping it
+            // there left a stuck-high or overdriven sense unchecked for every pulse.
             match self.fresh(hw) {
                 Ok((s, age)) => {
                     // The conversion happened `age` ago: it is in the settled part of the phase
@@ -382,6 +383,9 @@ impl Stimulator {
                     let _ = hw.bridge(Bridge::Off);
                     return Err(f);
                 }
+            }
+            if elapsed >= width {
+                break;
             }
         }
         if let Err(e) = hw.bridge(Bridge::Off) {

@@ -9,13 +9,17 @@ recipes and raw stock recordings are kept outside this repository, next to the s
 
 ## Safety findings first
 
-1. **The open firmware delivers no output in this model after two soft-start pulses** [E]. Its
-   Bluetooth radio misses a start-by deadline during boot, the radio safe shutdown runs, and the
-   tickless kernel later stops arming its system timer (section *Open firmware in the model*).
-   With the miss report bypassed by a debugger patch (diagnostic only), it stimulates, but the
-   sense sampler then shows a 3.5 ms gap and the supervisor's freshness check ends the session
-   by its ordered safe-off (DAC 0, switch open, supply off). It fails safe, but a stimulation
-   comparison beyond the first two pulses is not possible until the timer problem is fixed.
+1. **The open firmware stopped after two soft-start pulses; fixed, it now stimulates for the
+   whole frame** [E]. Two causes (section *Open firmware in the model*): the system timer driver
+   could leave the kernel's timeout unarmed (work stopped, and the 100 us sense sampler, a
+   kernel timer, stalled for 3.5 ms, which the freshness check correctly turned into a
+   safe-off), and once that was fixed the pump was preempted mid-phase by the system work queue,
+   which the overrun check turned into a safe-off after five pulses. With both fixed: 173 pulses
+   from 4.04 to 7.48 s on pad 7, 50 Hz (19.2-20.2 ms), level 20 after the soft start (DAC 622,
+   8.08 mA), no sense gap over 400 us. The radio still misses its start-by deadline at boot in
+   the model and shuts itself down; the rest of the system now keeps running after that. The
+   sustained run then exposed that the over-delivery check skipped the conversions it most often
+   sees (a 1.5 V stuck sense never tripped); fixed, it trips on the first pulse.
 2. **The open firmware sampled the battery divider as its sense input** [F, fixed here]. The
    stock firmware reads feedback on PD2 and its x133/33 battery divider on PD3 (IADC positive
    inputs 0xB2/0xB3); `owo_suit_hw.overlay` sensed PD3. On a 2-cell pack PD3 sits near 1.9 V,
@@ -139,16 +143,16 @@ timing (icount shift 3), not measured silicon timing.
 
 ### Waveforms (no fault)
 
-| | stock | open firmware (diagnostic variant) |
+| | stock | open firmware |
 |---|---|---|
 | Pad | 7 | 7 (after the route fix; 8 before) |
-| Round | 10 slots, one every 2.05 ms; slot period 20.52 ms (commanded 50 Hz) | one channel; 76.7 ms between its two pulses |
+| Round | 10 slots, one every 2.05 ms; slot period 20.52 ms (commanded 50 Hz) | one channel; 19.2-20.2 ms (commanded 50 Hz), 173 pulses from 4.04 to 7.48 s |
 | Bridge activity | every slot is pulsed biphasically, also at level 0 (DAC 0) | only the commanded channel |
-| Phases (+ / gap / -) | 74.5 / 44.6 / 107.3 us: the second phase is 44 % longer (charge imbalance, the first phase includes the ADC sample code) | 87.6 / 75.9 / 76.9 us |
-| DAC | code 622 = level 20 x 0x12FED/0x9C4 | soft start: codes 31, 124 |
-| Peak current | 8.08 mA (model) | 1.61 mA (soft start) |
+| Phases (+ / gap / -) | 74.5 / 44.6 / 107.3 us: the second phase is 44 % longer (charge imbalance, the first phase includes the ADC sample code) | 118.0 / 122.7 / 120.8 us (before the over-delivery fix below: 104.5 / 134.6 / 136.7) |
+| DAC | code 622 = level 20 x 0x12FED/0x9C4 | soft start over 0.5 s (codes 31, 62, ...), then 622 |
+| Peak current | 8.08 mA (model) | 8.08 mA |
 | Boost PWM | PC7 at 4 kHz, 50 %, only for 0.2 s after Start | 4 kHz, 50 % while the supply is on |
-| Net charge per pulse | up to 9 nC (phase asymmetry) | 8 nC |
+| Net charge per pulse | up to 9 nC (phase asymmetry) | -23 nC (phase 2 2.8 us longer) |
 
 ### Failure matrix
 
@@ -156,21 +160,21 @@ timing (icount shift 3), not measured silicon timing.
 
 | Fault at 5.0 s | stock | open firmware |
 |---|---|---|
-| Stop command | 72 live pulses, safe after 1474 ms | (stopped earlier; early-stop row) |
-| Open electrode (pads 7, 8) | keeps driving into no load, DAC 622, rail up to the end; no stop | not reached |
-| Short (pads 7, 8) | keeps stimulating (current regulated; nothing to detect) | not reached |
-| Overcurrent (regulator fails, 3x) | trips after 1 pulse, 16 ms, channel latched | not reached |
-| Sense stuck high (1.5 V) | trips after 1 pulse, 16 ms | not reached |
-| Sense stuck at 0 | no detection, stimulates on | not reached |
-| ADC stalls | main loop waits on the ADC, watchdog resets 64 ms later, then a reset every 145 ms (boot loop); outputs off | not reached |
-| Switch read-back mismatch | stops at once (no live pulse) | not reached |
-| DAC dead (ignores frames) | DAC stuck at the value it had (0 here) | not reached |
-| Expander NACK / SDA stuck | stimulates on (I2C errors never stop it) | not reached |
+| Stop command | 72 live pulses, safe after 1474 ms | no further pulse; supply off 1.1 ms after the Stop |
+| Open electrode (pads 7, 8) | keeps driving into no load, DAC 622, rail up to the end; no stop | not re-run since the fixes below |
+| Short (pads 7, 8) | keeps stimulating (current regulated; nothing to detect) | not re-run since the fixes below |
+| Overcurrent (regulator fails, 3x) | trips after 1 pulse, 16 ms, channel latched | trips in the positive phase of the first pulse after the fault (24.2 mA peak), no negative phase, supply off |
+| Sense stuck high (1.5 V) | trips after 1 pulse, 16 ms | trips in the positive phase of the first pulse (before the over-delivery fix: never; 120 more pulses) |
+| Sense stuck at 0 | no detection, stimulates on | not re-run since the fixes below |
+| ADC stalls | main loop waits on the ADC, watchdog resets 64 ms later, then a reset every 145 ms (boot loop); outputs off | not re-run since the fixes below |
+| Switch read-back mismatch | stops at once (no live pulse) | not re-run since the fixes below |
+| DAC dead (ignores frames) | DAC stuck at the value it had (0 here) | not re-run since the fixes below |
+| Expander NACK / SDA stuck | stimulates on (I2C errors never stop it) | not re-run since the fixes below |
 | Hang, main loop (interrupts alive) | stimulation continues until the watchdog reset 63.6 ms later | before: WDT reset 1976 ms after the hang (output already off; that run did not in fact mask interrupts, see below). Now (pump spinning between pulses, supply on, t = 4.04 s): supplies off and boost stopped at the warning, 46.9 ms after the last feed; reset at 62.5 ms |
 | Hang, inside the pulse with the bridge closed | bridge held 62.4 ms until the watchdog reset | early-hang row |
 | Battery 6.5 V then 5.0 V | stimulates on to the end of the run (no shutdown within 2.5 s) | no battery monitoring |
-| Power button (expander P0 low) | stops after 78 ms | not reached |
-| Disconnect | stops 57 ms later, via a watchdog reset (model artifact, see above) | not reached |
+| Power button (expander P0 low) | stops after 78 ms | not re-run since the fixes below |
+| Disconnect | stops 57 ms later, via a watchdog reset (model artifact, see above) | not re-run since the fixes below |
 | Radio safe shutdown | n/a | early row |
 
 Inside the open firmware's active window (4.05-4.15 s in the model), both firmwares:
@@ -201,22 +205,84 @@ generated by `stim_report.py`; the recordings and the table are kept with the st
 
 ## Open firmware in the model
 
-- **Boot-time deadline miss** [E]: about 213 ms after reset the radio TX job (cooperative,
-  priority -16) starts 2229 hardware cycles after its release against a start-by of 1889
-  cycles; the thread running at release was the Bluetooth long work queue (priority 10) inside
-  the P-256 arithmetic of its key generation, preemptible and holding no lock. The miss policy
-  runs the radio safe shutdown. Not root-caused; reproducible deterministically in this build.
-- **Kernel timer stops after the safe shutdown** [E]: some 250 ms later the clock-event
-  service's kernel-timeout client is idle with a deadline in the past while a timeout is still
-  queued; nothing re-arms it, work items stop running (here: the injection mailbox). With the
-  miss report patched out (debugger, diagnostic only) the kernel stays alive. One suspected
-  mechanism was refuted: making the system-timer fallback arm retry did not change it. Not
-  root-caused; on another QEMU build the miss report itself was reported to HardFault reading
-  RAC registers — in this model those reads succeed (radio clocks on), so that symptom was not
-  reproduced here.
-- **Sense sampler gap** [E]: in the diagnostic variant the 100 us sense sampling showed a 3.5 ms
-  gap after the second pulse; the third pulse's setup ended in the supervisor's ordered safe-off,
-  the signature of its stale-sense/startup check. Every scenario therefore saw only two pulses.
+Method: instruction-count stamps from a QEMU TCG plugin at chosen PCs (no guest change, and
+the deterministic miss reproduced unchanged with it; a gdb breakpoint stop moves virtual time
+by 250 us and changed the run, and an instrumented build no longer missed). Times below use the
+model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they are model times.
+
+- **Boot-time deadline miss** [E, root cause found, not fixed]: about 213 ms after reset the
+  radio TX launch job is released from the TIMER0 clock-event interrupt (release to its
+  start-by 56.3 us: its not-before instant 35.4 us after the release plus 20.9 us). The release
+  path is quick: the post comes 15 us into that interrupt, the interrupt ends 8.6 us later,
+  PendSV switches in 0.5 us, and the job reads the clock 1.8 us after that and starts spinning
+  to its not-before. 9.3 us into the spin a second TIMER0 interrupt delivers the kernel's own
+  system-timer event (announce, a thread made ready, the timer re-armed): 34.6 us. The job
+  leaves its spin 3.8 us after that interrupt, past its start-by. Admission, the PendSV path and
+  interrupt masking are not involved. The cause is that the not-before spin runs with interrupts
+  enabled, and any interrupt longer than the slack after not-before (20.9 us with the silicon
+  figures this image uses) that arrives near the end of the spin makes the start late; admission
+  places its one interrupt allowance at the start of the check, not inside the job's window, so
+  it never sees this. The same holds on silicon (TIMER0 clock-event interrupt 39.4 us, §7.76);
+  in this model the release path is also slower than the silicon wake latency assumes. Options:
+  hold interrupts locked from dispatch to the instant (the locked span then needs its own bound
+  in the clock-event late tolerance), or count one interrupt inside every timed job's window
+  in admission (the TX launch is then unsat by analysis on silicon). Not decided here.
+- **Kernel timer stops after the safe shutdown** [E, fixed in vendor/zephyr]: the system timer
+  driver arms the next tick boundary; when the service refused it, it retried once at "now +
+  minimum lead + 1 cycle". Both attempts lose races with the cost of a clock read: the generic
+  layer checks the lead against one read and the service reads again (in the stopped run its
+  client held the boundary 36 ticks after the last announcement, generation equal to the
+  generic event's, stage idle, armed false: accepted by the generic check, refused by the
+  service), and the fallback is checked against a later read than the one it was computed from.
+  Nothing was then armed, so the kernel was never announced to again unless a new first timeout
+  re-armed it. The radio's traffic kept doing that; after its shutdown only work timeouts were
+  left, and the timer died within ~250 ms. Not caused by the miss report. The driver now arms
+  the first later boundary the service accepts; `tests/kernel/clock_event_timer` reproduces the
+  loss on native_sim. With the fix the clock-event client stays armed and the injection mailbox
+  is served after the boot miss.
+- **Sense sampler gap** [E, the same timer bug]: the 3.5 ms gap after the second pulse in the
+  diagnostic variant was a dropped arm: the 100 us sampler is a kernel timer (ADC context
+  interval), so it stopped until something else re-armed the kernel's timeout; the freshness
+  check then ended the session as designed. With the fix: no gap over 400 us in 28321 conversions.
+- **Phase overrun after five pulses** [E, fixed in src/hal.rs]: with the timer fixed, the fifth
+  pulse's second phase lasted 265 us and the supervisor's overrun check (width + 150 us) ended
+  the session. The pump (main thread, priority 0) was preempted inside the phase by the system
+  work queue (cooperative, priority -1; here the test mailbox's 1 ms item, in the product any
+  host work item), on top of the sampler's interrupts. A pulse now runs with the scheduler
+  locked: bounded by the supervisor's phase and gap limits, still preempted by interrupts and the
+  meta-IRQ radio jobs.
+- **The over-delivery check skipped most conversions** [E, fixed in owo-stim]: with the run
+  sustained, a sense stuck at 1.5 V (level 75 against a trip at 28) never tripped: 120 more
+  pulses. The sampler's conversion lands mid-phase, its interrupts hold the pump off, and the
+  pump's next poll already finds the width elapsed; the loop left on that poll before judging the
+  conversion. It now judges the newest conversion first, then ends the phase. Both the stuck sense
+  and a 3x overcurrent now trip in the positive phase of the first pulse after the fault, supply
+  off. Host test `overdrive_first_seen_at_the_last_poll_still_trips` fails without the change.
+- **Phase lengths depend on interrupts** [E, open]: the phase ends at the first 10 us poll that
+  finds the width elapsed, and the sampler's interrupts (each ~122 us in this model: the TIMER0
+  clock event of the ADC interval timer, then the IADC completion, about 58 us together) decide
+  when that poll runs. Sustained run: 118.0 / 122.7 / 120.8 us for a commanded 0x49, -23 nC net
+  per pulse at 8.08 mA (before the over-delivery fix 104.5 / 134.6 / 136.7 us, -0.26 uC). A
+  hardware timer ending each phase (as recommended above for the stuck bridge) would bound both.
+- **Power management** [E]: the watchdog investigation saw kernel timeouts stop ~600 ms after
+  boot with `CONFIG_PM=y` and not with it off, and the pump's timeout held back 288 ms during
+  key generation. [I] The same dropped arm is the likely cause (whether an arm is lost depends on
+  where it falls against a tick boundary and on the clock-read cost, which PM changes); not
+  shown arm by arm for those runs. With the fix the
+  injection mailbox is served at 11.5 s and the kernel-timeout client is armed, with PM on (default
+  image and the hardware image) and off (hardware image); the radio's boot miss occurs in all
+  three. The PM-specific timings of that report were not re-measured here.
+- **Miss report and radio clocks** [F static, fixed]: the miss policy is global (late clock
+  events and unsat releases reach it too), so it can run before `radio_setup()` enabled the
+  radio bus clocks; gated, a radio read is a bus error and a write is dropped (§7.72), which
+  would fault in the report or leave the forced-off writes undone. The safe shutdown now
+  enables the radio bus clocks itself (idempotent SET aliases) before touching the RAC. Not
+  reproduced in this model (the boot miss comes after `radio_setup()`).
+- **Later failures after the safe shutdown are only counted** [E, open]: the radio's handler
+  suspends the job that reported, inside the kernel's report, so the kernel's "report in
+  progress" guard is never cleared; a later late clock event (one in the sustained run, likely
+  from a gdb pause, which moves virtual time) was counted but not handed to the policy. The
+  guard needs to tell a nested report from one whose reporter was suspended by the policy.
 
 ## Not measured (needed before any of this is a claim about the suit)
 

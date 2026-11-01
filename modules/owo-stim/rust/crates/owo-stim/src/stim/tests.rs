@@ -436,6 +436,20 @@ fn overdrive_appearing_mid_phase_trips_before_negative_phase() {
     assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
 }
 
+/// The poll after a conversion is delayed past the width (here one stall stands for the
+/// conversion's interrupts): the conversion completed inside the settled phase and must still be
+/// judged, not skipped because the width has elapsed.
+#[test]
+fn overdrive_first_seen_at_the_last_poll_still_trips() {
+    let (mut s, mut m) = armed();
+    m.over_from = Some((0, 60)); // a sense stuck far above 20 + 8
+    m.stall_energised = 150; // the first poll in the phase finds the 150 us width elapsed
+    let o = s.fire(&mut m, T0, &cmd(1, 20));
+    assert!(matches!(o, Outcome::Faulted(Fault::Overdrive { measured: 60, .. })), "{o:?}");
+    assert!(!m.bridge_trace().contains(&Bridge::Negative));
+    assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
+}
+
 #[test]
 fn revoked_resource_interrupts_phase_and_shuts_down() {
     let (mut s, mut m) = armed();
