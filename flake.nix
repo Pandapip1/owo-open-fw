@@ -104,6 +104,15 @@
               anytree
               tabulate
               intelhex
+              # Twister (scripts/twister): what scripts/requirements-build-test.txt and
+              # requirements-run-test.txt list for building and running tests on
+              # native_sim and QEMU.
+              colorama
+              natsort
+              ply
+              junitparser
+              python-dotenv
+              pytest
             ]
           );
         in
@@ -142,6 +151,12 @@
               pkgs.llvmPackages.libclang
             ];
 
+            # The host compiler wrapper would add -D_FORTIFY_SOURCE to every native_sim
+            # build. Zephyr's native simulator runner is compiled without optimization,
+            # where glibc warns that fortification needs -O; twister builds with warnings
+            # as errors, so every native_sim scenario failed to link.
+            hardeningDisable = [ "fortify" ];
+
             env = {
               # Zephyr: use a plain GNU Arm Embedded toolchain instead of the Zephyr SDK.
               ZEPHYR_TOOLCHAIN_VARIANT = "gnuarmemb";
@@ -173,6 +188,10 @@
               echo "  build:       west build -b bg22_ek4108a ."
               echo "  QEMU:        mkdir -p build/qemu && (cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp)"
               echo "               ninja -C build/qemu qemu-system-arm"
+              echo "  twister:     ZEPHYR_BASE=\$PWD/vendor/zephyr QEMU_BIN_PATH=\$PWD/build/qemu vendor/zephyr/scripts/twister \\"
+              echo "                 -x=ZEPHYR_MODULES=\$PWD/vendor/cmsis_6 -x=EXTRA_LDFLAGS=-Wl,--no-warn-rwx-segments \\"
+              echo "                 -p native_sim/native/64 -p qemu_cortex_m3 -p mps2/an385 -T vendor/zephyr/tests/kernel/sched/deadline"
+              echo "               (no west workspace; ld from GNU Arm 13 warns about RWX segments, fatal under twister)"
               echo "  host tests:  cargo test --manifest-path crates/owo-core/Cargo.toml"
               echo "               cargo test --manifest-path modules/owo-stim/rust/Cargo.toml"
             '';
