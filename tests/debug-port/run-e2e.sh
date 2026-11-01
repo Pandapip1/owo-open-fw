@@ -1,5 +1,4 @@
-  "$openocd" -s "$scripts" "${adapter[@]}" "${no_servers[@]}" "$@" \
-    > "$RUNTIME_DIR/$log" 2>&1 || true#!/usr/bin/env bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
 # Rehearse the hardware debug and flashing procedures against QEMU, through
@@ -11,6 +10,8 @@
 #   3. `reset halt` times out (no reset vector catch on this part)
 #   4. scripts/flash-bg22-openocd.sh IMAGE --run: preflight, fast flash
 #   5. bg22_reset_to_breakpoint catches main() across SYSRESETREQ
+#   7. (rbb) the RAC-retiming debug-port wedge, then the EK's recovery:
+#      nRESET held during init, attach after release, halt + FPB
 #   6. the suit's raw AHB-AP procedure: FPB on the reset handler, then
 #      SYSRESETREQ, reads DHCSR 0x03130003 and the reset PC and MSP
 #
@@ -183,6 +184,26 @@ else
   exit 1
 fi
 expect raw.log "^PCSR: 0x" "DWT PCSR samples the running core"
+
+# 7. The RAC-retiming debug-port wedge and the EK's recovery (radio-tables
+#    7.80): wedge it as the sequencer did, then recover2.sh's "fpb"
+#    procedure -- nRESET held during init, release, attach and arm a halt
+#    plus FPB on the reset handler in the window after release.
+if [[ $PROBE == rbb ]]; then
+  nm_reset=$(nix develop "$ROOT" -c arm-none-eabi-nm "$IMAGE" 2>/dev/null |
+             awk '$3 == "z_arm_reset" { print $1 }')
+  ocd wedge.log -f "$ROOT/tests/debug-port/ro-mem-ap.cfg" \
+    -c "source $ROOT/tests/debug-port/wedge-recover.tcl" \
+    -c 'init; wedge_debug_port; shutdown'
+  expect wedge.log "WEDGED: AHB-AP refuses" \
+    "retiming enabled on a DPLL SYSCLK wedges the AHB-AP"
+  ocd recover.log -f "$ROOT/tests/debug-port/ro-mem-ap.cfg" \
+    -c "source $ROOT/tests/debug-port/wedge-recover.tcl" \
+    -c "recover_wedge 0x$nm_reset; shutdown"
+  expect recover.log "cannot read IDR" "the DP does not answer with nRESET held"
+  expect recover.log "RECOVERED: halted" \
+    "attach after nRESET release, halt: the wedge is gone"
+fi
 
 status=0
 echo "all debug-port procedures behave as on silicon"

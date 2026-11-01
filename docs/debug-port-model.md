@@ -262,8 +262,13 @@ real one (libjaylink parses the last ten digits into 32 bits).
 Commands (libjaylink's encoding): GET_VERSION, GET_CAPS (GET_HW_VERSION,
 GET_SPEEDS, SELECT_TIF), GET_HW_VERSION, GET_HW_STATUS (VTref), GET_SPEEDS,
 SELECT_TIF (SWD only), SET_SPEED (recorded; SWCLK timing is not modelled),
-SWD I/O (each bit one SWCLK cycle of the target), reset and TRST lines
-(accepted: no nRESET is wired on the EK). The probes enumerate full speed
+SWD I/O (each bit one SWCLK cycle of the target), CLEAR_RESET/SET_RESET
+driving the target's nRESET (the EK's OB does drive it: a 100 ms SRST pulse
+gave one fresh boot banner, scratch/silicon-rx/recover2-srsttest.log), and
+TRST (accepted, JTAG is not wired). The remote_bitbang probe drives nRESET
+from SRST ('r'..'u'). While nRESET is held the DP does not answer and the
+M33 does not run; see docs/model-fidelity.md for that and for the RAC
+retiming debug-port wedge. The probes enumerate full speed
 with one vendor-specific interface (bulk IN 0x81, OUT 0x01); the OB adds an
 IAD and a CDC-ACM pair (notification 0x83, data 0x82/0x02). The real probes'
 descriptors and capability words were not captured (TODO.md).
