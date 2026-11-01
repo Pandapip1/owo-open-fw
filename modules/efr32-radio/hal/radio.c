@@ -2612,14 +2612,25 @@ static void efr32_hw_turnaround_reset(void)
 }
 
 /* [regs-public] Enable the eight radio blocks in the observed stock order. */
+/*
+ * The vendor RAIL path enables both the HCLKRADIO branch and each radio block's bus clock
+ * before accessing the block. The custom LLL bypasses RAIL, so it owns that prerequisite.
+ * While gated, a read of a radio window is a bus error and a write is dropped (radio-tables.md
+ * §7.72), so every path that may run before radio_setup() (the safe shutdown) enables them
+ * itself. The SET aliases make this idempotent and safe from any context.
+ */
+static void efr32_radio_bus_clocks_on(void)
+{
+	CMU->RADIOCLKCTRL_SET = CMU_RADIOCLKCTRL_EN;
+	CMU->CLKEN1_SET = CMU_CLKEN1_AGC | CMU_CLKEN1_MODEM | CMU_CLKEN1_RFCRC |
+			  CMU_CLKEN1_FRC | CMU_CLKEN1_PROTIMER | CMU_CLKEN1_RAC |
+			  CMU_CLKEN1_SYNTH | CMU_CLKEN1_BUFC;
+	__DSB();
+}
+
 void radio_setup(void)
 {
 	efr32_radio_hold_init();
-	const uint32_t radio_bus_clocks =
-		CMU_CLKEN1_AGC | CMU_CLKEN1_MODEM | CMU_CLKEN1_RFCRC |
-		CMU_CLKEN1_FRC | CMU_CLKEN1_PROTIMER | CMU_CLKEN1_RAC |
-		CMU_CLKEN1_SYNTH | CMU_CLKEN1_BUFC;
-
 	efr32_packet_stage_reset();
 	efr32_rx_delivery_invalid = false;
 	efr32_hw_turnaround_reset();
@@ -2629,15 +2640,8 @@ void radio_setup(void)
 	efr32_qemu_tifs_transition_requested = false;
 	efr32_qemu_tifs_rx_to_tx_staging = false;
 #endif
-	/*
-	 * The vendor RAIL path enables both the HCLKRADIO branch and each radio
-	 * block's bus clock before accessing the block.  The custom LLL bypasses
-	 * RAIL, so it owns that prerequisite.  QEMU used to expose every register
-	 * even with these reset-disabled, masking the omission on real silicon.
-	 */
-	CMU->RADIOCLKCTRL_SET = CMU_RADIOCLKCTRL_EN;
-	CMU->CLKEN1_SET = radio_bus_clocks;
-	__DSB();
+	/* QEMU used to expose every register with these reset-disabled, masking the omission. */
+	efr32_radio_bus_clocks_on();
 
 	/*
 	 * Every address below is a rev-B2 non-secure EN register at +0x004, with
@@ -4551,6 +4555,8 @@ void k_deadline_miss_handler(const struct k_deadline_miss *miss)
 	unsigned int key = irq_lock();
 
 	first = atomic_cas(&efr32_radio_halted, 0, 1);
+	/* A failure may be detected before radio_setup(): its RAC accesses need the clocks. */
+	efr32_radio_bus_clocks_on();
 	efr32_radio_force_safe();
 	irq_disable(LL_RADIO_IRQn);
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
