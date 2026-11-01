@@ -6574,6 +6574,11 @@ goes from 0.42 µs to 0.6-1.54 µs while the M33 streams SEQRAM accesses.
    - LDMA SRAM->SRAM: M0+ SRAM +0.41 cycle/op;
    - LDMA into SEQRAM: comparable to M33 SEQRAM streaming (M0+ ALU 1.66x, SEQRAM ld 1.87x).
 
+**In QEMU (2026-11-01).** `vendor/qemu/hw/arm/efr32-interconnect.c` models these paths
+(ports, round-robin handover, idle wait state, the SEQRAM fetch stream); the probes above,
+run unchanged on the model, and the model-vs-silicon table are in docs/model-fidelity.md
+("Interconnect calibration").
+
 **Files.**
 
 Kept outside the repository:
