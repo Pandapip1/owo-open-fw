@@ -2033,6 +2033,30 @@ efr32_seq_conn_decide:
     beq 3f
     movs r0, #EFR32_SEQ_CONN_OUT_CRC_OK
     orrs r6, r0
+    movs r0, #EFR32_SEQ_CONN_ADV
+    tst r5, r0
+    beq 15f
+    bl efr32_seq_adv_scan_req_match
+    cmp r0, #0
+    bne 16f
+    b 14f
+3:  movs r0, #EFR32_SEQ_CONN_ADV
+    tst r5, r0
+    beq 17f
+    /* An advertiser answers nothing but a matching SCAN_REQ; the event then ends. */
+14: movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_DONE)
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    movs r0, #0
+    pop {r4-r7, pc}
+16: movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_DONE | EFR32_SEQ_CONN_OUT_REPLY)
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    ldr r2, [r7, #EFR32_SEQ_CONN_CUR]
+    ldr r3, [r7, #EFR32_SEQ_CONN_CUR_OCTETS]
+    ldrb r4, [r2]
+    b 18f
+15:
     /* Acknowledged: received NESN differs from our SN. */
     lsrs r0, r4, #EFR32_SEQ_PDU_NESN_BIT
     lsrs r1, r5, #EFR32_SEQ_CONN_SN_SHIFT
@@ -2054,7 +2078,7 @@ efr32_seq_conn_decide:
     movs r0, #EFR32_SEQ_CONN_OUT_ACCEPT
     orrs r6, r0
     b 6f
-3:  /* CRC failed (a frame too long counts as one): the second in a row
+17: /* CRC failed (a frame too long counts as one): the second in a row
      * closes the event; the received MD is not used. */
     movs r0, #EFR32_SEQ_CONN_CRC_CLOSES
     tst r5, r0
@@ -2113,6 +2137,12 @@ efr32_seq_conn_decide:
     ands r0, r1
     lsls r0, r0, #EFR32_SEQ_PDU_NESN_BIT
     orrs r4, r0
+    /* FRC frames the reply from its length octet: restore the length-pending
+     * word count the M33's radio_pkt_configure() sets before every TX (a
+     * received frame left its own there). */
+18: ldr r0, =EFR32_SEQ_FRC_WCNTCMP0
+    movs r1, #EFR32_SEQ_FRC_WCNTCMP0_LENGTH_PENDING
+    str r1, [r0]
     /* Into the BUFC TX FIFO the M33 configured: CLEAR, then every octet. */
     ldr r0, =EFR32_SEQ_BUFC_TX_CMD
     movs r1, #EFR32_SEQ_BUFC_CMD_CLEAR
@@ -2139,4 +2169,53 @@ efr32_seq_conn_decide:
     str r1, [r0]
 13: movs r0, #1
     pop {r4-r7, pc}
+.ltorg
+
+/*
+ * A SCAN_REQ for this advertiser (seq_abi.h EFR32_SEQ_CONN_ADV): type, length,
+ * RxAdd and AdvA, as isr_rx_pdu()'s isr_rx_sr_adva_check().  r7 the stage
+ * block, r4 the received header octet, r3 its length, r5 FLAGS.  Returns r0 = 1
+ * on a match.  Clobbers r0-r3; preserves r4-r7.
+ */
+.thumb_func
+efr32_seq_adv_scan_req_match:
+    push {r4-r6, lr}
+    movs r0, #EFR32_SEQ_ADV_TYPE_MASK
+    ands r0, r4
+    cmp r0, #EFR32_SEQ_ADV_SCAN_REQ_TYPE
+    bne 8f
+    cmp r3, #EFR32_SEQ_ADV_SCAN_REQ_LEN
+    bne 8f
+    /* RxAdd of the request is the advertiser's TxAdd. */
+    lsrs r0, r4, #EFR32_SEQ_ADV_RXADD_BIT
+    movs r1, #1
+    ands r0, r1
+    movs r1, #EFR32_SEQ_CONN_ADV_TXADD
+    ands r1, r5
+    beq 1f
+    movs r1, #1
+1:  cmp r0, r1
+    bne 8f
+    /* AdvA, at payload octet 6, against the staged one; the FIFO wraps. */
+    ldr r0, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r1, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    adds r1, #(2 + EFR32_SEQ_ADV_SCAN_REQ_ADVA)
+    movs r3, #0
+2:  mov r4, r1
+    adds r4, r4, r3
+    ands r4, r2
+    ldrb r4, [r0, r4]
+    movs r5, #EFR32_SEQ_CONN_ADVA
+    adds r5, r5, r3
+    ldrb r5, [r7, r5]
+    cmp r4, r5
+    bne 8f
+    adds r3, #1
+    cmp r3, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 2b
+    movs r0, #1
+    pop {r4-r6, pc}
+8:  movs r0, #0
+    pop {r4-r6, pc}
 .ltorg

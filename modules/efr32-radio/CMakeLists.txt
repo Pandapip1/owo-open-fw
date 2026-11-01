@@ -117,6 +117,14 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "\tefr32_conn_stage_next(lll);\n\n\tif (is_ull_rx) {\n\t\tull_rx_sched();\n\t}\n"
             "staged replies: stage the next receive's")
   file(APPEND ${GEN}/lll/lll_conn.c "\n#include \"${CMAKE_CURRENT_LIST_DIR}/lll/lll_conn_stage.c\"\n")
+  # The advertiser's SCAN_RSP, staged the same way (lll/lll_adv_stage.c).
+  efr32_radio_patch(lll/lll_adv.c "static void isr_tx(void *param);\n"
+            "static void isr_tx(void *param);\nstatic void efr32_adv_stage(struct lll_adv *lll);\n"
+            "staged scan response: declaration")
+  efr32_radio_patch(lll/lll_adv.c "\tradio_pkt_rx_set(radio_pkt_scratch_get());\n"
+            "\tradio_pkt_rx_set(radio_pkt_scratch_get());\n\tefr32_adv_stage(param);\n"
+            "staged scan response: stage it with the receive")
+  file(APPEND ${GEN}/lll/lll_adv.c "\n#include \"${CMAKE_CURRENT_LIST_DIR}/lll/lll_adv_stage.c\"\n")
 
   # OpenISA's lll_adv.c declares its advertising-PDU pool, stale-PDU FIFO,
   # and semaphore, but its init_reset() is an empty stub.  Consequently the

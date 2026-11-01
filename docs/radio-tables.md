@@ -7498,3 +7498,155 @@ the ULL window the session-key ECB (Kconfig `EFR32_RADIO_CCM_DECRYPT_NS`, `_CCM_
 `_AES_BLOCKING_NS`, `_ECB_NS`; silicon 15.69, 15.25, 5.37, 6.30 us for 27-octet PDUs [F];
 `include/hal/efr32/ll_deadlines.h`). [Q] encrypted GATT: Peripheral RX->TX run 164.3 us, path to
 RESPOND 159.9 us (unencrypted 136.6, 133.0); Central 160.5, 146.9 (134.6, 121.2).
+
+### 7.82 The sequencer keeps the instants: timed launches and replies staged before the frame ends
+
+Tags as in 7.79 ([F] silicon, BGM220 explorer kit, J-Link OB 000440200548; [Q] QEMU, this tree's
+`vendor/qemu`, per-core clocks; [S] Core v6.1). Code: `sequencer/radio_seq.S`,
+`include/hal/efr32/seq_abi.h` (the shared words), `hal/radio.c`, `hal/cntr.c`,
+`include/hal/efr32/ll_deadlines.h`, `include/hal/efr32/radio_conn.h`, `lll/lll_conn_stage.c`,
+`lll/lll_adv_stage.c`, `CMakeLists.txt` (LLL hooks), `Kconfig`; `tests/radio-port`
+(`RADIO_PORT_ADV_CHANNEL_37_ONLY`). No kernel or QEMU change. Tooling and logs (worktree scratch,
+the shared scratch being write-protected for this agent): `scratch/m0-timing/` (build.sh, dual.sh,
+hw.sh, timed.tcl/timed.sh, tifs.sh, probe.sh).
+
+**The problem.** Two failures had one cause: the M33 either busy-waited to an exact instant with
+interrupts enabled, or decided a turnaround in software after a frame ended, and an interrupt or
+the software path itself made it miss the specification.
+1. A timed launch was released early and spun in the kernel's not-before wait until its instant;
+   a TIMER0 clock-event interrupt (39.4 us, 90.6 us at boot, 7.76) inside that spin overshot the
+   launch's start window.
+2. A connection receive had to be answered (RESPOND) about 95.4 us after the completion was
+   posted, and the measured path to RESPOND was 103.2 us before any interrupt allowance (7.80).
+   The advertiser's SCAN_REQ turnaround had the same shape: on silicon with today's tree its
+   window at the check was 56.1-56.4 us against the 58.1 us interrupt allowance, so admission
+   stopped the advertiser at its first SCAN_REQ, before and after the launch change [F]
+   (`deadline unsat: efr32_radio_completion_event ... deadline 56415 ns from the check, demand
+   ahead of it 58114 ns`, master image, 1.47 s after boot).
+
+**Timebase [F].** The sequencer waits on TIMER0, the scheduler clock's active provider, read
+through the non-secure peripheral window (`TIMER0_NS_BASE` 0x50048000, CNT at +0x24; 7.74 found
+the M0+ reaching TIMER1 there and the secure window reading a constant). Chosen over RAC.STIMER
+(restarts at every RAC state change, 16 bits, 4.8 ticks/us against BURTC: 0.21 us resolution and a
+rate known to two digits) and PROTIMER (start encoding not public): TIMER0 is the counter the M33
+already maps instants onto (`k_clock_event_sched_active_target()`, 7.77), so the instant needs no
+second calibration, and it counts at 76.8 MHz on silicon. Evidence: the sequencer's own
+TIMER0 reads around 742 launches (post to first poll, instant to the command store, below), and
+the limit word, `LIMIT - TARGET` = 1149 counts for 16 us less the hold-late, which is
+76.8 MHz exactly. The M0+ wakes on RDMAILBOX1 (FLAGS +0x40 with SET/CLR aliases, IEN +0x44,
+M0+ IRQ 23, bus clock `CMU.CLKEN1.RDMAILBOX1`; the layout is the stock stack's, 7.78 item 7):
+[F] IRQ 23 entries count one per advertising event (+29 in 3 s next to +87 TXWARM).
+
+**Design.**
+- *Timed launches* (`efr32_seq_timed_post()`, `efr32_seq_timed_command`). The launch job does
+  every preparation it did before (FIFO, packet stage, SR0 handshake, RX FIFO), maps the instant
+  and a limit onto TIMER0, writes TARGET, LIMIT, then OP (TXEN, with SWRXEN after it for a TX that
+  turns to RX; or SWRXEN for a Peripheral's window) and sets the mailbox flag. The sequencer polls
+  TIMER0 and the OP word (the M33 cancels by clearing it), issues the command at the instant, and
+  refuses it past LIMIT (instant + spec tolerance - hold-late), which the M33 reports as a missed
+  start (safe shutdown). The not-before spin is gone: the job is released one interrupt allowance
+  before its start-by and only posts.
+  start-by = T - PRE - SEQ_WAKE + tolerance - SEQ_HOLD_LATE (16 us for a launch, the window
+  tolerance for a Peripheral's receive), `ll_deadlines.h`.
+- *Connection replies staged* (`lll/lll_conn_stage.c`, built into the derived `lll_conn.c`).
+  Before each connection receive (the prepares, and the end of every `isr_rx()` that leaves the
+  event open) the link layer works out, without changing its state, the two PDUs `isr_rx()` can
+  answer with: CUR (no acknowledgement or a CRC error: the last PDU again, or the empty PDU) and
+  NEXT (acknowledged: `isr_rx_pdu()`'s queue advance, then `lll_conn_pdu_tx_prep()`), with their
+  MD, LLID, fragment length and, on an encrypted link, their CCM ciphertext (NEXT at the counter
+  the acknowledgement makes: the AAD masks NESN, SN and MD, Vol 6 Part E 2.3.3, so the sequence
+  bits can be set later). In RX2TX the sequencer reads the received header and the FRC CRC
+  trailer from the RX FIFO and decides by `isr_rx()`'s rules (ack = CRC ok and NESN != SN;
+  accept = CRC ok, SN == NESN and an RX buffer free as staged; done = second CRC error in a row,
+  or CRC ok, MD clear and an empty reply; a Central that is done sends nothing), writes the reply
+  with SN ^ ack and NESN ^ accept to the BUFC TX FIFO and turns around at its RX2TX hold; when the
+  event continues it arms the next receive itself (SWRXEN, decision word STAGED). `isr_rx()` then
+  runs unchanged except for three hooks: the RX-buffer test uses the staged answer, the TX prep
+  puts the staged choice in place (`lll->empty`, the head fragment's length, MD, LLID: the queue
+  may have grown meanwhile), and a MIC failure ends the event at once (the reply already left).
+  The HAL asserts that the link layer's acknowledgement, SN and NESN equal the sequencer's.
+  Decrypt-before-callback (7.81), retransmission on a CRC error and the empty PDU are unchanged.
+- *Advertiser's scan response staged* (`lll/lll_adv_stage.c`): with no scan-request filter,
+  privacy or scan-request reports, the sequencer answers a SCAN_REQ (type, 12 octets, CRC, RxAdd,
+  AdvA, as `isr_rx_sr_adva_check()`) with the SCAN_RSP and nothing else; the HAL asserts that
+  `isr_rx()` answers exactly the same frames.
+- While a staged reply may be on air the HAL rewrites no framing or PHY register (FRC.WCNTCMP0 is
+  reset by the sequencer before the reply) and never clears its TXDONE.
+- Deadlines (`ll_deadlines.h`, all from Core v6.1 and measured paths): a connection receive's
+  completion now only has to re-arm the RX FIFO before the next frame can begin
+  (EOF + 2 x 148 + 80 us) and post the next stage before that frame can end
+  (EOF + 2 x (148 + 80) us); the transmit completion before it must end before that receive's
+  completion is due. The scan response's completion serves the event's next ADV_IND (10 ms).
+
+**Measurements [F]** (stage-3 advertiser, laptop scanning, 70 s, admission on; Peripheral,
+host Central on channel 37):
+
+| quantity | silicon | QEMU |
+|---|---|---|
+| TX launch start -> post | 20.4 us (685 cycles, 742 launches) | 14.4 us |
+| RX window launch start -> post | 15.2 us | 10.9 us |
+| post -> sequencer's first poll | 136 counts, 1.77 us | 116 counts at 38.4 MHz, 3.02 us |
+| instant -> TIMER0 read after the TXEN store | 111 counts, 1.45 us max; 76-86 (n = 200, PRS run) | 2.21 us |
+| sequencer polling ahead of the instant (spin) | >= 4222 counts, 55.0 us | 64.3 us (connection) |
+| RAC leaving OFF (PRS RACL.ACTIVE) -> that TIMER0 read | 70 TIMER1 ticks, 0.91 us, all 200 | - |
+| SCAN_REQ EOF -> SCAN_RSP SYNCSENT (bg22-tifs-probe.tcl) | 180.51-180.95 us (n = 8), 180.30-180.79 (n = 17) | - |
+| connection: received EOF -> our empty PDU's SYNCSENT | 179.54-181.68 us (n = 16) | - |
+| sequencer takes the stage after RX2TX begins | <= 17 STIMER ticks, 3.5 us | 15 ticks |
+| connection completion start -> next stage posted | 46.1 us (few events) | 67.7 us (Peripheral), 33.9 (Central) |
+| connection receive completion run (commit + stage) | 50.0 us | 75.9 us |
+| SCAN_REQ completion run (commit) | 47.0 us | 23.9 us |
+
+So TXEN reaches the RAC 0.1-0.5 us after its instant (the 0.91 us between the edge and the read
+that follows the store, less the read itself), never before, within the 16 us the sleep clock
+allows, and no M33 interrupt can move it. The scan response and the connection reply both leave at
+the stock-matched T_IFS (7.71: stock 180.2-181.1 us, our hold 180.1-180.9 us).
+
+**Admission on silicon figures (before -> after).**
+- Advertiser, silicon: before, unsat at the first SCAN_REQ (above); after, stage 3 with
+  admission on ran 60 s with the safe-shutdown policy and 70 s counting, 0 misses, 0 late
+  deliveries, the host receiving the scan-response name.
+- Connection, silicon figures in QEMU images (`EFR32_RADIO_TIMING_SILICON`, admission on, safe
+  shutdown on the device under test): before, the RX->TX turnaround could not be met by analysis
+  (7.80); after, see the runs below, 0 misses on the Peripheral, also encrypted.
+- Connection on silicon: the Peripheral accepted the laptop's CONNECT_IND on channel 37 and
+  answered every connection-event frame at T_IFS from its staged replies (above), with admission
+  on and 0 misses, but the link still ended at the supervision timeout (`0x08`, the host reporting
+  a connection timeout): the stage that followed showed the CRC-error flag set, i.e. the receive
+  quality problem of 7.80, which another agent is chasing.
+- Not feasible yet: a scanner or initiator answering an advertisement (SCAN_REQ, CONNECT_IND) is
+  still decided by the M33 (its reply depends on filter policy and, for CONNECT_IND, on the
+  frame's timing). With silicon figures in QEMU the Central's initiator was found unsat when its
+  completion was released while the LLL context ran a prepare (cooperative, 249 us budget), both
+  before and after this change; and with QEMU figures every turnaround the M33 still decides is
+  infeasible (72.4 us interrupt allowance, 7.77). The product is a Peripheral; the test Centrals
+  run with misses counted.
+
+**QEMU** (`EFR32_RADIO_TIMING_SILICON`, admission on, device under test with the safe-shutdown
+policy, peer counting misses; virtual seconds from the scheduler clock):
+
+| pair | shift 3 | shift 5 |
+|---|---|---|
+| Peripheral + Central (GATT write/read-back) | 2584.6 s, 1980/1980 rounds, Peripheral 0 misses | 2650.9 s, 2010/2010, 0 misses |
+| the same, LE Secure Connections passkey pairing (level 4), encrypted GATT | 2556.3 s, 1950/1950, 0 misses | 2625.6 s, 2010/2010, 0 misses |
+| advertiser + active scanner | 141.6 s, 5667 advertiser / 1416 scanner (SCAN_REQ) TX, 0 misses | 143.1 s, 5727 / 1431, 0 misses |
+
+(600 s wall each; no disconnection, no late delivery. The Central peer counted one miss in every
+connection run, the initiator case above; the scanner peer none.)
+| injected: one interrupt declared 200 us | unsat at the first ADV_IND completion (`deadline -39815 ns from the check, demand ahead of it 200003 ns`), safe shutdown, 1 TX | - |
+
+Kernel suites (native_sim/native/64, kernel unchanged): clock_event_sched 13/13, deadline 14/14
+(also with admission and stats), deferred_release 5/5, clock_event 4/4, deadline_admission 13/13.
+qtests: efr32bg22-test 98, rf 27, dap 9, board 7, unit test-jlink-swd-io 3, all pass.
+
+**QEMU model.** The model already has what silicon showed: RDMAILBOX1 raising M0+ IRQ 23
+(7.78) and the M0+'s non-secure peripheral window reaching TIMER0 (7.74, 7.78): 4721 timed
+launches in a 485 s pair ran through them. It runs the sequencer's timed path slower than
+silicon (post to first poll 3.02 vs 1.77 us, hold-late 2.21 vs 1.45 us: the M0+ handler and
+its peripheral reads under the per-core clock model), and its sequencer took the connection
+stage as early as silicon (15 vs 17 ticks after RX2TX began).
+
+**Open.** Silicon connection hold-up (receive quality, 7.80); scanner and initiator responses
+still decided by the M33; the QEMU M33 timing gap (7.77); budgets of the new completion paths
+come from few silicon connection events (`EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS` is marked
+provisional; the receive completion keeps 7.80's longer 109.3 us budget); a qtest for the
+mailbox-to-M0+ path.

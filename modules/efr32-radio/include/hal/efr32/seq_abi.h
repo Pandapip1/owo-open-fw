@@ -126,6 +126,21 @@
 #define EFR32_SEQ_CONN_SN (1 << EFR32_SEQ_CONN_SN_SHIFT)
 #define EFR32_SEQ_CONN_NESN_SHIFT 4
 #define EFR32_SEQ_CONN_NESN (1 << EFR32_SEQ_CONN_NESN_SHIFT)
+/*
+ * ADV: an advertiser's receive after its ADV_IND/ADV_SCAN_IND. The sequencer answers, as
+ * lll_adv.c's isr_rx_pdu() does without a scan-request filter or privacy, a SCAN_REQ (type 3,
+ * 12 octets, CRC ok) whose RxAdd equals ADV_TXADD and whose AdvA equals ADVA (6 octets) with
+ * CUR (the SCAN_RSP, sent unchanged), and nothing else; the event then ends (DONE).
+ */
+#define EFR32_SEQ_CONN_ADV 0x20
+#define EFR32_SEQ_CONN_ADV_TXADD 0x40
+#define EFR32_SEQ_CONN_ADVA 0x30
+#define EFR32_SEQ_ADV_SCAN_REQ_TYPE 0x3
+#define EFR32_SEQ_ADV_TYPE_MASK 0xf
+#define EFR32_SEQ_ADV_RXADD_BIT 7
+#define EFR32_SEQ_ADV_SCAN_REQ_LEN 12
+#define EFR32_SEQ_ADV_SCAN_REQ_ADVA 6
+#define EFR32_SEQ_ADV_ADDR_LEN 6
 /* OUTCOME */
 #define EFR32_SEQ_CONN_OUT_VALID 0x01
 #define EFR32_SEQ_CONN_OUT_CRC_OK 0x02
@@ -141,6 +156,12 @@
 #define EFR32_SEQ_PDU_MD_BIT 4
 /* The appended FRC trailer octet; bit 7 is the CRC result (SS7.66). */
 #define EFR32_SEQ_FRC_TRAILER_CRCOK 0x80
+/*
+ * FRC.WCNTCMP0 (radio window 0xA8004000 + 0x20) and the length-pending word count the M33's
+ * radio_pkt_configure() sets before every frame (EFR32_FRC_DYNAMIC_LENGTH_PENDING_WORD_COUNT).
+ */
+#define EFR32_SEQ_FRC_WCNTCMP0 0xa8004020
+#define EFR32_SEQ_FRC_WCNTCMP0_LENGTH_PENDING 0xff
 /* BUFC TX channel as the M0+ reads it (BUFC 0xAA000000; channel 0 at +0x0C). */
 #define EFR32_SEQ_BUFC_TX_CMD 0xaa000034
 #define EFR32_SEQ_BUFC_TX_WRITEDATA 0xaa000024

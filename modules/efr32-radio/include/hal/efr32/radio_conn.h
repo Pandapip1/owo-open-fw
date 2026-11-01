@@ -50,6 +50,11 @@ void efr32_radio_conn_stage(bool central, bool rx_free, bool crc_closes, uint8_t
 			    const struct efr32_radio_conn_reply *cur,
 			    const struct efr32_radio_conn_reply *next);
 /*
+ * An advertiser's receive after its ADV_IND: the sequencer answers a SCAN_REQ for AdvA @p adva
+ * (RxAdd @p tx_addr) with the SCAN_RSP PDU @p scan_rsp (header, length, payload).
+ */
+void efr32_radio_adv_stage(const uint8_t *scan_rsp, const uint8_t *adva, bool tx_addr);
+/*
  * The sequencer's decision on the frame just received: 0 when the receive was not staged, 1 with
  * @p outcome (EFR32_SEQ_CONN_OUT_*), -1 when staged but no decision was taken (nothing was sent).
  */
