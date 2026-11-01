@@ -7498,3 +7498,91 @@ the ULL window the session-key ECB (Kconfig `EFR32_RADIO_CCM_DECRYPT_NS`, `_CCM_
 `_AES_BLOCKING_NS`, `_ECB_NS`; silicon 15.69, 15.25, 5.37, 6.30 us for 27-octet PDUs [F];
 `include/hal/efr32/ll_deadlines.h`). [Q] encrypted GATT: Peripheral RX->TX run 164.3 us, path to
 RESPOND 159.9 us (unencrypted 136.6, 133.0); Central 160.5, 146.9 (134.6, 121.2).
+
+### 7.83 Channel-dependent receive: the demodulator's sample rates follow the channel
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548). Code: `hal/radio.c`
+(`efr32_modem_channel_rates_set()`, called from `radio_freq_chan_set()` and `radio_phy_set()`;
+diagnostic `CONFIG_EFR32_RADIO_RX_CHANNEL_STATS`); QEMU: `hw/arm/efr32bg22.c`, qtest
+`released-rx-srcchf-follows-channel`. Tooling, logs and the fits: `scratch/ch38/` of the
+worktree (`lib.tcl`, `late3.tcl`, `poll.tcl`, `fit.py`, `verify.py`, `stock-src.txt`); stock
+dumps only in the baselines directory (`ch38/`).
+
+**Root cause [F].** The IF ADC is clocked from the LO, so its sample rate moves with the channel
+(3.3 % from 2402 to 2480 MHz), and two MODEM registers that the PHY table gives in ADC samples are
+right only on the table's base channel, 2402 MHz. Stock recomputes both on every channel; the
+open HAL left the 2402 MHz values everywhere. On 2426 MHz the demodulator therefore ran 1 % off
+rate and on 2480 MHz 3.2 %: the header decodes, the timing error then exceeds a symbol part way
+through the frame and the CRC fails -- exactly 7.80's symptom.
+
+**How it was found.** Stock's RX state was captured in RXSEARCH on each advertising channel.
+Stock takes no RXSEARCH (IRQ2) interrupt in most windows and the J-Link round trip (about 1 ms)
+is longer than one channel's TX and RX, so: reset to the application entry, attach the M0+ (AP3)
+without halting it, pre-load M0+ DWT comparator 0, poll RAC state and `SYNTH.FREQ` until stock is
+in TXWARM/TX on another channel, enable the comparator (one write) on `RAC.SR1`'s SET alias (the
+first store of every stock handler), follow handler entries until IRQ11 (STATETX2RX) runs on the
+wanted channel, move the comparator to the `RAC.SEQIF` CLR alias and resume until the
+acknowledgement lands; the RAC is then in RXSEARCH with the M0+ halted and the blocks are dumped
+over the M0+ bus (`RAC.STATUS` 0xB2000002 before and after). Between stock's own ch37, ch38 and
+ch39 captures the only configuration words that differ are `SYNTH.FREQ`, `CHSP`, the VCO
+calibration, `RAC.PGACAL` (DC calibration, run per turnaround), and **`MODEM.SRCCHF` and
+`MODEM.DIGMIXCTRL`**; ours carried the 2402 MHz words on every channel. To get more than three
+points, the laptop connected to the stock image and the M33 view of `SYNTH.FREQ`, `SRCCHF` and
+`DIGMIXCTRL` was sampled non-intrusively during the connection (a triple kept only when FREQ read
+the same before and after): 23 channels, 2402-2480 MHz.
+
+**The rule, fitted to all 23 channels exactly [F]** (`verify.py` replays the HAL's integer
+arithmetic: 23/23 words equal):
+- f_LO = f_RF + f_IF (`SYNTH.IFFREQ.LOSIDE` high side; f_IF = IFFREQ x f_HFXO / 2^19, the unit of
+  `SYNTH.FREQ`); f_ADC = f_LO / 2^9 with `RAC.IFADCTRIM0.IFADCENHALFMODE` (the 1M PHY), f_LO / 2^8
+  without (2M, Coded: [I], consistent with their tables, unmeasured on silicon).
+- `DIGMIXCTRL.DIGMIXFREQ` = round(floor(f_IF in Hz) x 2^20 / f_ADC). Without stock's truncation of
+  f_IF to whole hertz 3 of the 23 words round the other way.
+- `SRCCHF`: SRCRATIO1 / 2^7 x SRCRATIO2 / 2^14 = f_ADC / f_SRC_OUT, f_SRC_OUT = 4 MHz for 1M (4
+  samples per symbol). SRCRATIO1 is the largest code that leaves stage 2 at or above 25/24 (the
+  code steps between 2404/2418, 2426/2450 and 2464/2466 MHz bracket that limit to
+  1.0409-1.0417; 25/24 is the round value inside), SRCRATIO2 rounds the remainder. Coded runs with
+  SRCENABLE1 clear: SRCRATIO2 / 2^14 alone = f_ADC / f_SRC_OUT.
+- Applied to each PHY table at 2402 MHz the rule returns the table's own SRCCHF for 1M, 2M (8 MHz)
+  and Coded (8 MHz), and the 2M/Coded DIGMIXFREQ; the 1M table's DIGMIXFREQ is 156405, stock's
+  runtime value 156406 (the HAL follows stock).
+
+**Ruled out on the way [F].** The CPU clock: a scanner with SYSCLK on the HFXO (38.4 MHz, as stock;
+`cpu0` clock-frequency matched, admission off) received like the 76.8 MHz DPLL build (ch37/38/39
+79/70/68 % vs 68/70/70 %, both with the fix). 7.80's "HFXO build left the radio silent" was not
+reproduced with admission off. Stock does not enable RAC clock retiming in RXSEARCH either
+(`XORETIMECTRL` 0x770: limits only, ENRETIME and RESETN clear; `DIGCLKRETIMECTRL` 0); 7.80's wedge
+came from setting ENRETIME. The remaining non-channel differences against stock's ch38 capture
+(`AGC.CTRL0`, `MODEM.IRCALCOEFWR1`, `BLEIQDSA`, `MODEM` +0xC4/+0xCC/+0x21C, `RAC.PGACTRL`
+PGAENSUBG, `SYNTH` +0x78, `FRC.RXCTRL`/`TRAILRXDATA`) are the same on ch37, which now receives as
+well as the others; not chased here.
+
+**Result [F]** (`efr32_radio_rx_channel_stats`, CRC result per channel at RXDONE):
+
+| image | ch37 (2402) | ch38 (2426) | ch39 (2480) |
+|---|---|---|---|
+| scanner, before, run 1 (30 s) | 1369 ok / 382 fail (78 %) | 20 / 1262 (2 %) | 0 / 94 (0 %) |
+| scanner, after (30 s, between the two) | 1359 / 447 (75 %) | 1019 / 258 (80 %) | 925 / 236 (80 %) |
+| scanner, before, run 2 (30 s) | 1213 / 478 (72 %) | 21 / 1263 (2 %) | 0 / 131 (0 %) |
+| Peripheral, before, laptop scanning (3 runs) | 42 / 7 | 0 / 48 | 0 / 6 |
+| Peripheral, after, laptop scanning (4 runs) | 49 / 2 (96 %) | 45 / 14 (76 %) | 50 / 15 (77 %) |
+
+Same build configuration on both sides (only the rate computation disabled), interleaved; the
+scanner's remaining ~20-25 % failures are equal on all three channels (weak neighbours). In a
+connection the Peripheral received data channels 26, 29 and 33 with 6 of 7 CRCs good; the link
+still ends at the supervision timeout (7.80's RX->TX response path, unrelated). Per-channel
+rates on all 40 channels were not measured: the laptop's channel map and the short-lived
+connections give only a few data channels; the stock capture covers 23.
+
+**QEMU.** The model now checks the demodulator rate at frame end: from `SYNTH.FREQ`, `IFFREQ`,
+`IFADCTRIM0` and `SRCCHF` it computes the relative SRC error, and a frame whose accumulated drift
+over 8 x (octets + 3) symbols exceeds half a symbol gets its CRCOK trailer bit clear ([I] model of
+a measured effect: the threshold, the demodulator's timing tracking and the DIGMIXFREQ frequency
+error are not modelled; an SRCCHF without SRCENABLE2 is not checked). The old HAL therefore loses
+2426/2480 MHz frames in QEMU as on silicon. With the fixed HAL the QEMU connection pair (hardware
+configuration, hopping data channels, `run-qemu-connection-e2e.sh 25`) completes 60/60 GATT rounds;
+qtests 98/98 and 28/28 (new `released-rx-srcchf-follows-channel`).
+
+**Open.** 2M and Coded rates are derived from their tables, not measured on silicon; the 25/24
+stage-2 limit is a bracketed fit, not a documented constant; all-40-channel rates need a longer
+lived connection or a test transmitter.

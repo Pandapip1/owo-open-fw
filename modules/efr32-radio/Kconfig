@@ -135,6 +135,15 @@ config EFR32_RADIO_BRINGUP_TRACE
 	  printk timing is not part of the controller contract and production and
 	  simulator regression images should leave it disabled.
 
+config EFR32_RADIO_RX_CHANNEL_STATS
+	bool "Count received frames per channel and CRC result"
+	default n
+	help
+	  Diagnostic: efr32_radio_rx_channel_stats[channel][crc_ok] counts every
+	  hardware RXDONE by Bluetooth channel index (0-39) and CRC result, for a
+	  debugger to read. No printing, no effect on timing beyond one increment
+	  per frame.
+
 config EFR32_RADIO_QEMU_RX_DESCRIPTOR
 	bool "Enable the QEMU-only synthetic RX descriptor consumer"
 	default n
