@@ -1,65 +1,66 @@
-//! Hardware watchdog (devicetree alias `watchdog0`, wdog0 on the EFR32BG22).
+//! Feeding the product's hardware watchdog (WDOG0; docs/watchdog.md).
 //!
-//! The Series 2 WDOG runs from the 1 kHz ULFRCO. Zephyr's `wdt_gecko` driver is told to pause it in
-//! EM2/EM3 (`WDT_OPT_PAUSE_IN_SLEEP`), like the stock firmware, which programs WDOG0 CFG with
-//! PERSEL=8 (2049 ms) and EM2RUN/EM3RUN clear (seen in a QEMU trace of 7.9.07, sim/README.md).
-//! It keeps counting while the CPU idles in EM1, so the pump is woken at least every
-//! [`FEED_EVERY_US`] to feed it. Only the pump feeds it: if the pump (or anything it waits on)
-//! hangs, the SoC resets and the output stage comes up in its reset state.
+//! The watchdog itself is configured once at boot and locked by `src/watchdog.c`
+//! (`CONFIG_OWO_WATCHDOG`): a fixed period, a warning interrupt that forces the output stage
+//! safe, and it runs in every energy mode the product uses. Nothing here can start, stop or
+//! reconfigure it.
+//!
+//! **Who feeds, and what a feed certifies.** Only the pump feeds, and only through [`feed`],
+//! which it calls once per loop iteration after its supervision pass: every pulse that was
+//! due has been run through the supervisor (each phase with its sense-freshness, overdrive and
+//! overrun checks) and the supervisor's dead-man poll has run for the current time. The feed
+//! is granted only if
+//! 1. every live [`Lease`]'s safety predicate holds (an armed stimulation session holds one),
+//!    and
+//! 2. the output stage is quiescent: no bridge high side is driven on. Between passes the
+//!    bridge must be off; a closed bridge outside a supervised phase means supervision has
+//!    already failed.
+//!
+//! So a feed means "the output-safety supervisor completed a pass and left the output off",
+//! not merely "some thread ran". The pump also bounds its own sleep ([`cap_sleep`]) so that,
+//! while it works, consecutive feeds are closer together than the warning.
 
 use core::ffi::c_int;
-use log::{error, info};
+use log::error;
 use zephyr::sync::Mutex;
 
+#[cfg(all(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE, not(CONFIG_OWO_WATCHDOG)))]
+compile_error!("the real output stage requires the product watchdog (CONFIG_OWO_WATCHDOG)");
+
 extern "C" {
-    fn owo_wdt_start(timeout_ms: u32) -> c_int;
+    #[cfg(CONFIG_OWO_WATCHDOG)]
     fn owo_wdt_feed() -> c_int;
-    fn owo_wdt_stop() -> c_int;
+    #[cfg(CONFIG_OWO_WATCHDOG)]
+    fn owo_wdt_warning_us() -> u32;
+    fn owo_suit_output_quiescent() -> c_int;
 }
 
-/// Reset timeout. The driver rounds up to a hardware period: 2049 ms.
-const TIMEOUT_MS: u32 = 2000;
-/// Feed at half the period at the latest.
-pub(crate) const FEED_EVERY_US: u64 = 1_000_000;
+/// The pump sleeps at most this fraction of the time from a feed to the warning; the rest
+/// covers its wake-up latency and one supervision pass (measured worst cases and margin in
+/// docs/watchdog.md).
+const SLEEP_SHARE_DIVISOR: u64 = 2;
 
-/// A predicate attached to a lease. Returning false intentionally lets the
-/// hardware watchdog expire rather than extending supervision of unsafe work.
+/// A predicate attached to a lease. Returning false withholds the feed and makes the pump run
+/// its ordered safe-off; the watchdog is the containment if that does not complete.
 pub(crate) type SafetyCheck = fn() -> bool;
 
-enum LeaseSlot {
-    Free,
-    Held(Option<SafetyCheck>),
-}
-
-const MAX_LEASES: usize = 4;
+const MAX_LEASES: usize = 2;
 
 struct State {
-    leases: [LeaseSlot; MAX_LEASES],
-    running: bool,
-    generation: u32,
+    checks: [Option<SafetyCheck>; MAX_LEASES],
+    held: [bool; MAX_LEASES],
 }
 
-/*
- * This is a counted lease, rather than a public on/off switch.  Its mutex
- * serializes GATT, pump, monitor, and OTA callers around the C driver's one
- * installed timeout, so dropping the final lease cannot race a new setup.
- */
-static STATE: Mutex<State> = Mutex::new(State {
-    leases: [const { LeaseSlot::Free }; MAX_LEASES],
-    running: false,
-    generation: 0,
-});
+static STATE: Mutex<State> = Mutex::new(State { checks: [None; MAX_LEASES], held: [false; MAX_LEASES] });
 
-/// Keeps the hardware watchdog enabled while it exists.  It is deliberately
-/// neither `Clone` nor publicly constructible: supervision is a resource held
-/// by a live safety-sensitive operation, not an ambient application setting.
+/// A safety predicate that must hold for every feed while this exists. Held by a live
+/// stimulation session; neither `Clone` nor constructible outside [`Lease::acquire`].
 pub(crate) struct Lease(usize);
 
 impl Lease {
-    /// Acquire a watchdog lease before making the output supervisor live.
-    ///
-    /// A supplied safety check is an admission condition, not merely a later
-    /// feeding condition: unsafe work must not acquire supervision at all.
+    /// The predicate is also an admission condition: unsafe work does not get a lease.
+    /// Only a real output stage takes one (a dry-run build has nothing to supervise).
+    #[cfg_attr(not(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE), allow(dead_code))]
     pub(crate) fn acquire(safety_check: Option<SafetyCheck>) -> Result<Self, ()> {
         if let Some(check) = safety_check {
             if !check() {
@@ -67,32 +68,10 @@ impl Lease {
                 return Err(());
             }
         }
-
         let mut state = STATE.lock().unwrap();
-        let slot = state
-            .leases
-            .iter()
-            .position(|slot| matches!(slot, LeaseSlot::Free))
-            .ok_or(())?;
-        if !state.running {
-            // SAFETY: serialized plain Zephyr calls through the C shim.
-            match unsafe { owo_wdt_start(TIMEOUT_MS) } {
-                0 => {
-                    info!("watchdog started ({} ms)", TIMEOUT_MS);
-                    state.running = true;
-                }
-                -19 => {
-                    info!("no watchdog on this board"); // -ENODEV
-                    return Err(());
-                }
-                e => {
-                    error!("watchdog not started: {}", e);
-                    return Err(());
-                }
-            }
-        }
-        state.leases[slot] = LeaseSlot::Held(safety_check);
-        state.generation = state.generation.wrapping_add(1);
+        let slot = state.held.iter().position(|h| !h).ok_or(())?;
+        state.held[slot] = true;
+        state.checks[slot] = safety_check;
         Ok(Self(slot))
     }
 }
@@ -100,70 +79,71 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut state = STATE.lock().unwrap();
-        debug_assert!(matches!(&state.leases[self.0], LeaseSlot::Held(_)));
-        state.leases[self.0] = LeaseSlot::Free;
-        state.generation = state.generation.wrapping_add(1);
-        if state.leases.iter().any(|slot| matches!(slot, LeaseSlot::Held(_))) || !state.running {
-            return;
-        }
-
-        // SAFETY: serialized plain Zephyr call through the C shim.
-        match unsafe { owo_wdt_stop() } {
-            0 => {
-                state.running = false;
-                info!("watchdog stopped (final monitoring lease released)");
-            }
-            e => error!("watchdog not stopped: {}", e),
-        }
+        state.held[self.0] = false;
+        state.checks[self.0] = None;
     }
 }
 
-/// Feed the watchdog if every active lease is safe.
-///
-/// `false` asks the pump to begin its orderly cold-reboot path.  It has not
-/// fed the watchdog, so hardware reset remains the containment fallback if
-/// that path cannot complete.
+/// Feed the watchdog if the feed condition (module documentation) holds. Call only from the
+/// pump, at the end of a supervision pass. `false` asks the pump to run its ordered safe-off:
+/// nothing was fed, so the warning interrupt and the reset remain the containment if that
+/// safe-off cannot complete.
 pub(crate) fn feed() -> bool {
-    loop {
-        let (checks, generation) = {
-            let state = STATE.lock().unwrap();
-            if !state.running {
-                return true;
-            }
-            let mut checks = [None; MAX_LEASES];
-            for (dst, slot) in checks.iter_mut().zip(state.leases.iter()) {
-                if let LeaseSlot::Held(check) = slot {
-                    *dst = *check;
-                }
-            }
-            (checks, state.generation)
-        };
+    // Copy the predicates out: one may be the acquire-time gate of a caller holding STATE.
+    let checks = STATE.lock().unwrap().checks;
+    for check in checks.into_iter().flatten() {
+        if !check() {
+            error!("watchdog safety check failed; withholding feed");
+            return false;
+        }
+    }
+    // SAFETY: reads the bridge's GPIO output latches.
+    if unsafe { owo_suit_output_quiescent() } == 0 {
+        error!("bridge closed outside a supervised phase; withholding feed");
+        return false;
+    }
+    #[cfg(CONFIG_OWO_WATCHDOG)]
+    // SAFETY: one register access; only this thread feeds.
+    unsafe {
+        owo_wdt_feed();
+    }
+    true
+}
 
-        for check in checks.into_iter().flatten() {
-            if !check() {
-                error!("watchdog safety check failed; withholding feed");
-                return false;
-            }
-        }
-
-        let state = STATE.lock().unwrap();
-        if state.generation != generation {
-            /* A newly acquired lease must have its check observed first. */
-            continue;
-        }
-        if state.running {
-            // SAFETY: serialized plain Zephyr call through the C shim.
-            let _ = unsafe { owo_wdt_feed() };
-        }
-        return true;
+/// Limit a requested wake-up time (`None` = sleep forever) so the next feed comes before the
+/// warning.
+pub(crate) fn cap_sleep(until: Option<u64>, now_us: u64) -> Option<u64> {
+    #[cfg(CONFIG_OWO_WATCHDOG)]
+    {
+        // SAFETY: pure computation from build-time constants.
+        let latest = now_us + unsafe { owo_wdt_warning_us() } as u64 / SLEEP_SHARE_DIVISOR;
+        Some(until.map_or(latest, |t| t.min(latest)))
+    }
+    #[cfg(not(CONFIG_OWO_WATCHDOG))]
+    {
+        let _ = (now_us, SLEEP_SHARE_DIVISOR);
+        until
     }
 }
 
-/// Limit a requested wake-up time (`None` = sleep forever) to the next feed deadline.
-pub(crate) fn cap_sleep(until: Option<u64>, now_us: u64) -> Option<u64> {
-    if !STATE.lock().unwrap().running {
-        return until;
+/// Sleep for `ms` milliseconds in the pump without starving the watchdog: in steps no longer
+/// than [`cap_sleep`] allows, feeding after each under the same condition as the pump loop.
+/// Returns false as soon as a feed is refused.
+pub(crate) fn sleep_fed(ms: u64) -> bool {
+    let end = now_us() + ms * 1000;
+    loop {
+        let now = now_us();
+        if now >= end {
+            return true;
+        }
+        let until = cap_sleep(Some(end), now).unwrap_or(end);
+        zephyr::time::sleep(zephyr::time::Duration::micros_at_least(until.saturating_sub(now)));
+        if !feed() {
+            return false;
+        }
     }
-    let latest = now_us + FEED_EVERY_US;
-    Some(until.map_or(latest, |t| t.min(latest)))
+}
+
+fn now_us() -> u64 {
+    crate::now_us()
 }

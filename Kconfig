@@ -30,4 +30,45 @@ config OWO_SIM_INJECT
 	  a Bluetooth connection. Never enable it in a product or hardware build: anything that
 	  can write RAM over a debug port could then command output.
 
+config OWO_WATCHDOG
+	bool "Short, fixed, locked hardware watchdog (WDOG0)"
+	default y
+	depends on DT_HAS_SILABS_GECKO_WDOG_ENABLED
+	select ZERO_LATENCY_IRQS
+	help
+	  WDOG0 configured once at boot (src/watchdog.c) and locked: it cannot be stopped or
+	  reconfigured afterwards. Fed only by the pump after a supervision pass with the output
+	  quiescent (src/wdt.rs); its warning interrupt puts the output stage in its safe state
+	  with raw register writes and waits for the reset. docs/watchdog.md.
+
+if OWO_WATCHDOG
+
+config OWO_WATCHDOG_PERSEL
+	int "WDOG0 CFG.PERSEL: period of 2^(PERSEL+3)+1 watchdog-clock cycles"
+	default 8
+	range 0 15
+	help
+	  Chosen from the longest feed interval measured in QEMU under every workload that can be
+	  driven there, with the margin argued in docs/watchdog.md. At 32768 Hz (LFRCO on the
+	  suit, LFXO on the kit), 8 is 2049 cycles = 62.53 ms, the stock firmware's value.
+
+config OWO_WATCHDOG_WARNSEL
+	int "WDOG0 CFG.WARNSEL: warning at WARNSEL x 25 % of the period"
+	default 3
+	range 1 3
+	help
+	  The warning interrupt forces the output safe. Late in the period (75 %) gives the
+	  shortest period for a given feed interval, so the reset backstop (for a hang with all
+	  interrupts masked) is as short as possible. docs/watchdog.md.
+
+config OWO_WATCHDOG_FREEZE_IN_DEBUG
+	bool "Freeze the watchdog while a debugger halts the core (DEBUGRUN = 0)"
+	depends on !OWO_STIM_UNVALIDATED_HARDWARE
+	help
+	  Development builds without a real output stage only. The product keeps the watchdog
+	  running in debug halt (DEBUGRUN = 1): a halted core cannot run the warning interrupt, so
+	  the reset is the only bound on an output a halt leaves energised.
+
+endif # OWO_WATCHDOG
+
 source "Kconfig.zephyr"

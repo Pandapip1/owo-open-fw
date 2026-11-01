@@ -5,8 +5,9 @@
  */
 
 /*
- * Hardware watchdog. Zephyr's wdt_gecko driver (silabs,gecko-wdog) is selected for Series 2
- * (drivers/watchdog/Kconfig.gecko); it uses the 1 kHz ULFRCO. Fed from the pump (src/wdt.rs).
+ * Hardware watchdog: configured once at boot and locked by src/watchdog.c (raw registers, not
+ * Zephyr's driver), clocked by the devicetree's WDOG0 branch; fed by the pump (src/wdt.rs).
+ * docs/watchdog.md.
  */
 &wdog0 {
 	status = "okay";

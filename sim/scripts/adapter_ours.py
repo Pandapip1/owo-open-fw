@@ -6,12 +6,21 @@
 import gdb
 
 # src/ble.rs `Id` values of the writable characteristics.
-IDS = {"widths": 1, "run": 2, "frame": 3, "power": 4, "config": 6, "test": 9}
+IDS = {"widths": 1, "run": 2, "frame": 3, "power": 4, "config": 6, "test": 9, "ota": 11}
 KIND_DISCONNECT = 0x100
 # An erased flash word region past the application in the composed image (sim/README.md):
 # "wfi; b.n .-2" is written there for the hang scenarios.
 HANG_LOOP = 0x4B000
 HANG_LOOP_CODE = (0xBF30, 0xE7FD)
+# The same with interrupts masked by the core itself (gdb cannot write the Secure bank of
+# PRIMASK/BASEPRI through QEMU's stub): "cpsid i; b ." and "movs r0, #lvl; msr basepri, r0; b .".
+HANG_IRQOFF = HANG_LOOP + 0x10
+HANG_IRQOFF_CODE = (0xB672, 0xE7FE)
+HANG_IRQLOCK = HANG_LOOP + 0x20
+THUMB_MOVS_R0_IMM8 = 0x2000
+THUMB2_MSR_R0 = 0xF380
+THUMB2_MSR_SYSM_BASEPRI = 0x8811
+THUMB_B_SELF = 0xE7FE
 
 
 # src/sim_inject.rs `Mailbox` (repr(C)): seq, done, kind, len, result (u32/i32), data[32].
@@ -64,17 +73,24 @@ def disconnect():
     return _post(KIND_DISCONNECT, bytes([0x13]))
 
 
+def _write_code(addr, halves):
+    for i, half in enumerate(halves):
+        gdb.execute(f"set {{unsigned short}}{addr + 2 * i} = {half:#x}")
+
+
 def _write_loop():
-    for i, half in enumerate(HANG_LOOP_CODE):
-        gdb.execute(f"set {{unsigned short}}{HANG_LOOP + 2 * i} = {half:#x}")
+    _write_code(HANG_LOOP, HANG_LOOP_CODE)
+    _write_code(HANG_IRQOFF, HANG_IRQOFF_CODE)
+    basepri = ZLI_LEVELS << (8 - NVIC_PRIO_BITS)
+    _write_code(HANG_IRQLOCK, (THUMB_MOVS_R0_IMM8 | basepri, THUMB2_MSR_R0,
+                               THUMB2_MSR_SYSM_BASEPRI, THUMB_B_SELF))
 
 
 def hang(kind):
     _write_loop()
     if kind == "irqs-off":
         # A wedged core: interrupts masked, spinning in place. Peripherals and WDOG0 run on.
-        gdb.execute("set $primask = 1")
-        gdb.execute(f"set $pc = {HANG_LOOP:#x}")
+        gdb.execute(f"set $pc = {HANG_IRQOFF:#x}")
         return "pc=hang-loop primask=1"
     if kind in ("mid-pulse", "thread-mid-pulse"):
         # The pump thread stops right after closing the bridge for a phase
@@ -83,7 +99,35 @@ def hang(kind):
         gdb.execute("continue")
         gdb.execute(f"set $pc = {HANG_LOOP:#x}")
         return "pump thread spinning mid-phase, interrupts enabled"
+    if kind == "mid-pulse-irqs-off":
+        # As mid-pulse, with every configurable interrupt masked (PRIMASK): no warning
+        # interrupt can run, only the watchdog reset ends it.
+        gdb.Breakpoint("owo_counter_mark", internal=True, temporary=True)
+        gdb.execute("continue")
+        gdb.execute(f"set $pc = {HANG_IRQOFF:#x}")
+        return "pump spinning mid-phase, primask=1"
+    if kind == "pump-loop":
+        # The pump wedges between pulses, interrupts enabled: stopped where it is about to
+        # check the feed condition (src/wdt.rs feed -> owo_suit_output_quiescent).
+        gdb.Breakpoint("owo_suit_output_quiescent", internal=True, temporary=True)
+        gdb.execute("continue")
+        gdb.execute(f"set $pc = {HANG_LOOP:#x}")
+        return "pump thread spinning before its feed, interrupts enabled"
+    if kind == "mid-pulse-irq-lock":
+        # As mid-pulse, but inside irq_lock(): BASEPRI masks every interrupt but the
+        # zero-latency levels (Zephyr ARMv8-M Mainline; CONFIG_ZERO_LATENCY_LEVELS).
+        gdb.Breakpoint("owo_counter_mark", internal=True, temporary=True)
+        gdb.execute("continue")
+        basepri = ZLI_LEVELS << (8 - NVIC_PRIO_BITS)
+        gdb.execute(f"set $pc = {HANG_IRQLOCK:#x}")
+        return f"pump spinning mid-phase under irq_lock (BASEPRI {basepri:#x})"
     raise ValueError(kind)
+
+
+# EFR32BG22: 3 NVIC priority bits (__NVIC_PRIO_BITS in the CMSIS device header); the product
+# configures two zero-latency levels (CONFIG_ZERO_LATENCY_LEVELS in its .config).
+NVIC_PRIO_BITS = 3
+ZLI_LEVELS = 2
 
 
 def poke(addr, size, value):
