@@ -7737,3 +7737,163 @@ qtests 98/98 and 28/28 (new `released-rx-srcchf-follows-channel`).
 **Open.** 2M and Coded rates are derived from their tables, not measured on silicon; the 25/24
 stage-2 limit is a bracketed fit, not a documented constant; all-40-channel rates need a longer
 lived connection or a test transmitter.
+
+### 7.84 Silicon connections hold: GATT, LE Secure Connections, and the measurements they allow
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548), the laptop's controller
+(hci0, BlueZ 5.87 `bluetoothctl`) as Central. Code: `tests/radio-port/prj-hardware.conf` (no libc
+heap), `tests/radio-port/prj-pairing.conf` (the product's controller privacy, accept list and GATT
+caching settings), `modules/efr32-radio/Kconfig` (silicon figures). No HAL, sequencer, kernel or
+QEMU change. Tooling and logs: `scratch/sil-conn/` of the worktree (build.sh, hw.sh, run.sh,
+conntest.sh, meas.sh, meas.tcl, gattcheck.sh, addr.sh, ww.sh, eof-probe.patch); the shared scratch
+was write-protected for this agent.
+
+**Images.** Hardware profile (`prj-hardware.conf` + `prj-connection.conf`, + `prj-pairing.conf`
+for the pairing runs) with the hardware policy throughout: admission on, a missed or infeasible
+deadline shuts the radio down (`SCHED_DEADLINE_MISS_CUSTOM`; the kernel still counts misses in
+`miss_count` and late deliveries in `late_count`, both read over the debugger after each run),
+advertising on channels 37, 38 and 39 (`RADIO_PORT_ADV_CHANNEL_37_ONLY` off),
+`EFR32_RADIO_RX_CHANNEL_STATS` on. Measurement images add `EFR32_RADIO_TIMING_PROBE`,
+`SCHED_DEADLINE_STATS` and `INIT_STACKS`. The device takes a new random static address at every
+boot (no stored identity); each run reads it from `bt_dev.id_addr[0]` over the debugger
+(`addr.sh`) before the laptop connects, and the test application advertises once per boot, so each
+run starts from a reset.
+
+**Workload.** `bluetoothctl` scans, connects to that address, (pairing runs: passkey entry as
+`agent KeyboardOnly` with the test's fixed passkey), discovers the test service and then writes a
+4-octet value to the test characteristic and reads it back once a second until the end, then
+disconnects (`conntest.sh`). Every read-back is compared with the write before it
+(`gattcheck.sh`). The laptop chose a 45 ms interval (`efr32_radio_conn_interval_us` 45000) and a
+channel map of 26 data channels (0-10, 22-36).
+
+**Two configuration faults, found on silicon.**
+- The pairing image did not link: RAM overflowed by 3092 octets. The hardware profile kept a
+  3504-octet libc heap for the host's PSA ECB/CMAC contexts; since 7.81 those run on RADIOAES and
+  the linker discards malloc, calloc and free from every radio-port image (`zephyr.map`): the
+  arena was unreferenced. Now 0; pairing image 95.6 % RAM.
+- The pairing image shut the radio down at the laptop's first SCAN_REQ, before any connection:
+  `deadline unsat: efr32_radio_completion_event ... deadline 55640 ns from the check, demand ahead
+  of it 58114 ns`. `BT_SMP` defaults `BT_CTLR_PRIVACY` on, and with controller privacy the
+  sequencer cannot stage the scan response (`lll_adv_stage.c` needs no resolving list), so the M33
+  decides the SCAN_REQ at its end and that turnaround is infeasible on silicon (7.82's "before").
+  Admission was right. The product (`prj.conf`) has controller privacy, the filter accept list and
+  GATT caching off; the pairing profile, which claims the product's security, now matches it
+  (GATT caching also logged `CMAC operation init failed -134`: its database hash needs multi-part
+  CMAC, which `radioaes_psa.c` does not offer).
+
+**Results [F].**
+
+| run | image | connected | GATT rounds (exact) | misses / late | data-channel frames ok / CRC fail | end |
+|---|---|---|---|---|---|---|
+| L1 | Peripheral, 7.83 figures | 10 min 43 s | 620 (620) | 0 / 0 | 14294 / 0 | host disconnect (0x13) |
+| P2 | pairing, level 4, 7.83 figures | 10 min 43 s after pairing | 620 (620) | 0 / 0 | 14495 / 0 | host disconnect |
+| L2 | Peripheral, 7.84 figures | 10 min 42 s | 616 (616) | 0 / 0 | 14260 / 0 | host disconnect |
+| P3 | pairing, 7.84 figures | 10 min 42 s after pairing | 621 (621) | 0 / 0 | 14473 / 0 | host disconnect |
+| M2, M3, C1, C2 (measurement) | probes | 5 min, 3.3 min, 5 min, 5 min (C2 encrypted) | 295, 196, 294, 290 (all exact) | 0 / 0 | - | host disconnect |
+
+Pairing: LE Secure Connections only, MITM enforced, passkey entered on the laptop, the
+characteristic requiring an authenticated encrypted link (`BT_GATT_PERM_*_AUTHEN`): every read and
+write of the run went over link-layer AES-CCM on RADIOAES at security level 4 (SC + authenticated
++ 128-bit key; the device printed `peripheral_paired: bonded 1`). The bond the laptop made for that
+run's address was removed afterwards (`bluetoothctl remove`, that address only, checked against the
+device's name and the debugger-read identity).
+
+**Per-channel receive [F]** (`efr32_radio_rx_channel_stats`, the four 10-minute runs together):
+every data channel the link used, 0-10 and 22-36, received 57522 frames with 0 CRC failures
+(per channel 9 to 998 frames per run: `scratch/sil-conn/stats-*.txt`); the advertising channels in
+the same runs (SCAN_REQs and CONNECT_INDs from the laptop and neighbours) 60 ok / 7 failed. 7.83's
+rate rule therefore holds on 26 of the 37 data channels; 11-21 were outside the laptop's channel
+map.
+
+**Measurements [F].** Probe images (k_cycle at 33.554432 MHz; TIMER0 counts at 76.8 MHz; TIMER1
+on HFRCODPLL 76.8 MHz, `EM01GRPACLKCTRL` 1, calibrated in 7.71). "Clean": the probe read only
+after the link closed; M2/M3 also polled the debug port during the connection.
+
+1. *Connection T_IFS* (`scripts/bg22-tifs-probe.tcl`, PRS MODEMH.EOF reload-starts TIMER1, our
+   reply's SYNCSENT and FRAMESENT captured, 30 s of a held link, M2): received EOF to our reply's
+   SYNCSENT **179.91-180.87 us, n = 941** (empty replies, 40 us on air: n = 863, 179.93-180.87;
+   80 us: 39; 112 us: 39). Stock 180.2-181.1 us (7.71); 7.82 (n = 16) 179.54-181.68 us.
+2. *Frame-dating error* (7.79 item 3; scratch patch `eof-probe.patch` in `efr32_radio_rx_end_capture()`:
+   with TIMER1 reload-started by MODEMH.EOF, the true time since EOF is TIMER1.CNT read right after
+   RAC.STIMER, the HAL's estimate STIMER/4.8 + EOF_TO_EXIT 3.3 us; histogram in 50 ns bins, M3):
+   **-0.84 to +0.38 us, mean -0.26 us, n = 667** (85 % within -0.45..0 us); the estimate is early by
+   the read gap between the two loads plus STIMER's 0.21 us step. Far inside the 16 us sleep-clock
+   tolerance the anchor needs. (A first version read TIMER1 with its bus clock off and took a bus
+   fault at the first received frame: the patch now checks `CMU.CLKEN0` bit 5.)
+3. *Peripheral window margin* (7.79 item 4; PRS RACL.RX rise reload-starts TIMER1, MODEMH.EOF
+   captured, 30 s, M3; MODEML.FRAMEDET as signal 7 of source 0x2D, pulse or level, captured
+   nothing and needs the BG22 PRS signal table): RX ready to the first frame's EOF 123.5-158.9 us
+   (n = 580 empty first PDUs; the longer tail is data PDUs), so the receiver was searching **43.5 to
+   78.9 us (mean 60.5 us) before the Central's preamble** (EOF less 80 us of preamble, AA, header and
+   CRC). Planned: ready EVENT_TICKER_RES_MARGIN_US 32 + EVENT_JITTER_US 16 + window widening before
+   the computed anchor; the widening, read from `conn_pool` (`lll.periph.window_widening_periodic_us`,
+   offsets from the image's DWARF) was 34 us per event (our SCA 500 ppm, the laptop's SCA code 2),
+   so 82 us. The Central's packets therefore began 3.1-38.5 us (mean 21.5 us) before our computed
+   anchor, within its 34 + 16 us allowance; the 30 us width of that spread is one 32768 Hz tick (the
+   laptop's own scheduling granularity is the likely source). Open: whether the 21.5 us mean is our
+   anchor (chain delay, `radio_tmr_ready_get()`) or the laptop's.
+4. *The sequencer's RX->TX path* (7.79 item 6; its own record at SEQRAM 0x4F40/0x4F20, STIMER and
+   SysTick, n = 468 turnarounds, M2): every turnaround took the cached-calibration retune (the
+   synthesizer is up from RXWARM, 7.80): RX2TX entry 1.9 us after the RAC entered RX2TX, synthesizer
+   locked 24.0-27.3 us after entry (SysTick 23.98-27.27 us), PA up 54.0-57.3 us after entry, against
+   the 650-tick (135.4 us) hold: at least 76 us to spare. The power-up branch (RADIOEN.PREEN clear)
+   was not taken once.
+5. *Staged-path budgets and completion runs* (7.82; clean C1 unencrypted, C2 encrypted):
+
+| figure | C1 | C2 (encrypted) | before (Kconfig) | now |
+|---|---|---|---|---|
+| conn completion TX->RX run | 179.1 us | 147.6 us | 143.7 | **179.2** |
+| conn completion RX->TX run (commit + stage) | 98.9 us | 108.7 us (CCM in it) | 109.3 (+ CCM) | 109.3 |
+| conn completion start -> next stage posted | 95.0 us | 97.2 us (CCM in it) | 46.1 (PROVISIONAL) | **95.1** |
+| conn completion start -> PENDING/STAGED store | 144.0 us | 112.5 us | 95.1 | **144.0** |
+| conn completion start -> RESPOND (FIFO re-armed) | 78.9 us | 55.7 us | 103.2 | 103.2 |
+| conn last TX / abort run | 63.4 / 36.1 us | 52.2 / 36.4 us | close 241.7 | 241.7 |
+| adv completion TX->RX (ADV_IND) | 61.4 us | 61.9 us | 46.4 | **62.0** |
+| adv completion RX->TX (SCAN_REQ) | 70.2 us | 71.0 us | 52.5 | **71.1** |
+| adv completion TX (SCAN_RSP) | 39.5 us | 39.5 us | 27.1 | **39.6** |
+| adv start -> PENDING / RESPOND | 27.6 / 27.8 us | 27.9 / 28.2 us | 12.8 / 24.7 | **27.9 / 28.2** |
+| held RX launch: start -> SWRXEN post | 15.71 us | 15.50 us | 15.2 | **15.71** |
+| held RX launch run | 18.8 us | 18.5 us | 14.0 | **18.9** |
+| TX launch: start -> TXEN post | 20.30 us | 20.39 us | 20.4 | 20.4 |
+| sequencer: post -> first poll | 136 counts, 1.77 us | 140, 1.82 us | 1.771 | **1.823** |
+| sequencer: instant -> command store | 117 counts, 1.52 us | 121, 1.58 us | 1.446 | **1.576** |
+| sequencer polling ahead of the instant (min) | 23.7 us | 15.5 us | - | - |
+| outcome wait / outcome after EOF | 30.3 / 112.5 us | 21.9 / 145.2 us | - | - |
+| sequencer took the stage after RX2TX began | 17 STIMER ticks | 17 | 17 (7.82) | - |
+
+   With the debug port polled during the connection (M2, M3) the same figures came out within the
+   clean maxima except the RX window launch (62.4 us while `probe_watch` read TIMER1 at ~17 k/s) and
+   the sequencer wake (142 counts); the product runs without a debugger, so those are not taken.
+   The 7.77/7.82 advertising figures came from the stage-3 advertiser image; the connection
+   profiles' advertising paths are longer and their maxima now set the defaults. Every run
+   exceeding an old budget had still met every start-by (no miss, no unsat): the budgets were
+   optimistic, which admission cannot see. With the new figures admission still admits the whole
+   job set: L2 and P3 held 10 minutes with 0 misses and no unsat.
+6. *Encrypted connection-event CPU time* (C2): the receive completion (decrypt, commit, encrypt
+   the two staged replies, stage) 108.7 us longest, the TX->RX completion 147.6 us: 256 us of
+   completion work per exchange, 0.57 % of the 45 ms interval (the prepares and the ULL are not
+   in it).
+7. *ram-fit checks*: the 64-octet BUFC TX FIFO carried every connection PDU of every run (GATT
+   writes and reads, SMP and ATT PDUs up to 27 octets) with `BUFC.IF` reading 0x4
+   (BUF0THR only: no BUF0OF or BUF0UF) after each measurement run (M2, M3, C1, C2); every read-back equalled its write (3552 rounds in
+   the runs above, `gattcheck.sh`). Stack high-water (`INIT_STACKS`, untouched 0xAA from the low end
+   after the run): TX launch job 208 of 640 octets (encrypted 428), RX launch job 208 (368),
+   completion job 368 of 960 (664), LLL context 544 of 960 (748), ULL worker 648 of 960 (648). The
+   TX launch job's 436-of-448 QEMU figure (ram-fit) is not reached on silicon here; with encryption
+   it needs 428, so 448 would be too tight for an encrypted Peripheral (the connection profile keeps
+   640).
+8. *Prepare lead in deep sleep* (7.79 item 7): not measurable: the stack never enters EM2 (no
+   power-management path in the radio HAL; the debugger also prevents EM2, 7.74), and the M0+ stops
+   in EM2 and was found reset after it (7.74). Stays a design value [D].
+
+**QEMU.** No model change: every silicon figure here agrees with what the model already
+implements (T_IFS from the sequencer's hold, RX2TX retune with the cached calibration, a gated
+TIMER read faulting, BUFC thresholds). The model's own paths keep their QEMU figures. With the
+changed pairing profile the QEMU pair (`run-qemu-connection-e2e.sh 40`, `PAIRING=1`,
+`build/qemu-new`) pairs at level 4 and completes 60/60 encrypted GATT rounds.
+
+**Open.** The 21.5 us mean early arrival of the Central's packets against our computed anchor (item
+3); MODEML.FRAMEDET's PRS selector on BG22; data channels 11-21 (outside the laptop's map); the
+connection close/abort budget still the QEMU 241.7 us (no abort after a receive seen); EM2 and the
+prepare lead; scanner and initiator responses still decided by the M33 (7.82); controller privacy
+with a staged scan response (a resolving list in the sequencer) if the product ever needs it.

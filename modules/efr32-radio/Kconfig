@@ -267,23 +267,27 @@ config EFR32_RADIO_TX_LAUNCH_PRE_NS
 config EFR32_RADIO_SEQ_TIMED_WAKE_NS
 	int "Timed command: post to the sequencer's first poll (ns)"
 	default 3021 if EFR32_RADIO_TIMING_QEMU
-	default 1771
+	default 1823
 	help
 	  Longest time from the M33's RDMAILBOX1 store to the sequencer's
 	  first TIMER0 poll of a timed command (TIMER0 counts the M33 reads
 	  after its store and the sequencer at its first poll;
 	  docs/radio-tables.md 7.82): silicon 136 counts at 76.8 MHz,
-	  1.77 us (742 launches); QEMU 116 counts at 38.4 MHz, 3.02 us.
+	  1.77 us (742 launches, 7.82); 140 counts, 1.82 us, in a held
+	  encrypted connection (7.84, the default); QEMU 116 counts at
+	  38.4 MHz, 3.02 us.
 
 config EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS
 	int "Timed command: instant to the command store (ns)"
 	default 2214 if EFR32_RADIO_TIMING_QEMU
-	default 1446
+	default 1576
 	help
 	  Longest time from a timed command's instant to the sequencer's
 	  TIMER0 read right after its TXEN or SWRXEN store
 	  (docs/radio-tables.md 7.82): silicon 111 counts at 76.8 MHz,
-	  1.45 us (742 launches; 76-86 counts in a 200-launch PRS run, the
+	  1.45 us (742 launches, 7.82), 121 counts, 1.58 us, in a held
+	  encrypted connection (7.84, the default; 76-86 counts in a
+	  200-launch PRS run, the
 	  RAC leaving OFF 0.9 us before that read); QEMU 85 counts at
 	  38.4 MHz, 2.21 us.
 
@@ -299,11 +303,12 @@ config EFR32_RADIO_SPIN_EXIT_NS
 config EFR32_RADIO_RX_LAUNCH_PRE_NS
 	int "RX launch: start to the sequencer post (ns)"
 	default 10900 if EFR32_RADIO_TIMING_QEMU
-	default 15200
+	default 15710
 	help
 	  Longest path from a held RX launch's start (a Peripheral's receive
 	  window) to posting SWRXEN to the sequencer, the instant's mapping
-	  included (as the TX launch's PRE): silicon 15.2 us (511 cycles,
+	  included (as the TX launch's PRE): silicon 15.71 us (527 cycles,
+	  a held connection, 7.84; 15.2 us in 7.82's
 	  connection attempts from a host Central, 7.82), QEMU 10.9 us.
 
 config EFR32_RADIO_RX_READY_NS
@@ -359,21 +364,24 @@ config EFR32_RADIO_WCET_RX_LAUNCH_NS
 config EFR32_RADIO_WCET_COMPLETION_TX_RX_NS
 	int "Completion budget: TX followed by RX (ns)"
 	default 86800 if EFR32_RADIO_TIMING_QEMU
-	default 46400
+	default 62000
 	help
 	  Completion of a transmission the sequencer turns to RX (the LLL's
-	  isr_tx: the ADV_IND of a scannable advertiser): silicon 46.4 us,
+	  isr_tx: the ADV_IND of a scannable advertiser): silicon 62.0 us
+	  (the connection profiles with a host scanning, 7.84; 46.4 us in the
+	  stage-3 advertiser, 7.77),
 	  QEMU 86.8 us (hardware configuration).
 
 config EFR32_RADIO_WCET_COMPLETION_RX_TX_NS
 	int "Completion budget: RX with a response armed (ns)"
 	default 45600 if EFR32_RADIO_TIMING_QEMU
-	default 52500
+	default 71100
 	help
 	  Completion of a frame received in a window armed for a response
-	  (the LLL's isr_rx for a SCAN_REQ or a CONNECT_IND): silicon 52.5 us
+	  (the LLL's isr_rx for a SCAN_REQ or a CONNECT_IND): silicon 71.1 us
+	  (the connection profiles with a host scanning, 7.84; before: 52.5 us
 	  (an advertiser taking a host's CONNECT_IND, 7.80; 38.9 us with
-	  SCAN_REQs only), QEMU 45.6 us.
+	  SCAN_REQs only)), QEMU 45.6 us.
 
 config EFR32_RADIO_WCET_COMPLETION_RX_NS
 	int "Completion budget: other RX (ns)"
@@ -389,11 +397,12 @@ config EFR32_RADIO_WCET_COMPLETION_RX_NS
 config EFR32_RADIO_WCET_COMPLETION_TX_NS
 	int "Completion budget: TX not followed by RX (ns)"
 	default 186800 if EFR32_RADIO_TIMING_QEMU
-	default 27100
+	default 39600
 	help
 	  Completion of a transmission that ends its exchange (the LLL's
 	  isr_done after a SCAN_RSP; in QEMU-configuration images every TX,
-	  isr_tx included): silicon 27.1 us, QEMU 186.8 us.
+	  isr_tx included): silicon 39.6 us (the connection profiles, 7.84;
+	  27.1 us in the stage-3 advertiser), QEMU 186.8 us.
 
 config EFR32_RADIO_WCET_COMPLETION_ABORT_NS
 	int "Completion budget: abort (ns)"
@@ -411,22 +420,27 @@ config EFR32_RADIO_WCET_COMPLETION_ABORT_NS
 # counted) connected from the host's controller: one connection that ended at its supervision
 # timeout (7.80), so a small sample: those defaults are the longest seen in it, and the close
 # budget keeps the QEMU figure (the silicon close seen, 31.1 us, was not an abort after RX).
+# 7.84: connections that hold (laptop Central, 45 ms interval, GATT every second, 5 min each,
+# unencrypted and encrypted, probes read only after the link closed); where their maxima exceed
+# the 7.80 figures the defaults are now theirs. Closes seen there: last TX 63.4 us, abort 36.4 us;
+# the close budget still keeps the QEMU figure.
 
 config EFR32_RADIO_WCET_RX_WINDOW_LAUNCH_NS
 	int "RX launch budget, held (a Peripheral's receive window) (ns)"
 	depends on BT_PERIPHERAL
 	default 69600 if EFR32_RADIO_TIMING_QEMU
-	default 14000
+	default 18900
 	help
 	  Longest run of a held RX launch, its SWRXEN hold included: silicon
-	  14.0 us, QEMU 69.6 us.
+	  18.9 us (a held connection, 7.84; 14.0 us in 7.80), QEMU 69.6 us.
 
 config EFR32_RADIO_WCET_CONN_COMPLETION_TX_RX_NS
 	int "Completion budget, connection event: TX followed by RX (ns)"
 	default 125300 if EFR32_RADIO_TIMING_QEMU
-	default 143700
+	default 179200
 	help
-	  lll_conn_isr_tx after a packet answered in turn: silicon 143.7 us,
+	  lll_conn_isr_tx after a packet answered in turn: silicon 179.2 us
+	  (a held 5-minute connection, 7.84; 143.7 us in 7.80's short one),
 	  QEMU 125.3 us.
 
 config EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS
@@ -449,10 +463,11 @@ config EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS
 config EFR32_RADIO_CONN_COMPLETION_TO_PENDING_NS
 	int "Connection completion: start to RX->TX PENDING (ns)"
 	default 99200 if EFR32_RADIO_TIMING_QEMU
-	default 95100
+	default 144000
 	help
 	  lll_conn_isr_tx's path to radio_tmr_hcto_configure()'s PENDING
-	  store: silicon 95.1 us, QEMU 99.2 us.
+	  store: silicon 144.0 us (a held connection with staged replies, the
+	  same store; 7.84), QEMU 99.2 us.
 
 config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	int "Connection completion: start to RESPOND (ns)"
@@ -475,14 +490,15 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 config EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS
 	int "Connection receive completion: start to the next stage posted (ns)"
 	default 67700 if EFR32_RADIO_TIMING_QEMU
-	default 46100
+	default 95100
 	help
 	  With EFR32_RADIO_CONN_STAGED: longest path from a connection
 	  receive's completion start (isr_rx(), committing the sequencer's
 	  outcome) to the replies to the next receive staged
 	  (efr32_radio_conn_stage()), unencrypted; an encrypted link adds two
 	  encryptions and one accelerator wait (ll_deadlines.h).
-	  docs/radio-tables.md 7.82: silicon 46.1 us (Peripheral, host
+	  Silicon 95.1 us (a held 5-minute connection, 7.84; replaces 7.82's
+	  provisional 46.1 us from a few events). 7.82: silicon 46.1 us (Peripheral, host
 	  Central, few events: PROVISIONAL until a held silicon connection),
 	  QEMU 67.7 us (Peripheral; Central 33.9 us).
 
@@ -582,19 +598,21 @@ config EFR32_RADIO_WCET_QEMU_RX_DRAIN_NS
 config EFR32_RADIO_COMPLETION_TO_PENDING_NS
 	int "Completion: start to RX->TX PENDING (ns)"
 	default 54400 if EFR32_RADIO_TIMING_QEMU
-	default 12800
+	default 27900
 	help
 	  Longest path from a TX-then-RX completion's start to the store that
 	  marks the RX->TX window PENDING (radio_tmr_hcto_configure()):
-	  silicon 12.8 us, QEMU 54.4 us.
+	  silicon 27.9 us (an ADV_IND in the connection profiles, 7.84; 12.8 us
+	  in the stage-3 advertiser, 7.77), QEMU 54.4 us.
 
 config EFR32_RADIO_COMPLETION_TO_RESPOND_NS
 	int "Completion: start to RESPOND (ns)"
 	default 43200 if EFR32_RADIO_TIMING_QEMU
-	default 24700
+	default 28200
 	help
 	  Longest path from an RX-with-response completion's start to the
-	  RESPOND store (radio_pkt_tx_set()): silicon 24.7 us, QEMU 43.2 us.
+	  RESPOND store (radio_pkt_tx_set()): silicon 28.2 us (7.84; 24.7 us
+	  in 7.77), QEMU 43.2 us.
 
 config EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS
 	int "TX frame end to its completion's post, unblocked (ns)"
