@@ -122,6 +122,22 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "\t\tret = preempt_ticker_start(next, ticker_start_op_cb);\n"
             "preempt timeout restart asserts it was not already scheduled")
 
+  # OpenISA's scanner arms an RX->TX turnaround for every receive window, a passive scanner's
+  # included. On the EFR32 an armed window holds the RAC in RX2TX at each frame's end and gives
+  # the frame's completion the T_IFS response deadline (docs/radio-tables.md 7.77), which a
+  # passive scanner, which never responds, has no reason to meet: on silicon admission found it
+  # unsat at the first received advertisement (7.80). Arm the turnaround only where a response
+  # can follow: an active scanner's SCAN_REQ or an initiator's CONNECT_IND.
+  efr32_radio_patch(lll/lll_scan.c "static void isr_race(void *param);\n"
+            "static void isr_race(void *param);\n\nstatic void efr32_scan_switch(const struct lll_scan *lll)\n{\n\tbool respond = (lll->type != 0U);\n\n#if defined(CONFIG_BT_CENTRAL)\n\trespond = respond || (lll->conn != NULL);\n#endif /* CONFIG_BT_CENTRAL */\n\tif (respond) {\n\t\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY,\n\t\t\t\t\t     PHY_FLAGS_UNUSED);\n\t} else {\n\t\tradio_switch_complete_and_disable();\n\t}\n}\n"
+            "passive scanner: no RX->TX turnaround")
+  efr32_radio_patch(lll/lll_scan.c "\tradio_isr_set(isr_rx, lll);\n\n\t/* setup tIFS switching */\n\tradio_tmr_tifs_set(EVENT_IFS_US);\n\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY, PHY_FLAGS_UNUSED);\n"
+            "\tradio_isr_set(isr_rx, lll);\n\n\t/* setup tIFS switching */\n\tradio_tmr_tifs_set(EVENT_IFS_US);\n\tefr32_scan_switch(lll);\n"
+            "passive scanner: no RX->TX turnaround at prepare")
+  efr32_radio_patch(lll/lll_scan.c "\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY, PHY_FLAGS_UNUSED);\n\n\tnode_rx = ull_pdu_rx_alloc_peek(1);\n\tLL_ASSERT(node_rx);\n\tradio_pkt_rx_set(node_rx->pdu);\n\n#if defined(CONFIG_BT_CTLR_PRIVACY)"
+            "\tefr32_scan_switch(param);\n\n\tnode_rx = ull_pdu_rx_alloc_peek(1);\n\tLL_ASSERT(node_rx);\n\tradio_pkt_rx_set(node_rx->pdu);\n\n#if defined(CONFIG_BT_CTLR_PRIVACY)"
+            "passive scanner: no RX->TX turnaround after a closed exchange")
+
   # Connection events tell the radio HAL what their jobs serve (hal/efr32/radio_conn.h): the
   # connection interval, whose next event the event's closing work serves, and, for a Peripheral,
   # how late its receive window may open by the specification (docs/radio-tables.md 7.79).

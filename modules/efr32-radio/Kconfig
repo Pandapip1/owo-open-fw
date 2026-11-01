@@ -218,12 +218,13 @@ config EFR32_RADIO_SPIN_EXIT_NS
 
 config EFR32_RADIO_RX_LAUNCH_PRE_NS
 	int "RX launch: start to SWRXEN hold (ns)"
-	default 7200
+	default 7200 if EFR32_RADIO_TIMING_QEMU
+	default 10300
 	help
 	  Longest path from a held RX launch's start (a Peripheral's receive
 	  window) to its SWRXEN hold, the instant's mapping included (as the
-	  TX launch's PRE). QEMU 7.2 us (connection pair). Silicon: not
-	  measured; the QEMU figure is PROVISIONAL there.
+	  TX launch's PRE). Silicon 10.3 us (one connection from a host
+	  Central, docs/radio-tables.md 7.80), QEMU 7.2 us (connection pair).
 
 config EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS
 	int "RX launch: instant to SWRXEN (ns)"
@@ -236,14 +237,16 @@ config EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS
 
 config EFR32_RADIO_RX_READY_NS
 	int "SWRXEN to RXSEARCH (ns)"
-	default 3121
+	default 167630 if EFR32_RADIO_TIMING_QEMU
+	default 166760
 	help
 	  RX ready delay: from SWRXEN with the RAC in OFF to the receiver
-	  searching (RXWARM, then RXSEARCH on the sequencer's
-	  acknowledgement). QEMU 3.121 us in all 2003 launches of a
-	  connection pair (RAC state trace). Silicon: not measured (the open
-	  sequencer does not yet tune the receiver in RXWARM); the QEMU
-	  figure is PROVISIONAL there.
+	  searching (RXWARM, whose handler powers and tunes the synthesizer
+	  and the receive chain, then RXSEARCH on its acknowledgement).
+	  Silicon: PRS RACL.ACTIVE rise to RACL.RX rise into TIMER1 at
+	  76.8 MHz, 166.55-166.76 us (n = 899, hardware scanner); QEMU
+	  166.01-167.63 us (434 windows, RAC state trace),
+	  docs/radio-tables.md 7.80. The longest is taken.
 
 config EFR32_RADIO_TX_READY_NS
 	int "TXEN to the first preamble bit (ns)"
@@ -294,21 +297,23 @@ config EFR32_RADIO_WCET_COMPLETION_TX_RX_NS
 config EFR32_RADIO_WCET_COMPLETION_RX_TX_NS
 	int "Completion budget: RX with a response armed (ns)"
 	default 45600 if EFR32_RADIO_TIMING_QEMU
-	default 38900
+	default 52500
 	help
 	  Completion of a frame received in a window armed for a response
-	  (the LLL's isr_rx for a SCAN_REQ): silicon 38.9 us, QEMU 45.6 us.
+	  (the LLL's isr_rx for a SCAN_REQ or a CONNECT_IND): silicon 52.5 us
+	  (an advertiser taking a host's CONNECT_IND, 7.80; 38.9 us with
+	  SCAN_REQs only), QEMU 45.6 us.
 
 config EFR32_RADIO_WCET_COMPLETION_RX_NS
 	int "Completion budget: other RX (ns)"
-	default 129300
+	default 129300 if EFR32_RADIO_TIMING_QEMU
+	default 75700
 	help
 	  Completion of a frame received without a response armed (a
-	  scanner's reports, an advertiser's foreign frames). QEMU 129.3 us
-	  (QEMU-configuration active scanner; 29.7 us hardware
-	  configuration). Not observed on silicon: the hardware scanner
-	  receives nothing there yet and the advertiser saw no foreign frame
-	  in 120 s, so the QEMU figure stands in.
+	  scanner's reports, an advertiser's foreign frames). Silicon 75.7 us
+	  (hardware passive scanner, 90 s, about 2600 reports, 7.80). QEMU
+	  129.3 us (QEMU-configuration active scanner; 29.7 us hardware
+	  configuration).
 
 config EFR32_RADIO_WCET_COMPLETION_TX_NS
 	int "Completion budget: TX not followed by RX (ns)"
@@ -327,56 +332,65 @@ config EFR32_RADIO_WCET_COMPLETION_ABORT_NS
 	  Cleanup callback of a radio_disable() (no-response timeout, scan
 	  window end, event close): silicon 267.5 us, QEMU 91.8 us.
 
-# Connection events (docs/radio-tables.md 7.79) are measured in QEMU only: the hardware-
-# configuration Peripheral (tests/radio-port, prj-connection.conf) against the hardware-
-# configuration Central (tests/radio-rx-port, prj-central.conf), efr32bg22-dual, -icount shift=3,
-# 120 s wall (~1200 s virtual), CONFIG_EFR32_RADIO_TIMING_PROBE maxima over both devices. Silicon
-# has no connection yet, so its defaults are these QEMU figures: PROVISIONAL, to be replaced by
-# the silicon measurements 7.79 lists.
+# Connection events (docs/radio-tables.md 7.79, 7.80). QEMU: the hardware-configuration Peripheral
+# (tests/radio-port, prj-connection.conf) against the hardware-configuration Central
+# (tests/radio-rx-port, prj-central.conf), efr32bg22-dual, -icount shift=3, 120 s wall (~1200 s
+# virtual), CONFIG_EFR32_RADIO_TIMING_PROBE maxima over both devices. Silicon: the explorer kit as
+# Peripheral (tests/radio-port, prj-hardware.conf + GATT test + probes, admission off and misses
+# counted) connected from the host's controller: one connection that ended at its supervision
+# timeout (7.80), so a small sample: those defaults are the longest seen in it, and the close
+# budget keeps the QEMU figure (the silicon close seen, 31.1 us, was not an abort after RX).
 
 config EFR32_RADIO_WCET_RX_WINDOW_LAUNCH_NS
 	int "RX launch budget, held (a Peripheral's receive window) (ns)"
 	depends on BT_PERIPHERAL
-	default 69600
+	default 69600 if EFR32_RADIO_TIMING_QEMU
+	default 14000
 	help
-	  Longest run of a held RX launch, its SWRXEN hold included: QEMU
-	  69.6 us. PROVISIONAL on silicon.
+	  Longest run of a held RX launch, its SWRXEN hold included: silicon
+	  14.0 us, QEMU 69.6 us.
 
 config EFR32_RADIO_WCET_CONN_COMPLETION_TX_RX_NS
 	int "Completion budget, connection event: TX followed by RX (ns)"
-	default 125300
+	default 125300 if EFR32_RADIO_TIMING_QEMU
+	default 143700
 	help
-	  lll_conn_isr_tx after a packet answered in turn: QEMU 125.3 us.
-	  PROVISIONAL on silicon.
+	  lll_conn_isr_tx after a packet answered in turn: silicon 143.7 us,
+	  QEMU 125.3 us.
 
 config EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS
 	int "Completion budget, connection event: RX with a response armed (ns)"
-	default 136600
+	default 136600 if EFR32_RADIO_TIMING_QEMU
+	default 109300
 	help
-	  lll_conn_isr_rx: QEMU 136.6 us (Peripheral; Central 134.6 us).
-	  PROVISIONAL on silicon.
+	  lll_conn_isr_rx: silicon 109.3 us (Peripheral), QEMU 136.6 us
+	  (Peripheral; Central 134.6 us).
 
 config EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS
 	int "Completion budget, connection event: close (ns)"
 	default 241700
 	help
 	  isr_done and lll_done after the last TX (53.1 us) or an abort
-	  (241.7 us Peripheral, 217.1 us Central): QEMU 241.7 us.
-	  PROVISIONAL on silicon.
+	  (241.7 us Peripheral, 217.1 us Central): QEMU 241.7 us. Silicon
+	  saw 31.1 us (no abort after a receive in its one connection); the
+	  QEMU figure stands for both until one is measured.
 
 config EFR32_RADIO_CONN_COMPLETION_TO_PENDING_NS
 	int "Connection completion: start to RX->TX PENDING (ns)"
-	default 99200
+	default 99200 if EFR32_RADIO_TIMING_QEMU
+	default 95100
 	help
 	  lll_conn_isr_tx's path to radio_tmr_hcto_configure()'s PENDING
-	  store: QEMU 99.2 us. PROVISIONAL on silicon.
+	  store: silicon 95.1 us, QEMU 99.2 us.
 
 config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	int "Connection completion: start to RESPOND (ns)"
-	default 133000
+	default 133000 if EFR32_RADIO_TIMING_QEMU
+	default 103200
 	help
-	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store: QEMU
-	  133.0 us (Peripheral; Central 121.2 us). PROVISIONAL on silicon.
+	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store:
+	  silicon 103.2 us (Peripheral), QEMU 133.0 us (Peripheral; Central
+	  121.2 us).
 
 config EFR32_RADIO_WCET_LLL_NS
 	int "LLL context budget (ns)"

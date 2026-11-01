@@ -55,6 +55,9 @@ target_args=(
   -f target/silabs/xg21.cfg
   -f "$helpers"
   -c 'adapter speed 1900'
+  # The flash sessions need no server: a port another tool holds (QEMU's or another
+  # OpenOCD's gdbstub on 3333) otherwise fails the session after the erase.
+  -c 'gdb port disabled' -c 'tcl port disabled' -c 'telnet port disabled'
 )
 
 # Keep preflight in its own OpenOCD process.  If it fails, no erase command has
