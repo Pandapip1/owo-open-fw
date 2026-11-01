@@ -15,8 +15,8 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/watchdog.h>
 #include <zephyr/timing/timing.h>
+#include <em_device.h>
 
 int owo_gpio_configure(const void *g, int active)
 {
@@ -389,6 +389,172 @@ const uint32_t *owo_suit_switch_routes(void)
 	return switch_routes;
 }
 
+/*
+ * ---- output safe state from the watchdog warning interrupt ----
+ *
+ * owo_suit_force_safe_from_isr() runs in the WDOG0 warning interrupt (src/watchdog.c): zero
+ * latency, so a thread or driver may have been stopped anywhere, even inside a bus transfer or
+ * an irq_lock() section. It makes plain register writes only (no driver, no kernel call), in
+ * the order of Stimulator::safe_off, and never returns to the code it interrupted, so nothing
+ * it leaves behind is ever used again: the watchdog reset follows.
+ *  1. Bridge (GPIO DOUT through the SET/CLR aliases): both high sides off first, then both low
+ *     sides on, the reset safe-off's levels: break before make, never a same-leg pair on.
+ *  2. Boost PWM: compare buffer 0 (duty 0 from the next period, as pwm_set with pulse 0).
+ *  3. Expander: one write of all its pins: supply enables inactive, the DAC's /CLR asserted
+ *     (amplitude to zero scale), every other pin 1, the PCF857x's input/weak-high state, which
+ *     is what the driver leaves on every pin it does not drive (the product drives none).
+ *     The interrupted thread may own the bus: the transfer is aborted first. Every wait ends
+ *     with the reset at the latest.
+ */
+#define BRIDGE_N DT_PROP_LEN(SUIT, bridge_gpios)
+/* Binding order: high side A, high side B, low side A, low side B (owo_suit_reset_safe_off). */
+#define BRIDGE_HIGH_SIDES 2
+BUILD_ASSERT(BRIDGE_N == 2 * BRIDGE_HIGH_SIDES, "an H-bridge has two high and two low sides");
+
+struct raw_pin {
+	uintptr_t port; /* GPIO_PORT_TypeDef of the pin's port */
+	uint8_t pin;
+	uint8_t active_low;
+};
+
+#define BRIDGE_RAW(i, _)                                                                           \
+	{                                                                                          \
+		.port = DT_REG_ADDR(DT_GPIO_CTLR_BY_IDX(SUIT, bridge_gpios, i)),                   \
+		.pin = DT_GPIO_PIN_BY_IDX(SUIT, bridge_gpios, i),                                  \
+		.active_low = (DT_GPIO_FLAGS_BY_IDX(SUIT, bridge_gpios, i) & GPIO_ACTIVE_LOW) != 0, \
+	}
+static const struct raw_pin bridge_raw[BRIDGE_N] = {LISTIFY(BRIDGE_N, BRIDGE_RAW, (,), _)};
+
+/* Drive a pin to its logical @active level through the port's SET or CLR alias. */
+static inline void raw_pin_drive(const struct raw_pin *p, bool active)
+{
+	uintptr_t dout = (uintptr_t)&((GPIO_PORT_TypeDef *)p->port)->DOUT;
+
+	dout += (active != (bool)p->active_low) ? PER_REG_BLOCK_SET_OFFSET : PER_REG_BLOCK_CLR_OFFSET;
+	*(volatile uint32_t *)dout = BIT(p->pin);
+}
+
+static inline bool raw_pin_active(const struct raw_pin *p)
+{
+	return (((((GPIO_PORT_TypeDef *)p->port)->DOUT) >> p->pin) & 1U) != p->active_low;
+}
+
+/*
+ * True while no high side of the bridge is driven on: no current path from the rail through
+ * the pads. Read from the output latches (DOUT), which is what the pins drive.
+ */
+int owo_suit_output_quiescent(void)
+{
+	for (size_t i = 0; i < BRIDGE_HIGH_SIDES; ++i) {
+		if (raw_pin_active(&bridge_raw[i])) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static void bridge_safe_raw(void)
+{
+	for (size_t i = 0; i < BRIDGE_N; ++i) {
+		raw_pin_drive(&bridge_raw[i], i >= BRIDGE_HIGH_SIDES);
+	}
+}
+
+#define BOOST_PWM_NODE DT_PWMS_CTLR(SUIT)
+#if DT_NODE_HAS_COMPAT(BOOST_PWM_NODE, silabs_timer_pwm)
+BUILD_ASSERT((DT_PWMS_FLAGS(SUIT) & PWM_POLARITY_MASK) == PWM_POLARITY_NORMAL,
+	     "compare value 0 is off only for a normal-polarity PWM");
+static void boost_safe_raw(void)
+{
+	TIMER_TypeDef *const timer = (TIMER_TypeDef *)DT_REG_ADDR(DT_PARENT(BOOST_PWM_NODE));
+
+	/* OCB is a SYNC register: written only while the timer is enabled (RM SS4.2.4.4.3). */
+	if (timer->EN & TIMER_EN_EN) {
+		timer->CC[DT_PWMS_CHANNEL(SUIT)].OCB = 0;
+	}
+}
+#else
+#error "owo_suit_force_safe_from_isr: no raw safe-off for this boost PWM controller"
+#endif
+
+#define SUPPLY_NODE(i) DT_PHANDLE_BY_IDX(SUIT, supplies, i)
+#define EXPANDER DT_GPIO_CTLR(SUPPLY_NODE(0), enable_gpios)
+#define SUPPLY_ON_EXPANDER(i, _) DT_SAME_NODE(DT_GPIO_CTLR(SUPPLY_NODE(i), enable_gpios), EXPANDER)
+BUILD_ASSERT(LISTIFY(DT_PROP_LEN(SUIT, supplies), SUPPLY_ON_EXPANDER, (&&), _),
+	     "every supply enable must be on the one expander");
+BUILD_ASSERT(DT_NODE_HAS_COMPAT(EXPANDER, nxp_pcf857x), "raw write is a PCF857x port write");
+BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_BUS(EXPANDER), silabs_i2c), "raw write is a Silabs I2C");
+/* A PCF857x write is its ports' bytes, port 0 first (NXP PCF8575 datasheet, 8.3.1). */
+#define EXPANDER_PORT_BITS 8
+#define EXPANDER_PORTS (DT_PROP(EXPANDER, ngpios) / EXPANDER_PORT_BITS)
+#define EXPANDER_PINS BIT_MASK(DT_PROP(EXPANDER, ngpios))
+
+#define SUPPLY_PIN(i) BIT(DT_GPIO_PIN(SUPPLY_NODE(i), enable_gpios))
+#define SUPPLY_LOW_ACTIVE(i) (DT_GPIO_FLAGS(SUPPLY_NODE(i), enable_gpios) & GPIO_ACTIVE_LOW)
+#define SUPPLY_MASK(i, _) SUPPLY_PIN(i)
+/* An enable is off at its inactive level: high only if it is active low. */
+#define SUPPLY_OFF_HIGH(i, _) (SUPPLY_LOW_ACTIVE(i) ? SUPPLY_PIN(i) : 0)
+#define SUPPLIES_MASK (LISTIFY(DT_PROP_LEN(SUIT, supplies), SUPPLY_MASK, (|), _))
+#define SUPPLIES_OFF (LISTIFY(DT_PROP_LEN(SUIT, supplies), SUPPLY_OFF_HIGH, (|), _))
+
+#define DAC_NODE DT_IO_CHANNELS_CTLR_BY_NAME(SUIT, amplitude)
+#if DT_NODE_HAS_PROP(DAC_NODE, reset_gpios)
+BUILD_ASSERT(DT_SAME_NODE(DT_GPIO_CTLR(DAC_NODE, reset_gpios), EXPANDER),
+	     "the DAC's /CLR is expected on the supply expander");
+#define DAC_CLR_PIN BIT(DT_GPIO_PIN(DAC_NODE, reset_gpios))
+/* Asserted at its active level: high only if it is active high. */
+#define DAC_CLR_ASSERTED                                                                           \
+	((DT_GPIO_FLAGS(DAC_NODE, reset_gpios) & GPIO_ACTIVE_LOW) ? 0 : DAC_CLR_PIN)
+#else
+#define DAC_CLR_PIN 0
+#define DAC_CLR_ASSERTED 0
+#endif
+
+#define EXPANDER_SAFE                                                                              \
+	((EXPANDER_PINS & ~(SUPPLIES_MASK | DAC_CLR_PIN)) | SUPPLIES_OFF | DAC_CLR_ASSERTED)
+/* 7-bit address and R/W = 0 (write) in the address byte (I2C-bus specification, 3.1.10). */
+#define I2C_ADDRESS_BYTE_WRITE(addr) ((uint32_t)(addr) << 1)
+
+/* Wait for the follower's acknowledge of the byte on the bus. False on a NACK. */
+static bool i2c_raw_acked(I2C_TypeDef *i2c)
+{
+	uint32_t f;
+
+	do {
+		f = i2c->IF & (I2C_IF_ACK | I2C_IF_NACK);
+	} while (f == 0);
+	i2c->IF_CLR = f;
+	return f == I2C_IF_ACK;
+}
+
+static void expander_safe_raw(void)
+{
+	I2C_TypeDef *const i2c = (I2C_TypeDef *)DT_REG_ADDR(DT_BUS(EXPANDER));
+	uint32_t pins = EXPANDER_SAFE;
+
+	if (!(i2c->EN & I2C_EN_EN)) {
+		return; /* never brought up: the expander still has its reset state */
+	}
+	/* End whatever the interrupted thread had on the bus (RM SS23.3.8). */
+	i2c->CMD = I2C_CMD_ABORT | I2C_CMD_CLEARTX | I2C_CMD_CLEARPC;
+	i2c->IF_CLR = _I2C_IF_MASK;
+	i2c->TXDATA = I2C_ADDRESS_BYTE_WRITE(DT_REG_ADDR(EXPANDER));
+	i2c->CMD = I2C_CMD_START;
+	for (size_t i = 0; i < EXPANDER_PORTS && i2c_raw_acked(i2c); ++i) {
+		i2c->TXDATA = pins & BIT_MASK(EXPANDER_PORT_BITS);
+		pins >>= EXPANDER_PORT_BITS;
+	}
+	(void)i2c_raw_acked(i2c);
+	i2c->CMD = I2C_CMD_STOP;
+}
+
+void owo_suit_force_safe_from_isr(void)
+{
+	bridge_safe_raw();
+	boost_safe_raw();
+	expander_safe_raw();
+}
+
 const void *owo_suit_handle(int kind)
 {
 	const void *h = NULL;
@@ -436,75 +602,14 @@ const uint32_t *owo_suit_switch_routes(void)
 	return NULL;
 }
 
-#endif
-
-/*
- * Hardware watchdog (devicetree alias "watchdog0"). Started once with a reset-the-SoC
- * timeout; paused in EM2/EM3 (WDT_OPT_PAUSE_IN_SLEEP) so long sleeps are safe, but it keeps
- * counting while the CPU idles in EM1, so the caller must feed it at least every timeout.
- */
-#if DT_HAS_ALIAS(watchdog0) && DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(watchdog0))
-static const struct device *const wdt_dev = DEVICE_DT_GET(DT_ALIAS(watchdog0));
-static int wdt_channel = -1;
-
-int owo_wdt_start(uint32_t timeout_ms)
+/* No output stage: nothing to put in a safe state, nothing that can be energised. */
+void owo_suit_force_safe_from_isr(void)
 {
-	struct wdt_timeout_cfg cfg = {
-		.window = {.min = 0, .max = timeout_ms},
-		.flags = WDT_FLAG_RESET_SOC,
-	};
-	int ch;
-
-	if (!device_is_ready(wdt_dev)) {
-		return -ENODEV;
-	}
-	ch = wdt_install_timeout(wdt_dev, &cfg);
-	if (ch < 0) {
-		return ch;
-	}
-	wdt_channel = ch;
-	return wdt_setup(wdt_dev, WDT_OPT_PAUSE_IN_SLEEP);
 }
 
-int owo_wdt_feed(void)
+int owo_suit_output_quiescent(void)
 {
-	return wdt_channel < 0 ? -ENODEV : wdt_feed(wdt_dev, wdt_channel);
+	return 1;
 }
 
-/*
- * The Gecko watchdog is not locked by this application, so Zephyr's driver
- * can stop it and uninstall its one timeout.  Keep the channel bookkeeping
- * in step with that driver state: a later monitoring interval may install a
- * fresh timeout and re-enable the peripheral.
- */
-int owo_wdt_stop(void)
-{
-	int err;
-
-	if (wdt_channel < 0) {
-		return 0;
-	}
-	err = wdt_disable(wdt_dev);
-	/* The watchdog may already be off after a reset-adjacent transition. */
-	if (err == 0 || err == -EFAULT) {
-		wdt_channel = -1;
-		return 0;
-	}
-	return err;
-}
-#else
-int owo_wdt_start(uint32_t timeout_ms)
-{
-	return -ENODEV;
-}
-
-int owo_wdt_feed(void)
-{
-	return -ENODEV;
-}
-
-int owo_wdt_stop(void)
-{
-	return -ENODEV;
-}
 #endif

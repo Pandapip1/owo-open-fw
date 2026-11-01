@@ -25,13 +25,19 @@ recipes and raw stock recordings are kept outside this repository, next to the s
    [E, fixed here]. Stock maps wire channel 0 to pad 7 (its wire-to-slot map, then the switch
    table); the open firmware used the table in wire order and drove pad 8. The overlay's
    `switch-routes` are now in the stock slot order; both firmwares then select pad 7.
-4. **A stuck bridge lasts until the watchdog, in both firmwares** [E]. Open firmware: with the
-   pump thread stopped right after it closed the bridge (interrupts running), the bridge stayed
-   closed with current flowing for **2047 ms**, until the 2 s watchdog reset; its sense-freshness,
-   overrun and interrupt-window interlocks all run in that same thread. Stock: with its
-   stimulation interrupt stopped after closing the bridge, 62.3 ms, until its watchdog (PERSEL 8
-   on the 32.768 kHz LFRCO, 62.5 ms). At 8 mA (the test level in the model) 62 ms is about
-   0.5 mC of one-polarity charge, 2 s about 16 mC; a normal phase is under 1 uC.
+4. **A stuck bridge lasts until the watchdog, in both firmwares** [E]. Open firmware, before
+   the short watchdog: with the pump thread stopped right after it closed the bridge (interrupts
+   running), the bridge stayed closed with current flowing for **2047 ms**, until the 2 s
+   watchdog reset; its sense-freshness, overrun and interrupt-window interlocks all run in that
+   same thread. Stock: with its stimulation interrupt stopped after closing the bridge, 62.3 ms,
+   until its watchdog (PERSEL 8 on the 32.768 kHz LFRCO, 62.5 ms). At 8 mA (the test level in
+   the model) 62 ms is about 0.5 mC of one-polarity charge, 2 s about 16 mC; a normal phase is
+   under 1 uC. **Now** (`docs/watchdog.md`): the open firmware's watchdog is fixed at 62.5 ms and
+   locked, and its warning at 46.9 ms after the last feed forces the output safe from a
+   zero-latency interrupt with raw register writes. The same hang ends after 34.9 ms of live
+   bridge, at the warning (bridge shorted-off, DAC 0, supplies off, boost stopped), also inside
+   `irq_lock()`; with interrupts masked by PRIMASK the warning cannot run and the reset ends it
+   at 62.5 ms after the last feed, as in stock.
 5. **Stock keeps stimulating for 1.47 s after Stop** [E]: 72 live pulses after the Stop write,
    consistent with its stop state waiting for its 10 Hz counter to reach 15 [F weak].
 6. **Stock leaves the high-voltage rail up and keeps driving an open electrode** [E]: with both
@@ -160,7 +166,7 @@ timing (icount shift 3), not measured silicon timing.
 | Switch read-back mismatch | stops at once (no live pulse) | not reached |
 | DAC dead (ignores frames) | DAC stuck at the value it had (0 here) | not reached |
 | Expander NACK / SDA stuck | stimulates on (I2C errors never stop it) | not reached |
-| Hang, main loop (interrupts alive) | stimulation continues until the watchdog reset 63.6 ms later | WDT reset 1976 ms after the hang (output already off) |
+| Hang, main loop (interrupts alive) | stimulation continues until the watchdog reset 63.6 ms later | before: WDT reset 1976 ms after the hang (output already off; that run did not in fact mask interrupts, see below). Now (pump spinning between pulses, supply on, t = 4.04 s): supplies off and boost stopped at the warning, 46.9 ms after the last feed; reset at 62.5 ms |
 | Hang, inside the pulse with the bridge closed | bridge held 62.4 ms until the watchdog reset | early-hang row |
 | Battery 6.5 V then 5.0 V | stimulates on to the end of the run (no shutdown within 2.5 s) | no battery monitoring |
 | Power button (expander P0 low) | stops after 78 ms | not reached |
@@ -171,17 +177,24 @@ Inside the open firmware's active window (4.05-4.15 s in the model), both firmwa
 
 | Event | stock | open firmware |
 |---|---|---|
-| Hang inside a pulse with the bridge closed (t = 4.04 s; stock: the stimulation interrupt stops after the bridge routine closed it, interrupts masked; open: the pump thread spins right after closing the bridge, interrupts running) | bridge positive for 62.3 ms, until the watchdog reset | **bridge positive, current flowing, for 2047 ms**, until the 2 s watchdog reset; about 0.8 mC of one-polarity charge at the soft-start level of 1 (at the hard cap of level 40 it would be about 33 mC) |
+| Hang inside a pulse with the bridge closed (t = 4.04 s; stock: the stimulation interrupt stops after the bridge routine closed it, interrupts masked; open: the pump thread spins right after closing the bridge, interrupts running) | bridge positive for 62.3 ms, until the watchdog reset | before: **bridge positive, current flowing, for 2047 ms**, until the 2 s watchdog reset (about 0.8 mC at the soft-start level of 1, about 33 mC at the hard cap of level 40). Now: bridge positive for 34.9 ms, until the watchdog warning 46.9 ms after the last feed puts it shorted-off with DAC 0, expander 0xFFD3 (supplies off, DAC /CLR) and the boost stopped; reset 15.6 ms later. Inside `irq_lock()`: the same. With PRIMASK set: bridge positive 50.5 ms, until the reset 62.5 ms after the last feed |
 | Stop (t = 4.10 s) | live pulses for another 1.47 s | no further pulse; supply off 42 ms after the Stop |
 | After the reset | pins float until the reboot drives them (a shoot-through with `gate-float-on`) | same; the external DAC kept its code and the expander kept the boost supply on for 13 ms, until the rebooted firmware's safe-off |
 | Radio safe shutdown (open firmware) | n/a | not run: under LTO the deadline-miss handler has no callable symbol; the boot-time miss above runs the same path |
 
-**The open firmware's bound on a stuck bridge is its watchdog period** (2 s, `docs/watchdog.md`):
-the sense-freshness check, the overrun check and the bounded interrupt-off window all run in
-the pump thread, so a pump that stops with the bridge closed keeps it closed until the reset.
-Stock bounds the same failure at 62.5 ms only because its watchdog is that short. Before
-hardware: a bridge cut-off that does not depend on the pump (for example a hardware timer
-that opens the bridge at the end of the phase, or a much shorter watchdog while armed).
+**The open firmware's bound on a stuck bridge is its watchdog** (`docs/watchdog.md`): the
+sense-freshness check, the overrun check and the bounded interrupt-off window all run in the
+pump thread, so a pump that stops with the bridge closed keeps it closed until the watchdog.
+That was 2 s; it is now the warning, at most 46.9 ms after the last feed, whenever a
+zero-latency interrupt can run, and the reset, at most 62.5 ms after it, when none can
+(PRIMASK, fault handler, lockup, debug halt). Stock bounds it at 62.5 ms by its reset only.
+A per-pulse hardware cut-off was set aside because of output shaping.
+
+These hang runs used a diagnostic image with `CONFIG_PM=n` (with PM the kernel stops waking
+the pump in the model, `docs/watchdog.md` "Blockers"). The adapter's earlier `irqs-off` hang
+wrote PRIMASK through gdb, which reaches the Non-secure bank while the firmware runs Secure:
+those runs never masked interrupts. The masked hangs now execute `cpsid i` or
+`msr basepri` themselves (`adapter_ours.py`).
 
 The full per-run table (pulses before and after, widths, current, charge, end state) is
 generated by `stim_report.py`; the recordings and the table are kept with the stock dump.

@@ -32,8 +32,8 @@ pub(crate) struct State {
     engine: Engine,
     cfg: Config,
     out: hal::Output,
-    /// Held exactly while the stimulation supervisor is armed.  Its Drop
-    /// implementation is the sole normal path that stops the hardware WDT.
+    /// Held exactly while the stimulation supervisor is armed: its safety predicate must
+    /// hold for every watchdog feed (src/wdt.rs).
     stim_watchdog: Option<wdt::Lease>,
     /// Last-written values, returned on read (the stock firmware keeps them in RAM).
     pub v_widths: [u8; proto::WIDTHS_LEN],
@@ -92,7 +92,7 @@ fn stim_watchdog_safe() -> bool {
     !resetting()
 }
 
-fn now_us() -> u64 {
+pub(crate) fn now_us() -> u64 {
     // SAFETY: plain kernel query.
     let ticks = unsafe { zephyr::raw::k_uptime_ticks() } as u64;
     ticks * 1_000_000 / SYS_FREQUENCY as u64
@@ -110,8 +110,7 @@ pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
     }
     let f = Frame::parse(buf)?;
     let mut s = STATE.lock().unwrap();
-    // Do not arm an electrically live session unless its reset-bounded
-    // monitor lease exists first.  Dry-run builds deliberately have no WDT.
+    // Do not arm an electrically live session unless its feed predicate is registered first.
     #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
     if s.stim_watchdog.is_none() {
         s.stim_watchdog = Some(wdt::Lease::acquire(Some(stim_watchdog_safe)).map_err(|_| {
@@ -192,8 +191,8 @@ pub(crate) fn stop_all() {
 /// components powered while the MCU is only just becoming able to control them.  `init` puts the
 /// backend's POST/forced initialization puts its pins and peripherals in their known state, and
 /// the immediately following `all_off` runs the normal, ordered bridge/DAC/routing/supply
-/// shutdown as well. Keep this before BLE startup (and before the watchdog is armed) so no
-/// safety-critical service can accept work first.
+/// shutdown as well. Keep this before BLE startup so no safety-critical service can accept
+/// work first. The watchdog has run since PRE_KERNEL_2 (src/watchdog.c).
 fn early_boot_baseline() -> Result<(), ()> {
     let mut s = STATE.lock().unwrap();
     s.engine.stop();
@@ -231,28 +230,29 @@ extern "C" fn rust_main() {
          * reconstructed drivers also acknowledged their shutdown state.
          */
         error!("output shutdown baseline unverified; bring-up halted");
+        /*
+         * Keep feeding while the output stays quiescent: a reset loop would pass through the
+         * reset window (pins floating) again and again. A feed refused here means the bridge
+         * is on, so stop feeding and let the warning interrupt and the reset take over.
+         */
+        while wdt::sleep_fed(1_000) {}
         loop {
-            zephyr::time::sleep(Duration::millis_at_least(1_000));
+            zephyr::time::sleep(Forever);
         }
     }
+    // Boot checkpoint: the baseline pass just left the output safe.
+    let _ = wdt::feed();
     if let Err(e) = ble::start() {
         error!("BLE start failed: {}", e);
         return;
     }
+    let _ = wdt::feed();
     info!("pairing passkey for serial '{}': {:06}", SERIAL, passkey());
 
-    // Pump: tickless. Sleep exactly until the engine's next wake-up; with nothing
-    // queued, sleep until a GATT write gives the semaphore. Active stimulation
-    // additionally caps that sleep at the watchdog feed interval (src/wdt.rs).
+    // Pump: tickless. Sleep until the engine's next wake-up or a GATT write gives the
+    // semaphore, never longer than the watchdog allows (src/wdt.rs). It is the output-safety
+    // supervisor, and the only thread that feeds the watchdog: after each supervision pass.
     loop {
-        if !wdt::feed() {
-            // A monitored resource whose predicate fails is failed, not
-            // rebooted. Stop every output now; its lifecycle remains failed
-            // until an explicit, separately-authorized recovery path exists.
-            #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
-            owo_suit::revoke();
-            stop_all();
-        }
         ota::reboot_if_requested();
         let (wake, poll, watchdog) = {
             let mut s = STATE.lock().unwrap();
@@ -273,9 +273,18 @@ extern "C" fn rust_main() {
                 .flatten();
             (wake, s.out.poll_interval_us(), watchdog)
         };
-        // The supervisor has already completed its ordered safe-off path.
-        // Releasing this resource can now turn off the watchdog.
+        // The supervisor has already completed its ordered safe-off path; its feed predicate
+        // goes with the session.
         drop(watchdog);
+        // The supervision pass is complete: feed if the feed condition holds (src/wdt.rs).
+        if !wdt::feed() {
+            // A monitored resource whose predicate fails is failed, not rebooted: stop every
+            // output now; its lifecycle remains failed until an explicit, separately
+            // authorized recovery. The watchdog is the containment if this does not complete.
+            #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+            owo_suit::revoke();
+            stop_all();
+        }
         // Sleep until the next pulse, but never longer than the supervision interval while
         // the output is armed (the dead-man must be able to fire without any BLE traffic).
         let until = match (wake, poll) {
@@ -284,7 +293,7 @@ extern "C" fn rust_main() {
             (None, Some(p)) => Some(now_us() + p),
             (None, None) => None,
         };
-        // The watchdog counts while the CPU idles in EM1, so never sleep past its feed interval.
+        // The watchdog counts in every sleep mode: never sleep past the next feed.
         let until = wdt::cap_sleep(until, now_us());
         match until {
             None => {

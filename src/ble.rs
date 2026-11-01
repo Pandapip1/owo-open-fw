@@ -583,7 +583,7 @@ unsafe extern "C" fn disconnected(_conn: *mut bt_conn, reason: u8) {
 }
 
 /// Stop Bluetooth before an intentional reset. Called from the pump, never a
-/// GATT callback. A failure is logged and the still-running watchdog bounds a
+/// GATT callback. A failure is logged; the watchdog (never stopped) bounds a
 /// controller/transport teardown that does not return.
 pub(crate) fn shutdown() {
     // SAFETY: the pump calls this only after synchronous `bt_enable` succeeded.

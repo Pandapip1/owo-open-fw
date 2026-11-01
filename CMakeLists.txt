@@ -36,6 +36,10 @@ if(CONFIG_OWO_GECKO_APP_PROPERTIES)
   target_sources(app PRIVATE src/gecko_app_properties.c)
 endif()
 
+if(CONFIG_OWO_WATCHDOG)
+  target_sources(app PRIVATE src/watchdog.c)
+endif()
+
 if(CONFIG_OWO_SIM_INJECT)
   message(WARNING "CONFIG_OWO_SIM_INJECT: test-only simulation mailbox; not for hardware")
   target_sources(app PRIVATE src/sim_inject.c)
