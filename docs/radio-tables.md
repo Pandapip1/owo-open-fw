@@ -7974,3 +7974,96 @@ occupied bandwidth, harmonics and spurious emissions at any carrier, and receive
 the Bluetooth channels: no RF instrument was used. The SDR captures that would settle these are
 in `docs/amateur-radio.md` section 8. Lock in transmit was checked at three carriers, not across
 the band.
+
+### 7.86 Thread stacks from the product's own watermarks; which threads can push an FP frame
+
+Tags as in 7.79. Question: the product (`owo_suit -DOWO_HW=ON`) was 52 B over its 31 000 B RAM
+budget (`scripts/check-hardware-ram.sh`) after 7.84 raised the launch stacks to 536 B, while the
+ULL worker (640 B) was below its silicon peak (648 B, 7.84). Tooling: `scratch/ram2/` of the
+worktree (`dual.sh`, `scen.sh`, `ramdump.py`, `maxtab.py`, `fpgraph.py`, `addrtaken.py`).
+
+**Which threads execute FP instructions [F, from the image].** Build flags: `-mcpu=cortex-m33
+-mfloat-abi=hard -mfpu=fpv5-sp-d16` (C, every one of 414 units) and `thumbv8m.main-none-eabihf`
+(Rust); `FPU_SHARING=y`, so `z_prep_c` sets `FPCCR = ASPEN | LSPEN` (automatic, lazy state
+preservation): CONTROL.FPCA is set by the first FP instruction a thread executes, an interrupt
+then reserves the 104-byte extended frame on its stack, and otherwise pushes the 32-byte basic
+frame (+ up to 4 B of alignment). New threads start with EXC_RETURN 0xBC (basic frame) and
+`z_arm_pendsv` clears FPCA on every switch-in. Disassembly of the linked LTO image
+(`arm-none-eabi-objdump -d`, every mnemonic starting with V): FP instructions occur in five
+functions only:
+
+| function | FP instructions | reached from |
+|---|---|---|
+| `start_read` (IADC driver) | 44 (float gain/offset arithmetic) | `iadc_read`/`iadc_read_async` only, whose addresses are stored only in `iadc_api`; the only ADC API call in the compiled sources is `owo_adc_start` (`read_async`), called directly from `Stimulator::fire`/`phase`/`convert`/`battery_check` -> `rust_main` -> `bg_thread_main`: the main thread |
+| `k_clock_event_provider_register` | 2 (`vldr`/`vstr d7`: a 64-bit copy) | `burtc_clock_event_init` (init level), `counter_silabs_timer_init` (device init): boot |
+| `z_prep_c` | 2 (`vmsr fpscr`) | reset |
+| `z_arm_pendsv` | 3 (the FP context switch itself) | exception handler, MSP |
+| `p4wq_loop` | 2 (`vldr`/`vstr d8`) | thread entry for P4WQ pools; the pool list is empty (`_k_p4wq_initparam_list_start == _end`), never runs |
+
+From the radio's thread entries (`efr32_radio_tx_job`, `_rx_job`, `_completion_job`,
+`ll_context_thread`) and `idle`, `work_queue_main`, `recv_thread`, `prio_recv_thread`, the direct
+call graph reaches no FP function; their only indirect calls are the scheduler clock service's
+backend calls (`burtc_backend`, `counter_silabs_timer_ce_backend`, six functions each), which
+reach none either. So only the main thread (the output supervisor's conversions) can carry an FP
+frame; every other thread's interrupt reserve is a basic frame, 36 B. The 104-byte reserve the
+radio Kconfig help assumed for the launch jobs and LL threads does not arise.
+
+**Product watermarks [Q].** QEMU (`build/qemu-new`, vendor/qemu 7813574), INIT_STACKS high-water
+marks (the stack buffer minus its untouched 0xAA run from the low end; the sentinel word counts as
+used). (a) Dual machine: the product (`-DOWO_HW=ON`, `sim/product-qemu.conf`, suit board model,
+radio stacks enlarged so the run measures depth) against the Zephyr Central
+(`prj-central-product.conf` + `prj-central-product-stim.conf`): LE Secure Connections passkey
+pairing to level 4, then 870 rounds of encrypted GATT write/read-back and 87 stimulation cycles
+over the link (widths, Start, a 5 s frame, a bad-checksum frame answered by a notification, Stop
+every second cycle; notifications enabled), no failure. (b) Single machine, `CONFIG_OWO_SIM_INJECT`:
+the 23 scenarios of `sim/scripts/make_scenarios.py` that need no gdb inferior call (all but the
+radio shutdowns: a gdb inferior call runs on whatever stack is current), with the RAM also taken
+at the reset entry after the watchdog resets.
+
+**Silicon [F].** BGM220 EK (J-Link OB 000440200548), the radio-port pairing profile of 7.84
+(`prj-hardware.conf`, `prj-connection.conf`, `prj-pairing.conf`, the 7.84 safety policy) with
+`INIT_STACKS`, once as in 7.84 (logging on, "log") and once with `CONFIG_LOG=n` as the product
+("no log"); the laptop (`bluetoothctl`) paired with the passkey and ran 118 / 117 GATT
+write/read-back rounds over the encrypted link; every stack read over the debugger afterwards
+(`scratch/ram2/sil.sh`), the bond removed by the device's own address. Not the product image (its
+board and code partition are the suit's), so its figures are the same code built into a
+different binary.
+
+| thread | before | QEMU (a) | QEMU (b) | silicon log / no log | 7.84 | margin | after |
+|---|---|---|---|---|---|---|---|
+| main | 2048 | 1384 | 1420 | 944 / 636 (test app) | - | 108 (FP) | 2048 |
+| ISR | 1024 | 516 | 536 | 540 / 540 | - | 36 | 1024 |
+| idle | 512 | 348 | 292 | 48 / 48 (no PM) | - | 36 | 512 |
+| system work queue | 1024 | 384 | 708 (mailbox, test only) | 420 / 420 | - | 36 | 1024 |
+| BT RX | 1200 | 828 | 212 | 988 / 728 | - | 36 | 1200 |
+| BT long work queue | 1400 | 732 | 684 | 976 / 968 | - | 36 | **1008** |
+| BT TX processor | 1024 | 416 | 428 | 432 / 432 | - | 36 | 1024 |
+| controller RX | 896 | 396 | 212 | 408 / 408 | - | 36 | 896 |
+| controller priority RX | 640 | 380 | 196 | 416 / 416 | - | 36 | 640 |
+| LLL | 768 | 656 | 452 | 748 / 748 | 748 | 36 | **784** |
+| ULL worker | 640 | 532 | 420 | 648 / 648 | 648 | 36 | **688** |
+| completion job | 768 | 604 | 340 | 636 / 636 | 664 | 36 | 768 |
+| TX launch | 536 | 260 | 260 | 428 / 440 | 428 | 36 | **480** |
+| RX launch | 536 | 372 | 204 | 368 / 368 | 368 | 36 | **408** |
+
+Sizes: the largest peak of all sources plus the frame reserve, rounded up to the 8-byte stack
+alignment. The long work queue runs only the host's P-256 key generation and DH key (GATT caching
+off), every pairing both; its deepest point is p256-m's field multiply in every image (the return
+addresses left below the watermark: `m256_mul` under `scalar_mult` and `generate_dh_key` in the
+product, under `point_to_affine` on silicon, where LTO kept that function separate). The product's
+QEMU and hardware images have identical p256-m and SMP symbols and sizes, so its own 732 B holds
+for its hardware build; the silicon image's 968 B is the size taken. The TX launch job's silicon
+peak is the scheduler clock service's arm path (`sched_arm_abs` -> `hw_arm` ->
+`k_clock_event_arm_abs_with_generation`). The other stacks keep their sizes: their measured
+headroom is large and their paths (ISR nesting, the host's ATT and L2CAP error paths, bt_enable)
+are wider than the runs. `EFR32_RADIO_LAUNCH_STACK_SIZE` now only defaults the new
+`EFR32_RADIO_TX_LAUNCH_STACK_SIZE` and `EFR32_RADIO_RX_LAUNCH_STACK_SIZE`.
+
+**RAM** (linker map, `check-hardware-ram.sh` arithmetic): `owo_suit -DOWO_HW=ON` 31 052 -> 30 540 B
+(budget 31 000); `owo_suit` 29 692 -> 29 180; `bg22_ek4108a` 30 092 -> 29 580.
+
+**Not shown.** The product image itself on silicon (main, idle with power management, the
+output stage's interrupts): only its QEMU figures exist; the silicon figures are the radio-port
+image's. The configuration as committed was run in QEMU at the tighter sizes of the first pass
+(long work queue 768, TX launch 464: (a) 510 rounds and 52 stimulation cycles, (b) 23
+scenarios, no fault); the silicon figures then raised those two.

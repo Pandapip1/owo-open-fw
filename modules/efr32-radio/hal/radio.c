@@ -702,11 +702,11 @@ static void efr32_radio_rx_job(void *a, void *b, void *c)
 }
 
 K_THREAD_DEFINE(efr32_radio_tx_job_thread,
-		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
+		CONFIG_EFR32_RADIO_TX_LAUNCH_STACK_SIZE,
 		efr32_radio_tx_job, NULL, NULL, NULL,
 		EFR32_LLL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_rx_job_thread,
-		CONFIG_EFR32_RADIO_LAUNCH_STACK_SIZE,
+		CONFIG_EFR32_RADIO_RX_LAUNCH_STACK_SIZE,
 		efr32_radio_rx_job, NULL, NULL, NULL,
 		EFR32_LLL_THREAD_PRIO, 0, 0);
 K_THREAD_DEFINE(efr32_radio_completion_job_thread,

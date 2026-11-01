@@ -202,6 +202,116 @@ static int gatt_wait(void)
 	return k_sem_take(&gatt_done, K_MSEC(CENTRAL_GATT_TIMEOUT_MS));
 }
 
+#if defined(CONFIG_RADIO_RX_PORT_PEER_PRODUCT_STIM)
+/*
+ * The product's stimulation characteristics (src/ble.rs): two UUID bases,
+ * ...-C6A9-11E4-8731-1681E6B88EC1 and ...-C717-11E4-8731-1681E6B88EC1.
+ */
+static const struct bt_uuid_128 widths_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x7764e556, 0xc6a9, 0x11e4, 0x8731, 0x1681e6b88ec1));
+static const struct bt_uuid_128 run_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x7764eda8, 0xc6a9, 0x11e4, 0x8731, 0x1681e6b88ec1));
+static const struct bt_uuid_128 frame_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x77646be3, 0xc717, 0x11e4, 0x8731, 0x1681e6b88ec1));
+static const struct bt_uuid_128 extra2_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0x776416cb, 0xc717, 0x11e4, 0x8731, 0x1681e6b88ec1));
+/* A stimulation cycle every CENTRAL_STIM_EVERY rounds (seconds). */
+#define CENTRAL_STIM_EVERY 10U
+/*
+ * The stimulus of sim/scripts/make_scenarios.py: table widths 0x49, then a 5 s frame (wire
+ * channel 0, level 20, 50 Hz) and the same frame with its checksum octet changed.
+ */
+static const uint8_t stim_widths[10] = { 0x49, 0x49, 0x49, 0x49, 0x49,
+					 0x49, 0x49, 0x49, 0x49, 0x49 };
+static const uint8_t stim_frame[20] = { 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+					0x00, 0x00, 0x00, 0x32, 0x00, 0x32, 0x32,
+					0x00, 0x00, 0x00, 0x01, 0x00, 0x27 };
+static uint16_t found_handle;
+
+static uint8_t found(struct bt_conn *c, const struct bt_gatt_attr *attr,
+		     struct bt_gatt_discover_params *params)
+{
+	ARG_UNUSED(c);
+	if (attr != NULL) {
+		found_handle = params->type == BT_GATT_DISCOVER_CHARACTERISTIC
+			? ((const struct bt_gatt_chrc *)attr->user_data)->value_handle
+			: attr->handle;
+	}
+	k_sem_give(&gatt_done);
+	return BT_GATT_ITER_STOP;
+}
+
+/* The value handle of the characteristic `uuid`, or of the CCC descriptor after `after`. */
+static uint16_t find_handle(const struct bt_uuid *uuid, uint16_t after)
+{
+	struct bt_gatt_discover_params p = {
+		.uuid = uuid,
+		.func = found,
+		.start_handle = after != 0U ? after + 1U : BT_ATT_FIRST_ATTRIBUTE_HANDLE,
+		.end_handle = after != 0U ? after + 2U : BT_ATT_LAST_ATTRIBUTE_HANDLE,
+		.type = after != 0U ? BT_GATT_DISCOVER_DESCRIPTOR : BT_GATT_DISCOVER_CHARACTERISTIC,
+	};
+
+	found_handle = 0U;
+	if (bt_gatt_discover(conn, &p) != 0 || gatt_wait() != 0) {
+		return 0U;
+	}
+	return found_handle;
+}
+
+static int stim_write(uint16_t handle, const void *data, uint16_t len)
+{
+	struct bt_gatt_write_params w = {
+		.func = written, .handle = handle, .data = data, .length = len,
+	};
+
+	gatt_err = 0U;
+	if (bt_gatt_write(conn, &w) != 0 || gatt_wait() != 0) {
+		return -1;
+	}
+	return gatt_err;
+}
+
+static uint16_t widths_handle, run_handle, frame_handle;
+
+static void stim_setup(void)
+{
+	static const uint8_t notify_on[2] = { 0x01, 0x00 };
+	uint16_t extra2_handle;
+
+	widths_handle = find_handle(&widths_uuid.uuid, 0U);
+	run_handle = find_handle(&run_uuid.uuid, 0U);
+	frame_handle = find_handle(&frame_uuid.uuid, 0U);
+	extra2_handle = find_handle(&extra2_uuid.uuid, 0U);
+	printk("stim_discover: widths 0x%04x run 0x%04x frame 0x%04x extra2 0x%04x\n",
+	       widths_handle, run_handle, frame_handle, extra2_handle);
+	/* Notifications on: the product's notifications then go out over the link. */
+	printk("stim_ccc: run %d extra2 %d\n",
+	       stim_write(find_handle(BT_UUID_GATT_CCC, run_handle), notify_on, 2U),
+	       stim_write(find_handle(BT_UUID_GATT_CCC, extra2_handle), notify_on, 2U));
+}
+
+static void stim_cycle(uint32_t cycle)
+{
+	static const uint8_t start = 0x25;
+	static const uint8_t stop = 0x00;
+	uint8_t bad[sizeof(stim_frame)];
+	int w, s, f, b, x = 0;
+
+	memcpy(bad, stim_frame, sizeof(bad));
+	bad[sizeof(bad) - 1U] ^= 0xffU;
+	w = stim_write(widths_handle, stim_widths, sizeof(stim_widths));
+	s = stim_write(run_handle, &start, 1U);
+	f = stim_write(frame_handle, stim_frame, sizeof(stim_frame));
+	b = stim_write(frame_handle, bad, sizeof(bad));
+	if (cycle % 2U == 1U) {
+		x = stim_write(run_handle, &stop, 1U);
+	}
+	printk("stim_cycle: %u widths %d start %d frame %d bad-frame %d stop %d\n", cycle, w, s,
+	       f, b, x);
+}
+#endif /* CONFIG_RADIO_RX_PORT_PEER_PRODUCT_STIM */
+
 static void gatt_loop(void)
 {
 	struct bt_gatt_discover_params discover = {
@@ -220,6 +330,9 @@ static void gatt_loop(void)
 		return;
 	}
 	printk("gatt_discover: handle 0x%04x\n", value_handle);
+#if defined(CONFIG_RADIO_RX_PORT_PEER_PRODUCT_STIM)
+	stim_setup();
+#endif
 	for (;;) {
 		uint32_t counter = rounds + 1U;
 		uint8_t value[CENTRAL_VALUE_LEN] = { 0 };
@@ -250,6 +363,11 @@ static void gatt_loop(void)
 		if (rounds % CENTRAL_GATT_REPORT_EVERY == 0U) {
 			printk("gatt_rw: %u rounds, %u ok, %u failed\n", rounds, ok, failed);
 		}
+#if defined(CONFIG_RADIO_RX_PORT_PEER_PRODUCT_STIM)
+		if (rounds % CENTRAL_STIM_EVERY == 0U) {
+			stim_cycle(rounds / CENTRAL_STIM_EVERY);
+		}
+#endif
 	}
 }
 

@@ -107,7 +107,9 @@ LE Secure Connections passkey pairing then 90 s of encrypted GATT; in brackets t
 without pairing) [Q]: LLL 436/768 (436), completion job 488/768 (464), ULL worker 528/640 (528),
 BT RX thread 728/1200 (424), BT long work queue 728/1400 (680). Per operation (thread entry
 included) [F]: direct ECB 356 B, CMAC 404, CCM 540; PSA ECB 484, CMAC 540, CCM 692; software
-PSA ECB 648, CMAC 712, CCM 896.
+PSA ECB 648, CMAC 712, CCM 896. The product's own figures with stimulation over the link, the
+silicon ones, and the stack sizes taken from them (long work queue 1400 -> 1008):
+docs/radio-tables.md 7.86.
 
 PSA key slots: the link layer no longer takes any, which leaves the long work queue and the RX
 thread; at most one live slot was measured (slot counter in tf-psa-crypto, QEMU product
@@ -150,6 +152,6 @@ to a turnaround that has about 100 us.
 * P-256 on the BA414EP needs its operation codes and memory map, which are not public.
 * `tests/radio-port/prj-hardware.conf` still reserves a 3504-byte libc arena for PSA CMAC; it is
   no longer needed, but changing the stage-3 hardware image wants a silicon run.
-* ULL worker: 528 B peak of 640 (QEMU, with or without encryption), above the 640 - 136 FP-frame
-  reserve the Kconfig help assumes; unrelated to this change.
+* ULL worker: closed in docs/radio-tables.md 7.86 (no FP frame on the link-layer threads; the
+  product sizes it from the 648 B silicon peak: 688).
 * Silicon connection-event times with encryption (7.79's list) once a silicon Peripheral receives.

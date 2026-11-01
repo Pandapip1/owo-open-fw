@@ -51,6 +51,17 @@ config RADIO_RX_PORT_PEER_PRODUCT
 	  written and read back, authenticated encrypted link only) instead of the radio-port
 	  test characteristic. prj-central-product.conf.
 
+config RADIO_RX_PORT_PEER_PRODUCT_STIM
+	bool "Command stimulation on the product over the link"
+	depends on RADIO_RX_PORT_PEER_PRODUCT
+	help
+	  Between the GATT rounds, command the product as its app does, over the encrypted link:
+	  enable notifications on "Start / Stop" and "Extra 2", then every
+	  CENTRAL_STIM_EVERY rounds write the pulse widths, Start (0x25), a 5 s frame and a frame
+	  with a bad checksum (answered by a notification), and every second cycle Stop (0x00).
+	  For measuring the product's Bluetooth RX thread on the stimulation paths
+	  (write_cb, the output's stop and start, notifications). prj-central-product-stim.conf.
+
 endmenu
 
 # Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
