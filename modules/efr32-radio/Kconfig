@@ -85,9 +85,13 @@ config EFR32_RADIO_ULL_STACK_SIZE
 	  Stack of the persistent thread that runs the ticker and ULL mayflies
 	  (hal/ll_threads.c), work Zephyr's split controller otherwise runs in a
 	  software interrupt. In the QEMU active-scan workload (dual machine, 90 s)
-	  this context peaked at 464 bytes (CONFIG_INIT_STACKS high-water mark), so
-	  640 leaves 40 bytes after reserving up to 136 bytes for exception
-	  context. LLL prepares run in the LLL context, not inline here. It runs
+	  this context peaked at 464 bytes (CONFIG_INIT_STACKS high-water mark).
+	  A held, encrypted silicon connection peaks at 648 (docs/radio-tables.md
+	  7.84), more than this default: a connection image sizes it from that
+	  figure (the product: prj.conf). No code on the link-layer threads
+	  executes an FP instruction (7.86), so an interrupt adds a basic
+	  exception frame (32 bytes plus at most 4 of alignment), not an FP one.
+	  LLL prepares run in the LLL context, not inline here. It runs
 	  at the ULL meta-IRQ priority (EFR32_ULL_THREAD_PRIO), below the LLL and
 	  the radio's persistent jobs.
 
@@ -99,22 +103,46 @@ config EFR32_RADIO_LLL_STACK_SIZE
 	  LLL meta-IRQ priority with the radio's persistent jobs, above the ULL
 	  worker. It runs the LLL prepares (lll_scan_prepare(), lll_adv_prepare()):
 	  in the QEMU active-scan workload (dual machine, 90 s) it peaked at 636
-	  bytes (CONFIG_INIT_STACKS high-water mark; the advertiser 524), so 768
-	  leaves 28 bytes after reserving up to 104 bytes of FP exception context.
-	  Revisit both measured budgets when hardware thread analysis is
-	  available; they are resource bounds, not radio timing policy.
+	  bytes (CONFIG_INIT_STACKS high-water mark; the advertiser 524); a held,
+	  encrypted silicon connection 748 (docs/radio-tables.md 7.84). An interrupt
+	  adds a basic exception frame (36 bytes, see EFR32_RADIO_ULL_STACK_SIZE).
+	  They are resource bounds, not radio timing policy.
 
 config EFR32_RADIO_LAUNCH_STACK_SIZE
-	int "Persistent radio TX/RX launch job stack size"
+	int "Persistent radio TX/RX launch job stack size (default for both)"
 	default 448
 	help
 	  TX and RX launch jobs only wait for a coalescing event latch, claim their generation,
 	  and perform the bounded radio arm write. They deliberately do not invoke
 	  controller callbacks. Keep their stacks separate from the
 	  completion job so its callback budget does not reserve RAM for both launch
-	  paths. Arming a wake-up through the scheduler clock service measures about
-	  300 bytes (-fstack-usage), plus up to 104 bytes of FP exception context,
-	  so 448 leaves about 44 bytes of headroom.
+	  paths. The default of EFR32_RADIO_TX_LAUNCH_STACK_SIZE and
+	  EFR32_RADIO_RX_LAUNCH_STACK_SIZE, which size the two jobs separately.
+
+	  Exception frames: the launch paths (the jobs, the kernel and the scheduler clock
+	  service with its BURTC and TIMER backends) execute no FP instruction, so with
+	  FPU_SHARING (lazy stacking, FPCCR.ASPEN|LSPEN) CONTROL.FPCA stays clear on these
+	  threads and an interrupt pushes a basic frame, 32 bytes plus at most 4 of alignment,
+	  not the 104-byte extended one (docs/radio-tables.md 7.86, from the product image's
+	  disassembly).
+
+config EFR32_RADIO_TX_LAUNCH_STACK_SIZE
+	int "Persistent radio TX launch job stack size"
+	default EFR32_RADIO_LAUNCH_STACK_SIZE
+	help
+	  Silicon high-water marks in held connections (docs/radio-tables.md 7.84): 208 bytes
+	  unencrypted, 428 encrypted (the arm path through the counter driver). Size it at least
+	  the measured peak plus one basic exception frame (36 bytes, see
+	  EFR32_RADIO_LAUNCH_STACK_SIZE).
+
+config EFR32_RADIO_RX_LAUNCH_STACK_SIZE
+	int "Persistent radio RX launch job stack size"
+	default EFR32_RADIO_LAUNCH_STACK_SIZE
+	help
+	  High-water marks in held connections: 208 bytes unencrypted and 368 encrypted on silicon
+	  (docs/radio-tables.md 7.84), 372 in the QEMU product run (7.86). Size it at least the
+	  measured peak plus one basic exception frame (36 bytes, see
+	  EFR32_RADIO_LAUNCH_STACK_SIZE).
 
 config EFR32_RADIO_COMPLETION_STACK_SIZE
 	int "Persistent radio completion job stack size"
