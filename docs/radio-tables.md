@@ -7969,3 +7969,52 @@ occupied bandwidth, harmonics and spurious emissions at any carrier, and receive
 the Bluetooth channels: no RF instrument was used. The SDR captures that would settle these are
 in `docs/amateur-radio.md` section 8. Lock in transmit was checked at three carriers, not across
 the band.
+
+**Data identification (BLE-ASI) [F, Q].** `CONFIG_EFR32_RADIO_AMATEUR_ID_DATA`
+(`docs/amateur-radio.md` 5.2, `docs/ble-amateur-station-id.md`; `hal/amateur.c`,
+`efr32_radio_id_adv_transmit()` in `hal/radio.c`). Images: `tests/amateur-port` with
+`prj-hardware.conf` and `prj-dataid.conf`, `AMATEUR_PORT_PLAN_INBAND` (channels 37 and 38 on
+2402 and 2426 MHz, every other channel on 2402 MHz: standard in-band carriers only),
+`AMATEUR_PORT_EOC_EVERY_S` (an end of communication, so a FINAL identification, every 5 s, or
+10 s with CW) and the test-only `EFR32_RADIO_AMATEUR_ID_PROBE`, 60 s of advertising; the same
+in the QEMU configuration, single machine. Logs: `scratch/amateur-data-id/hw-*.log`,
+`q-probe-*.txt` of the worktree. Longest of 12 identifications (6 with CW):
+
+| figure | silicon, data | silicon, data + CW | QEMU, data | QEMU, data + CW |
+|---|---|---|---|---|
+| job, own CPU time (thread usage) | 89.2 us | 89.7 us | 63.3 us | 63.5 us |
+| job, wall time (preempted by radio jobs) | 830 us | 967 us | 291 us | 293 us |
+| LLL start: entry to the first TXEN | 232.0 us | 235.9 us | 213.6 us | 207.1 us |
+| completion callback (next PDU; CW launch) | 49.4 us | 184.6 us | 36.4 us | 157.6 us |
+| TXEN to TXEN of consecutive parts | 618 us | 618 us | 620 us | 620 us |
+| first TXEN to the end of the last frame | 1.71 ms | 4.329 s | 1.63 ms | 4.322 s |
+| reserved span (`efr32_amateur_id_span_us()`) | 20.42 ms | 4.350 s | 20.42 ms | 4.350 s |
+
+The first wall-time figures (21 ms) included the console report, then printed from the job:
+it now runs on the system work queue. The job's budget `EFR32_RADIO_WCET_AMATEUR_ID_NS` takes
+the CPU-time figure (89.8 us silicon, 63.5 us QEMU; it was a 200 us placeholder); the radio jobs
+that preempt it are admitted on their own. The LLL start fits the LLL context's budget
+(249.1 us silicon, 266.9 us QEMU). The completion callback's budget
+(`EFR32_RADIO_WCET_AMATEUR_ID_COMPLETION_NS`) adds to a transmit's measured completion. On air:
+3 x 328 us per data identification. The data+CW span on silicon read 34.0 ms from a 32-bit
+nanosecond conversion that wrapped once (4.329 s); the probe now prints it in microseconds.
+
+Each PDU went out whole: FRC.WCNT at each completion 0x21 (33 octets) of 33, FRC.WCNTCMP0 the
+dynamic-length sentinel 0xFF before the first PDU and 0x20 (the previous frame's length less one,
+left by the dynamic-length engine) before the next ones, as in `lll_adv.c`'s own PDU chains
+(diagnostic build, not kept). The laptop's passive BlueZ scan saw the identification's own
+address in four of eight runs and, read with `bluetoothctl info`, held its service data under
+the BLE-ASI UUID: `11 4B 44 33 41 50 4C` (FINAL, KD3APL). BlueZ reports a device once and drops
+it 30 s after its last report, so no reception rate follows from this; in the other four runs
+(24-36 good-channel frames each) it reported none, unexplained. Not shown: a reception rate,
+why the laptop missed whole runs, or anything an RF instrument would show.
+
+**Connections (QEMU only).** A Peripheral and a Central under amateur rules, the Central
+scanning between its connection events: three periodic data identifications from each during
+29 virtual minutes of connection, each received by the Central, the link held. In QEMU the
+connection-event turnarounds miss their spec deadlines (7.79), which the QEMU connection profiles
+count (`SCHED_DEADLINE_MISS_COUNT`); amateur operation needs the safe-shutdown policy for its own
+rules, so the test-only `EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES` counts scheduler misses and still
+stops on `efr32_radio_policy_stop()`. In the hardware configuration of this run it counted 0. A
+connection on silicon under amateur rules was not run (no second amateur station; the laptop's
+host may not connect to an amateur-plan carrier set).
