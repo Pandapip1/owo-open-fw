@@ -824,6 +824,13 @@ static struct {
 static bool efr32_rx_delivery_invalid;
 /* CRC result of the frame last handed to the LLL (hardware RX handoff). */
 static bool efr32_rx_crc_ok;
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+/* Bluetooth channel index (0-39) last given to radio_whiten_iv_set(). */
+static uint8_t efr32_radio_channel_index;
+#define EFR32_BLE_CHANNEL_INDEX_COUNT 40U
+/* Diagnostic: [channel][crc_ok] RXDONE counts, read by a debugger. */
+volatile uint32_t efr32_radio_rx_channel_stats[EFR32_BLE_CHANNEL_INDEX_COUNT][2];
+#endif
 
 static void efr32_packet_stage_reset(void)
 {
@@ -2238,6 +2245,9 @@ static void efr32_hw_rx_deliver(void)
 		return;
 	}
 	efr32_rx_crc_ok = !!(efr32_rx_fifo[read + bytes] & EFR32_FRC_TRAILER_CRCOK_BIT);
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+	efr32_radio_rx_channel_stats[efr32_radio_channel_index][efr32_rx_crc_ok ? 1 : 0]++;
+#endif
 #if defined(CONFIG_EFR32_RADIO_BRINGUP_TRACE)
 	{
 		/* Diagnostic only, in spare SEQRAM: CRC-ok/CRC-bad frame counts,
@@ -2842,6 +2852,118 @@ void radio_reset(void)
 
 }
 
+/*
+ * Channel-dependent demodulator rates [F] (docs/radio-tables.md SS7.83).  The IF ADC is clocked
+ * from the LO: it samples at f_LO / 2^9 with RAC.IFADCTRIM0.IFADCENHALFMODE (the 1M PHY) and
+ * f_LO / 2^8 without (2M, Coded), where f_LO = f_RF + f_IF on the high side
+ * (SYNTH.IFFREQ.LOSIDE; f_IF = IFFREQ x f_HFXO / 2^19, the unit of SYNTH.FREQ).  So the ADC rate
+ * moves with the channel, 3.3 % from 2402 to 2480 MHz, and every quantity the PHY table gives
+ * in ADC samples is right only on the table's base channel, 2402 MHz.  Stock RAIL recomputes two
+ * per channel (captured on silicon over 23 channels, advertising and data):
+ *
+ * - MODEM.DIGMIXCTRL.DIGMIXFREQ, the digital mixer's IF in units of f_ADC / 2^20:
+ *   round(floor(f_IF in Hz) x 2^20 / f_ADC).  The truncation of f_IF to whole hertz is stock's
+ *   (it decides the rounding of 3 of the 23 captured values).
+ * - MODEM.SRCCHF, the two-stage sample-rate converter from f_ADC to the demodulator's fixed
+ *   rate: SRCRATIO1 / 2^7 x SRCRATIO2 / 2^14 = f_ADC / f_SRC_OUT.  SRCRATIO1 is the largest
+ *   code that leaves stage 2 at or above 25/24 (the measured code boundaries bracket that limit
+ *   to 1.0409-1.0417); SRCRATIO2 then rounds the remainder.  With SRCENABLE1 clear (Coded),
+ *   SRCRATIO2 / 2^14 alone = f_ADC / f_SRC_OUT.
+ *
+ * With the 2402 MHz values on every channel the demodulator ran 1 % off rate on 2426 MHz and
+ * 3.2 % on 2480 MHz: headers decoded, frames broke part way (SS7.80's channel-dependent receive).
+ * f_SRC_OUT per PHY is what the PHY table's own 2402 MHz SRCCHF gives: 4 MHz for 1M (4 samples
+ * per 1 Msym/s symbol), 8 MHz for 2M and Coded.
+ */
+#define EFR32_SYNTH_IFFREQ_OFFSET 0x038U
+#define EFR32_SYNTH_IFFREQ_IFFREQ_MASK 0x000FFFFFU
+#define EFR32_SYNTH_IFFREQ_LOSIDE BIT(20)
+#define EFR32_RAC_IFADCTRIM0_OFFSET 0x0E4U
+#define EFR32_RAC_IFADCTRIM0_IFADCENHALFMODE BIT(1)
+#define EFR32_IFADC_LO_DIVIDER_LOG2_HALF_MODE 9U
+#define EFR32_IFADC_LO_DIVIDER_LOG2_FULL 8U
+#define EFR32_MODEM_SRCCHF_OFFSET 0x0ECU
+#define EFR32_MODEM_SRCCHF_SRCRATIO1_MASK 0x000000FFU
+#define EFR32_MODEM_SRCCHF_SRCENABLE1 BIT(11)
+#define EFR32_MODEM_SRCCHF_SRCRATIO2_SHIFT 12U
+#define EFR32_MODEM_SRCCHF_SRCRATIO2_MASK (0x7FFFU << EFR32_MODEM_SRCCHF_SRCRATIO2_SHIFT)
+#define EFR32_MODEM_SRCRATIO1_FRACTION_BITS 7U
+#define EFR32_MODEM_SRCRATIO2_FRACTION_BITS 14U
+#define EFR32_MODEM_SRC2_MIN_RATIO_NUM 25U
+#define EFR32_MODEM_SRC2_MIN_RATIO_DEN 24U
+#define EFR32_MODEM_DIGMIXCTRL_OFFSET 0x10CU
+#define EFR32_MODEM_DIGMIXCTRL_DIGMIXFREQ_MASK 0x000FFFFFU
+#define EFR32_MODEM_DIGMIXFREQ_FRACTION_BITS 20U
+#define EFR32_MODEM_SRC_OUT_HZ_1M 4000000U
+#define EFR32_MODEM_SRC_OUT_HZ_2M_CODED 8000000U
+
+/* SRC output rate of the PHY last applied by radio_phy_set(); 0 before the first. */
+static uint32_t efr32_modem_src_out_hz;
+
+static void efr32_modem_channel_rates_set(void)
+{
+	uint32_t freq = *radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_FREQ_OFFSET);
+	uint32_t iffreq_reg = *radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_IFFREQ_OFFSET);
+	uint32_t iffreq = iffreq_reg & EFR32_SYNTH_IFFREQ_IFFREQ_MASK;
+	uint32_t divider_log2 = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_IFADCTRIM0_OFFSET) &
+				 EFR32_RAC_IFADCTRIM0_IFADCENHALFMODE) ?
+				EFR32_IFADC_LO_DIVIDER_LOG2_HALF_MODE :
+				EFR32_IFADC_LO_DIVIDER_LOG2_FULL;
+	uint32_t srcchf = *radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SRCCHF_OFFSET);
+	uint32_t digmix = *radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_DIGMIXCTRL_OFFSET);
+	/* f_LO in SYNTH.FREQ units (f_HFXO / 2^19). */
+	uint64_t lo = (iffreq_reg & EFR32_SYNTH_IFFREQ_LOSIDE) ? (uint64_t)freq + iffreq :
+							       (uint64_t)freq - iffreq;
+	uint64_t if_hz = ((uint64_t)iffreq * EFR32_SYNTH_REFERENCE_HZ) >>
+			 EFR32_SYNTH_FREQ_FRACTION_BITS;
+	/*
+	 * DIGMIXFREQ = f_IF x 2^20 / (f_LO / 2^d) = f_IF x 2^(20 + d + 19) / (lo x f_HFXO).  f_HFXO
+	 * is 2^12 x 9375: cancel the power of two so the numerator stays within 64 bits.
+	 */
+	uint32_t ref_pow2 = __builtin_ctzll(EFR32_SYNTH_REFERENCE_HZ);
+	uint64_t ref_odd = EFR32_SYNTH_REFERENCE_HZ >> ref_pow2;
+	uint64_t mix_num = if_hz << (EFR32_MODEM_DIGMIXFREQ_FRACTION_BITS + divider_log2 +
+				     EFR32_SYNTH_FREQ_FRACTION_BITS - ref_pow2);
+	uint64_t mix_den = lo * ref_odd;
+	uint32_t mix = (uint32_t)((mix_num + mix_den / 2U) / mix_den);
+	/*
+	 * f_ADC / f_SRC_OUT = lo x f_HFXO / (2^19 x 2^d x f_SRC_OUT); scaled by 2^(7 + 14) for the
+	 * two ratio codes' fraction bits: num / den with the 2^19 folded in.
+	 */
+	uint64_t src_num = lo * EFR32_SYNTH_REFERENCE_HZ;
+	uint64_t src_den = (uint64_t)efr32_modem_src_out_hz
+			   << (divider_log2 + EFR32_SYNTH_FREQ_FRACTION_BITS -
+			       EFR32_MODEM_SRCRATIO1_FRACTION_BITS - EFR32_MODEM_SRCRATIO2_FRACTION_BITS);
+	uint32_t ratio1 = srcchf & EFR32_MODEM_SRCCHF_SRCRATIO1_MASK;
+	uint32_t ratio2;
+
+	BUILD_ASSERT(EFR32_SYNTH_FREQ_FRACTION_BITS >= EFR32_MODEM_SRCRATIO1_FRACTION_BITS +
+		     EFR32_MODEM_SRCRATIO2_FRACTION_BITS - EFR32_IFADC_LO_DIVIDER_LOG2_FULL,
+		     "SRC scaling shift must be non-negative");
+	if (efr32_modem_src_out_hz == 0U || freq == 0U) {
+		return;
+	}
+	if (srcchf & EFR32_MODEM_SRCCHF_SRCENABLE1) {
+		ratio1 = (uint32_t)((src_num * EFR32_MODEM_SRC2_MIN_RATIO_DEN) /
+				    (src_den * EFR32_MODEM_SRC2_MIN_RATIO_NUM
+				     << EFR32_MODEM_SRCRATIO2_FRACTION_BITS));
+		ratio2 = (uint32_t)((src_num + (src_den * ratio1) / 2U) / (src_den * ratio1));
+	} else {
+		uint64_t den = src_den << EFR32_MODEM_SRCRATIO1_FRACTION_BITS;
+
+		ratio2 = (uint32_t)((src_num + den / 2U) / den);
+	}
+	LL_ASSERT(ratio1 <= EFR32_MODEM_SRCCHF_SRCRATIO1_MASK);
+	LL_ASSERT(ratio2 <= (EFR32_MODEM_SRCCHF_SRCRATIO2_MASK >>
+			     EFR32_MODEM_SRCCHF_SRCRATIO2_SHIFT));
+	LL_ASSERT(mix <= EFR32_MODEM_DIGMIXCTRL_DIGMIXFREQ_MASK);
+	srcchf &= ~(EFR32_MODEM_SRCCHF_SRCRATIO1_MASK | EFR32_MODEM_SRCCHF_SRCRATIO2_MASK);
+	srcchf |= ratio1 | (ratio2 << EFR32_MODEM_SRCCHF_SRCRATIO2_SHIFT);
+	digmix = (digmix & ~EFR32_MODEM_DIGMIXCTRL_DIGMIXFREQ_MASK) | mix;
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SRCCHF_OFFSET) = srcchf;
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_DIGMIXCTRL_OFFSET) = digmix;
+}
+
 /* [regs-public] Public BLE tables plus a relocated, image-local PHYINFO object. */
 void radio_phy_set(uint8_t phy, uint8_t flags)
 {
@@ -2854,10 +2976,12 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 		efr32_radio_table_apply(efr32_ble_1m_base_table);
 		efr32_radio_table_apply(efr32_ble_1m_delta_table);
 		efr32_ble_phy_info_publish(efr32_ble_1m_phy_info);
+		efr32_modem_src_out_hz = EFR32_MODEM_SRC_OUT_HZ_1M;
 		break;
 	case PHY_2M:
 		efr32_radio_table_apply(efr32_ble_1m_base_table);
 		efr32_radio_table_apply(efr32_ble_2m_delta_table);
+		efr32_modem_src_out_hz = EFR32_MODEM_SRC_OUT_HZ_2M_CODED;
 		break;
 	case PHY_CODED:
 		efr32_radio_table_apply(efr32_ble_1m_base_table);
@@ -2867,11 +2991,14 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 			LL_ASSERT(flags == PHY_FLAGS_S2);
 			efr32_radio_table_apply(efr32_ble_coded_s2_delta_table);
 		}
+		efr32_modem_src_out_hz = EFR32_MODEM_SRC_OUT_HZ_2M_CODED;
 		break;
 	default:
 		EFR32_RADIO_TODO("regs-public: unknown PHY");
 		break;
 	}
+	/* The tables carry the 2402 MHz rates: redo them for the channel already tuned. */
+	efr32_modem_channel_rates_set();
 }
 
 /* [hardware] Fixed working-board PA characterization; dBm mapping remains T7. */
@@ -2894,7 +3021,7 @@ void radio_tx_power_max_set(void)
 	radio_tx_power_set(0U);
 }
 
-/* [hardware] Tune the three evidenced BLE advertising frequencies (T4). */
+/* [hardware] Tune any BLE channel: carrier, channel index, channel-dependent modem rates (T4). */
 void radio_freq_chan_set(uint32_t chan)
 {
 	uint32_t channel_number;
@@ -2923,6 +3050,7 @@ void radio_freq_chan_set(uint32_t chan)
 	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHCTRL_OFFSET) = 0U;
 	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHSP_OFFSET) =
 		channel_number & EFR32_SYNTH_CHSP_CHSP_MASK;
+	efr32_modem_channel_rates_set();
 }
 
 /* [regs-public] RAIL's BLE helper writes FRC.WHITEPOLY=0x44 and WHITEINIT=iv|0x40 (T5). */
@@ -2930,6 +3058,9 @@ void radio_whiten_iv_set(uint32_t iv)
 {
 	/* LLL supplies a Bluetooth physical channel number, 0 through 39. */
 	LL_ASSERT(iv <= 39U);
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+	efr32_radio_channel_index = (uint8_t)iv;
+#endif
 	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WHITEPOLY_OFFSET) = EFR32_FRC_BLE_WHITEPOLY;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WHITEINIT_OFFSET) =
 		EFR32_FRC_BLE_WHITEINIT_MSB | iv;
