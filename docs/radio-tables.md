@@ -8012,37 +8012,53 @@ pairing to level 4, then 870 rounds of encrypted GATT write/read-back and 87 sti
 over the link (widths, Start, a 5 s frame, a bad-checksum frame answered by a notification, Stop
 every second cycle; notifications enabled), no failure. (b) Single machine, `CONFIG_OWO_SIM_INJECT`:
 the 23 scenarios of `sim/scripts/make_scenarios.py` that need no gdb inferior call (all but the
-radio shutdowns), with the RAM also taken at the reset entry after the watchdog resets. (c) The
-final configuration below, the same runs: 510 rounds and 52 cycles in (a), 23 scenarios in (b),
-no fault, every peak as before.
+radio shutdowns: a gdb inferior call runs on whatever stack is current), with the RAM also taken
+at the reset entry after the watchdog resets.
 
-| thread | before | peak (a) | peak (b) | silicon (7.84) | margin | after |
-|---|---|---|---|---|---|---|
-| main | 2048 | 1384 | 1420 | - | 108 (FP) | 2048 |
-| ISR | 1024 | 516 | 536 | - | 36 | 1024 |
-| idle | 512 | 348 | 292 | - | 36 | 512 |
-| system work queue | 1024 | 384 | 708 (mailbox, test only) | - | 36 | 1024 |
-| BT RX | 1200 | 828 | 212 | - | 36 | 1200 |
-| BT long work queue | 1400 | 732 | 684 | - | 36 | **768** |
-| BT TX processor | 1024 | 416 | 428 | - | 36 | 1024 |
-| controller RX | 896 | 396 | 212 | - | 36 | 896 |
-| controller priority RX | 640 | 380 | 196 | - | 36 | 640 |
-| LLL | 768 | 656 | 452 | 748 | 36 | **784** |
-| ULL worker | 640 | 532 | 420 | 648 | 36 | **688** |
-| completion job | 768 | 604 | 340 | 664 | 36 | 768 |
-| TX launch | 536 | 260 | 260 | 428 | 36 | **464** |
-| RX launch | 536 | 372 | 204 | 368 | 36 | **408** |
+**Silicon [F].** BGM220 EK (J-Link OB 000440200548), the radio-port pairing profile of 7.84
+(`prj-hardware.conf`, `prj-connection.conf`, `prj-pairing.conf`, the 7.84 safety policy) with
+`INIT_STACKS`, once as in 7.84 (logging on, "log") and once with `CONFIG_LOG=n` as the product
+("no log"); the laptop (`bluetoothctl`) paired with the passkey and ran 118 / 117 GATT
+write/read-back rounds over the encrypted link; every stack read over the debugger afterwards
+(`scratch/ram2/sil.sh`), the bond removed by the device's own address. Not the product image (its
+board and code partition are the suit's), so its figures are the same code built into a
+different binary.
 
-Sizes: peak (the largest of all sources) plus the frame reserve, rounded up to the 8-byte stack
+| thread | before | QEMU (a) | QEMU (b) | silicon log / no log | 7.84 | margin | after |
+|---|---|---|---|---|---|---|---|
+| main | 2048 | 1384 | 1420 | 944 / 636 (test app) | - | 108 (FP) | 2048 |
+| ISR | 1024 | 516 | 536 | 540 / 540 | - | 36 | 1024 |
+| idle | 512 | 348 | 292 | 48 / 48 (no PM) | - | 36 | 512 |
+| system work queue | 1024 | 384 | 708 (mailbox, test only) | 420 / 420 | - | 36 | 1024 |
+| BT RX | 1200 | 828 | 212 | 988 / 728 | - | 36 | 1200 |
+| BT long work queue | 1400 | 732 | 684 | 976 / 968 | - | 36 | **1008** |
+| BT TX processor | 1024 | 416 | 428 | 432 / 432 | - | 36 | 1024 |
+| controller RX | 896 | 396 | 212 | 408 / 408 | - | 36 | 896 |
+| controller priority RX | 640 | 380 | 196 | 416 / 416 | - | 36 | 640 |
+| LLL | 768 | 656 | 452 | 748 / 748 | 748 | 36 | **784** |
+| ULL worker | 640 | 532 | 420 | 648 / 648 | 648 | 36 | **688** |
+| completion job | 768 | 604 | 340 | 636 / 636 | 664 | 36 | 768 |
+| TX launch | 536 | 260 | 260 | 428 / 440 | 428 | 36 | **480** |
+| RX launch | 536 | 372 | 204 | 368 / 368 | 368 | 36 | **408** |
+
+Sizes: the largest peak of all sources plus the frame reserve, rounded up to the 8-byte stack
 alignment. The long work queue runs only the host's P-256 key generation and DH key (GATT caching
-off): every pairing runs both. The other stacks keep their sizes: their measured headroom is
-large and their paths (ISR nesting, the host's ATT and L2CAP error paths, bt_enable) are wider
-than the runs. `EFR32_RADIO_LAUNCH_STACK_SIZE` now only defaults the new
+off), every pairing both; its deepest point is p256-m's field multiply in every image (the return
+addresses left below the watermark: `m256_mul` under `scalar_mult` and `generate_dh_key` in the
+product, under `point_to_affine` on silicon, where LTO kept that function separate). The product's
+QEMU and hardware images have identical p256-m and SMP symbols and sizes, so its own 732 B holds
+for its hardware build; the silicon image's 968 B is the size taken. The TX launch job's silicon
+peak is the scheduler clock service's arm path (`sched_arm_abs` -> `hw_arm` ->
+`k_clock_event_arm_abs_with_generation`). The other stacks keep their sizes: their measured
+headroom is large and their paths (ISR nesting, the host's ATT and L2CAP error paths, bt_enable)
+are wider than the runs. `EFR32_RADIO_LAUNCH_STACK_SIZE` now only defaults the new
 `EFR32_RADIO_TX_LAUNCH_STACK_SIZE` and `EFR32_RADIO_RX_LAUNCH_STACK_SIZE`.
 
-**RAM** (linker map, `check-hardware-ram.sh` arithmetic): `owo_suit -DOWO_HW=ON` 31 052 -> 30 284 B
-(budget 31 000); `owo_suit` 29 692 -> 28 924; `bg22_ek4108a` 30 092 -> 29 324.
+**RAM** (linker map, `check-hardware-ram.sh` arithmetic): `owo_suit -DOWO_HW=ON` 31 052 -> 30 540 B
+(budget 31 000); `owo_suit` 29 692 -> 29 180; `bg22_ek4108a` 30 092 -> 29 580.
 
-**Not shown.** The product's own link-layer threads on silicon: the LL figures are the radio-port
-pairing profile's (7.84), which runs the same controller with logging compiled in, so they bound
-the product's from above only as far as its paths match.
+**Not shown.** The product image itself on silicon (main, idle with power management, the
+output stage's interrupts): only its QEMU figures exist; the silicon figures are the radio-port
+image's. The configuration as committed was run in QEMU at the tighter sizes of the first pass
+(long work queue 768, TX launch 464: (a) 510 rounds and 52 stimulation cycles, (b) 23
+scenarios, no fault); the silicon figures then raised those two.

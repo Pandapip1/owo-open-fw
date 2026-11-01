@@ -105,10 +105,11 @@ operations (0.53 s, about 1.5 mC), once per pairing.
 Stacks, peak high-water (`CONFIG_INIT_STACKS`, QEMU, owo_suit with `sim/product-qemu.conf`,
 LE Secure Connections passkey pairing then 90 s of encrypted GATT; in brackets the same run
 without pairing) [Q]: LLL 436/768 (436), completion job 488/768 (464), ULL worker 528/640 (528),
-BT RX thread 728/1200 (424), BT long work queue 728/1400 (680). The product's own figures with stimulation over the link, and the
-stack sizes taken from them (long work queue 1400 -> 768): docs/radio-tables.md 7.86. Per operation (thread entry
+BT RX thread 728/1200 (424), BT long work queue 728/1400 (680). Per operation (thread entry
 included) [F]: direct ECB 356 B, CMAC 404, CCM 540; PSA ECB 484, CMAC 540, CCM 692; software
-PSA ECB 648, CMAC 712, CCM 896.
+PSA ECB 648, CMAC 712, CCM 896. The product's own figures with stimulation over the link, the
+silicon ones, and the stack sizes taken from them (long work queue 1400 -> 1008):
+docs/radio-tables.md 7.86.
 
 PSA key slots: the link layer no longer takes any, which leaves the long work queue and the RX
 thread; at most one live slot was measured (slot counter in tf-psa-crypto, QEMU product
