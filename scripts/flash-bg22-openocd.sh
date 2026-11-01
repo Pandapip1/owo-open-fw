@@ -51,6 +51,14 @@ else
   )
 fi
 
+# OWO_BG22_NO_SERVERS=1: no GDB, Tcl or telnet listener, so several OpenOCD
+# sessions (e.g. simulator rehearsals) can run side by side without
+# colliding on the default ports 3333, 6666 and 4444.
+if [ -n "${OWO_BG22_NO_SERVERS:-}" ]; then
+  adapter_args+=(-c 'gdb_port disabled' -c 'tcl_port disabled'
+                 -c 'telnet_port disabled')
+fi
+
 target_args=(
   -f target/silabs/xg21.cfg
   -f "$helpers"
