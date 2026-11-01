@@ -19,6 +19,13 @@ config RADIO_PORT_PAIRING_TEST
 	  and the passkey is RADIO_PORT_PASSKEY through the app_passkey callback, as the
 	  product's is (src/ble.rs). prj-pairing.conf.
 
+config RADIO_PORT_ADV_CHANNEL_37_ONLY
+	bool "Advertise on channel 37 only"
+	help
+	  For silicon connection tests while receive on channels 38 and 39
+	  fails (docs/radio-tables.md 7.80): a Central's CONNECT_IND then
+	  arrives on channel 37.
+
 config RADIO_PORT_PASSKEY
 	int "Fixed pairing passkey"
 	depends on RADIO_PORT_PAIRING_TEST

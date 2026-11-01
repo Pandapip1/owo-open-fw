@@ -15,6 +15,10 @@ unsafe extern "C" {
  * deliberately small: this smoke exists to exercise Zephyr's real advertising
  * scheduling path, not to stand in for a received or transmitted air packet. */
 const BT_LE_ADV_OPT_CONN: u32 = 3;
+extern "C" {
+    /* src/gatt.c: advertising channels disabled by RADIO_PORT_ADV_CHANNEL_37_ONLY. */
+    fn radio_port_adv_channels_disabled() -> u32;
+}
 const BT_DATA_FLAGS: u8 = 0x01;
 const BT_LE_AD_GENERAL: u8 = 0x02;
 const BT_LE_AD_NO_BREDR: u8 = 0x04;
@@ -43,7 +47,8 @@ extern "C" fn rust_main() {
         id: 0,
         sid: 0,
         secondary_max_skip: 0,
-        options: BT_LE_ADV_OPT_CONN,
+        // SAFETY: a pure function of the build configuration.
+        options: BT_LE_ADV_OPT_CONN | unsafe { radio_port_adv_channels_disabled() },
         // 100 ms and 105 ms in 0.625-ms units.  This is within the legacy
         // range and gives the scheduler several real advertising deadlines
         // during the bounded QEMU run.

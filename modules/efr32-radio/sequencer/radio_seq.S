@@ -92,6 +92,7 @@
 .equ EFR32_EXCEPTION_TXWARM,          (16 + 8)
 .equ EFR32_EXCEPTION_TX,              (16 + 9)
 .equ EFR32_EXCEPTION_TXPD,            (16 + 10)
+.equ EFR32_EXCEPTION_TIMED,           (16 + EFR32_SEQ_RDMAILBOX_IRQ)
 
 /*
  * The following are the stock IRQ8/TXWARM handler's bounded, mechanical
@@ -309,11 +310,23 @@ efr32_radio_seq_reset:
     movs r1, #EFR32_SYSTICK_CSR_ENABLE_AND_CLKSOURCE
     str r1, [r0]
 
+    /* Timed commands arrive on RDMAILBOX1 (seq_abi.h, SS7.82): no message is
+     * pending at reset, then its one flag raises IRQ 23. */
+    ldr r0, =EFR32_SEQ_TIMED_BLOCK
+    movs r1, #EFR32_SEQ_TIMED_OP_NONE
+    str r1, [r0, #EFR32_SEQ_TIMED_OP]
+    ldr r0, =(EFR32_SEQ_RDMAILBOX1_BASE + EFR32_SEQ_RDMAILBOX_FLAGS + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_SEQ_RDMAILBOX_TIMED_FLAG
+    str r1, [r0]
+    ldr r0, =(EFR32_SEQ_RDMAILBOX1_BASE + EFR32_SEQ_RDMAILBOX_IEN)
+    str r1, [r0]
+
     /* Enable the IRQ of every state event enabled in SEQIEN above, so each is
-     * acknowledged; the M33 scheduler remains the sole source of radio-job
-     * policy. */
+     * acknowledged, and the timed-command mailbox.  The M33 scheduler remains
+     * the sole source of radio-job policy: it chooses each command and its
+     * instant; this core only issues it then. */
     ldr r0, =EFR32_NVIC_ISER0
-    ldr r1, =EFR32_RAC_IRQ_STATE_EVENTS
+    ldr r1, =(EFR32_RAC_IRQ_STATE_EVENTS | (1 << EFR32_SEQ_RDMAILBOX_IRQ))
     str r1, [r0]
 
     cpsie i
@@ -336,7 +349,15 @@ efr32_radio_seq_exception:
     adds r1, #1
     strb r1, [r0, r3]
     mrs r3, ipsr
-    cmp r3, #EFR32_EXCEPTION_TXWARM
+    cmp r3, #EFR32_EXCEPTION_TIMED
+    bne 24f
+    /* A timed command from the M33 (SS7.82); no state event to acknowledge. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_timed_command
+    pop {r0}
+    bx r0
+24: cmp r3, #EFR32_EXCEPTION_TXWARM
     beq 1f
     cmp r3, #EFR32_EXCEPTION_TX2RX
     bne 16f
@@ -376,6 +397,8 @@ efr32_radio_seq_exception:
     ldr r0, =EFR32_SEQ_RX2TX_DECISION
     ldr r0, [r0]
     cmp r0, #EFR32_SEQ_RX2TX_PENDING
+    beq 21f
+    cmp r0, #EFR32_SEQ_RX2TX_STAGED
     beq 21f
     b 2f
 21: /* Stock's RXFRAME status carries TXENS without RXENS: with SWRXEN
@@ -1724,9 +1747,22 @@ efr32_seq_rx_frontend_stop:
  */
 .thumb_func
 efr32_seq_tx_turnaround:
-    push {r4, lr}
+    push {r4, r5, lr}
     movs r0, #0
     bl efr32_seq_trace_stimer
+    /* A connection receive with its reply staged (seq_abi.h, SS7.82): decide
+     * here, at the frame's end, as the link layer would; the M33 commits the
+     * same outcome later.  r5: 0 the M33 decides (decision word), 1 send the
+     * staged reply, 2 send nothing. */
+    movs r5, #0
+    ldr r0, =EFR32_SEQ_RX2TX_DECISION
+    ldr r0, [r0]
+    cmp r0, #EFR32_SEQ_RX2TX_STAGED
+    bne 12f
+    bl efr32_seq_conn_decide
+    movs r5, #2
+    subs r5, r5, r0
+12:
     /* The RAC holds RX2TX until this handler acknowledges, so retune for
      * TX while the M33 decides; the PA comes up only on RESPOND, so nothing
      * radiates for a declined frame (SS7.67). */
@@ -1748,8 +1784,14 @@ efr32_seq_tx_turnaround:
     bl efr32_seq_synth_lock
 11: movs r0, #2
     bl efr32_seq_trace_stimer
-    /* Wait (bounded) for the M33's decision on this received frame: it
-     * either published a response or cancelled; this core never chooses. */
+    /* A staged reply was decided above, by the link layer's rules. */
+    cmp r5, #1
+    beq 2f
+    cmp r5, #2
+    beq 4f
+    /* Otherwise wait (bounded) for the M33's decision on this received
+     * frame: it either published a response or cancelled; this core never
+     * chooses. */
     ldr r4, =EFR32_SEQ_RX2TX_DECISION_WAIT_US
 1:  ldr r0, =EFR32_SEQ_RX2TX_DECISION
     ldr r0, [r0]
@@ -1791,7 +1833,7 @@ efr32_seq_tx_turnaround:
 5:  ldr r2, [r1]
     cmp r2, r0
     blo 5b
-9:  pop {r4, pc}
+9:  pop {r4, r5, pc}
 .ltorg
 
 /* Diagnostic only: bump byte r0 of the per-IRQ count area (slots 24-26 are
@@ -1837,4 +1879,343 @@ efr32_seq_trace_stimer:
     subs r0, #0x20
     str r1, [r0]
     bx lr
+.ltorg
+
+/*
+ * Timed command (seq_abi.h, docs/radio-tables.md SS7.82).  The M33 has done
+ * every preparation (FIFO, packet stage, SR0 handshake) and posted one command
+ * with its instant as a TIMER0 count; this core waits for the instant and
+ * issues it, so no M33 interrupt can delay it.  The wait polls TIMER0.CNT
+ * (signed difference, wrap-safe) and the OP word, which the M33 clears to
+ * cancel; past LIMIT nothing is issued.  Called from the IRQ 23 entry.
+ */
+.equ EFR32_SEQ_RAC_RXENSRCEN_SET,     (EFR32_RAC_RXENSRCEN + EFR32_ALIAS_SET)
+.thumb_func
+efr32_seq_timed_command:
+    ldr r0, =(EFR32_SEQ_RDMAILBOX1_BASE + EFR32_SEQ_RDMAILBOX_FLAGS + EFR32_ALIAS_CLR)
+    movs r1, #EFR32_SEQ_RDMAILBOX_TIMED_FLAG
+    str r1, [r0]
+    ldr r0, =EFR32_SEQ_TIMED_BLOCK
+    ldr r1, [r0, #EFR32_SEQ_TIMED_OP]
+    movs r2, #EFR32_SEQ_TIMED_OP_MASK
+    tst r1, r2
+    beq 9f
+    push {r4, lr}
+    ldr r2, [r0, #EFR32_SEQ_TIMED_TARGET]
+    ldr r3, =EFR32_SEQ_TIMER0_CNT_NS
+    ldr r4, [r3]
+    str r4, [r0, #EFR32_SEQ_TIMED_ENTRY]
+    movs r4, #EFR32_SEQ_TIMED_ENTRY_T1
+    bl efr32_seq_timed_stamp_t1
+1:  ldr r4, [r0, #EFR32_SEQ_TIMED_OP]
+    cmp r4, r1
+    bne 7f
+    ldr r4, [r3]
+    subs r4, r4, r2
+    bmi 1b
+    /* At or past the instant: issue the command only up to LIMIT. */
+    ldr r2, [r0, #EFR32_SEQ_TIMED_LIMIT]
+    ldr r4, [r3]
+    subs r4, r4, r2
+    bgt 6f
+    movs r2, #EFR32_SEQ_TIMED_OP_MASK
+    ands r2, r1
+    cmp r2, #EFR32_SEQ_TIMED_OP_TXEN
+    bne 2f
+    ldr r2, =EFR32_RAC_CMD
+    movs r4, #EFR32_RAC_CMD_TXEN_BIT
+    str r4, [r2]
+    ldr r4, [r3]
+    str r4, [r0, #EFR32_SEQ_TIMED_AT]
+    movs r4, #EFR32_SEQ_TIMED_AT_T1
+    bl efr32_seq_timed_stamp_t1
+    /* A TX that turns to RX raises its RX request right after TXEN, as the
+     * M33 did before (SS7.63). */
+    ldr r2, =EFR32_SEQ_TIMED_RX_AFTER_TX
+    tst r1, r2
+    beq 5f
+    ldr r2, =EFR32_SEQ_RAC_RXENSRCEN_SET
+    movs r4, #EFR32_RAC_RXENSRCEN_SWRXEN_BIT
+    str r4, [r2]
+    b 5f
+2:  cmp r2, #EFR32_SEQ_TIMED_OP_SWRXEN
+    bne 5f
+    ldr r2, =EFR32_SEQ_RAC_RXENSRCEN_SET
+    movs r4, #EFR32_RAC_RXENSRCEN_SWRXEN_BIT
+    str r4, [r2]
+    ldr r4, [r3]
+    str r4, [r0, #EFR32_SEQ_TIMED_AT]
+    movs r4, #EFR32_SEQ_TIMED_AT_T1
+    bl efr32_seq_timed_stamp_t1
+5:  str r1, [r0, #EFR32_SEQ_TIMED_DONE]
+    b 8f
+6:  ldr r2, =EFR32_SEQ_TIMED_LATE
+    b 4f
+7:  ldr r2, =EFR32_SEQ_TIMED_CANCELLED
+4:  orrs r2, r1
+    str r2, [r0, #EFR32_SEQ_TIMED_DONE]
+8:  pop {r4, pc}
+9:  bx lr
+.ltorg
+
+/* Diagnostic: TIMER1.CNT into timed-block word r4 (r0 the block) while TIMER1's bus clock is
+ * on; a gated TIMER1 read would fault.  Preserves r0-r3. */
+.thumb_func
+efr32_seq_timed_stamp_t1:
+    push {r1, r2}
+    ldr r1, =EFR32_SEQ_CMU_CLKEN0_NS
+    ldr r1, [r1]
+    ldr r2, =EFR32_SEQ_CMU_CLKEN0_TIMER1
+    tst r1, r2
+    beq 1f
+    ldr r1, =EFR32_SEQ_TIMER1_CNT_NS
+    ldr r1, [r1]
+    str r1, [r0, r4]
+1:  pop {r1, r2}
+    bx lr
+.ltorg
+
+/*
+ * Staged connection reply (seq_abi.h, docs/radio-tables.md SS7.82).  Takes the
+ * stage (bounded wait, as for the M33's decision), reads the received header
+ * and the CRC trailer from the RX FIFO, decides as lll_conn.c's isr_rx() does,
+ * publishes OUTCOME and, when a reply goes out, writes it to the BUFC TX FIFO
+ * with its SN and NESN; when the event continues it arms the next receive.
+ * Returns r0 = 1 to send the reply, 0 to send nothing.  Clobbers r0-r3.
+ */
+.equ EFR32_SEQ_CONN_PDU_SEQ_BITS, ((1 << EFR32_SEQ_PDU_SN_BIT) | (1 << EFR32_SEQ_PDU_NESN_BIT))
+.equ EFR32_SEQ_CONN_PDU_MD,       (1 << EFR32_SEQ_PDU_MD_BIT)
+.thumb_func
+efr32_seq_conn_decide:
+    push {r4-r7, lr}
+    ldr r7, =EFR32_SEQ_CONN_BLOCK
+    ldr r4, =EFR32_SEQ_RX2TX_DECISION_WAIT_US
+1:  ldr r0, [r7, #EFR32_SEQ_CONN_STATE]
+    movs r1, #EFR32_SEQ_CONN_STAGED
+    tst r0, r1
+    bne 2f
+    movs r0, #1
+    bl efr32_seq_delay
+    subs r4, #1
+    bne 1b
+    /* Not staged in time: nothing is sent; the M33 finds no outcome. */
+    movs r0, #EFR32_SEQ_TRACE_RX2TX_TIMEOUT_SLOT
+    bl efr32_seq_trace_count
+    movs r0, #0
+    pop {r4-r7, pc}
+2:  lsrs r6, r0, #EFR32_SEQ_CONN_GENERATION_SHIFT
+    lsls r6, r6, #EFR32_SEQ_CONN_GENERATION_SHIFT
+    movs r0, #0
+    str r0, [r7, #EFR32_SEQ_CONN_STATE]
+    ldr r0, =EFR32_RAC_STIMER
+    ldr r0, [r0]
+    str r0, [r7, #EFR32_SEQ_CONN_TAKEN_AT]
+    ldr r5, [r7, #EFR32_SEQ_CONN_FLAGS]
+    /* Header, length and trailer octets of the frame, the FIFO wrapping. */
+    ldr r0, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r1, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    mov r3, r1
+    ands r3, r2
+    ldrb r4, [r0, r3]
+    adds r3, r1, #1
+    ands r3, r2
+    ldrb r3, [r0, r3]
+    adds r1, r1, #2
+    adds r1, r1, r3
+    ands r1, r2
+    ldrb r1, [r0, r1]
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MAX]
+    cmp r3, r2
+    bhi 3f
+    movs r2, #EFR32_SEQ_FRC_TRAILER_CRCOK
+    tst r1, r2
+    beq 3f
+    movs r0, #EFR32_SEQ_CONN_OUT_CRC_OK
+    orrs r6, r0
+    movs r0, #EFR32_SEQ_CONN_ADV
+    tst r5, r0
+    beq 15f
+    bl efr32_seq_adv_scan_req_match
+    cmp r0, #0
+    bne 16f
+    b 14f
+3:  movs r0, #EFR32_SEQ_CONN_ADV
+    tst r5, r0
+    beq 17f
+    /* An advertiser answers nothing but a matching SCAN_REQ; the event then ends. */
+14: movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_DONE)
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    movs r0, #0
+    pop {r4-r7, pc}
+16: movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_DONE | EFR32_SEQ_CONN_OUT_REPLY)
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    ldr r2, [r7, #EFR32_SEQ_CONN_CUR]
+    ldr r3, [r7, #EFR32_SEQ_CONN_CUR_OCTETS]
+    ldrb r4, [r2]
+    b 18f
+15:
+    /* Acknowledged: received NESN differs from our SN. */
+    lsrs r0, r4, #EFR32_SEQ_PDU_NESN_BIT
+    lsrs r1, r5, #EFR32_SEQ_CONN_SN_SHIFT
+    eors r0, r1
+    movs r1, #1
+    tst r0, r1
+    beq 4f
+    movs r0, #EFR32_SEQ_CONN_OUT_ACK
+    orrs r6, r0
+4:  /* New data: received SN equals our NESN, and a buffer is free. */
+    lsrs r0, r4, #EFR32_SEQ_PDU_SN_BIT
+    lsrs r2, r5, #EFR32_SEQ_CONN_NESN_SHIFT
+    eors r0, r2
+    tst r0, r1
+    bne 6f
+    movs r0, #EFR32_SEQ_CONN_RX_FREE
+    tst r5, r0
+    beq 6f
+    movs r0, #EFR32_SEQ_CONN_OUT_ACCEPT
+    orrs r6, r0
+    b 6f
+17: /* CRC failed (a frame too long counts as one): the second in a row
+     * closes the event; the received MD is not used. */
+    movs r0, #EFR32_SEQ_CONN_CRC_CLOSES
+    tst r5, r0
+    beq 7f
+    movs r0, #EFR32_SEQ_CONN_OUT_DONE
+    orrs r6, r0
+7:  movs r4, #EFR32_SEQ_CONN_PDU_MD
+6:  ldr r2, [r7, #EFR32_SEQ_CONN_CUR]
+    ldr r3, [r7, #EFR32_SEQ_CONN_CUR_OCTETS]
+    movs r0, #EFR32_SEQ_CONN_OUT_ACK
+    tst r6, r0
+    beq 8f
+    ldr r2, [r7, #EFR32_SEQ_CONN_NEXT]
+    ldr r3, [r7, #EFR32_SEQ_CONN_NEXT_OCTETS]
+8:  /* Closed by a valid frame without MD answered by an empty PDU. */
+    movs r0, #EFR32_SEQ_CONN_OUT_CRC_OK
+    tst r6, r0
+    beq 9f
+    movs r0, #EFR32_SEQ_CONN_PDU_MD
+    tst r4, r0
+    bne 9f
+    ldrb r0, [r2, #1]
+    cmp r0, #0
+    bne 9f
+    movs r0, #EFR32_SEQ_CONN_OUT_DONE
+    orrs r6, r0
+9:  movs r0, #EFR32_SEQ_CONN_OUT_VALID
+    orrs r6, r0
+    /* A Central that is done sends nothing. */
+    movs r0, #EFR32_SEQ_CONN_OUT_DONE
+    tst r6, r0
+    beq 10f
+    movs r0, #EFR32_SEQ_CONN_CENTRAL
+    tst r5, r0
+    beq 10f
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    movs r0, #0
+    pop {r4-r7, pc}
+10: movs r0, #EFR32_SEQ_CONN_OUT_REPLY
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    /* Reply header: SN ^ ack, NESN ^ accept. */
+    ldrb r4, [r2]
+    movs r0, #EFR32_SEQ_CONN_PDU_SEQ_BITS
+    bics r4, r0
+    movs r1, #1
+    lsrs r0, r5, #EFR32_SEQ_CONN_SN_SHIFT
+    lsrs r7, r6, #EFR32_SEQ_CONN_OUT_ACK_SHIFT
+    eors r0, r7
+    ands r0, r1
+    lsls r0, r0, #EFR32_SEQ_PDU_SN_BIT
+    orrs r4, r0
+    lsrs r0, r5, #EFR32_SEQ_CONN_NESN_SHIFT
+    lsrs r7, r6, #EFR32_SEQ_CONN_OUT_ACCEPT_SHIFT
+    eors r0, r7
+    ands r0, r1
+    lsls r0, r0, #EFR32_SEQ_PDU_NESN_BIT
+    orrs r4, r0
+    /* FRC frames the reply from its length octet: restore the length-pending
+     * word count the M33's radio_pkt_configure() sets before every TX (a
+     * received frame left its own there). */
+18: ldr r0, =EFR32_SEQ_FRC_WCNTCMP0
+    movs r1, #EFR32_SEQ_FRC_WCNTCMP0_LENGTH_PENDING
+    str r1, [r0]
+    /* Into the BUFC TX FIFO the M33 configured: CLEAR, then every octet. */
+    ldr r0, =EFR32_SEQ_BUFC_TX_CMD
+    movs r1, #EFR32_SEQ_BUFC_CMD_CLEAR
+    str r1, [r0]
+    ldr r0, =EFR32_SEQ_BUFC_TX_WRITEDATA
+    str r4, [r0]
+    movs r1, #1
+11: cmp r1, r3
+    bhs 12f
+    ldrb r4, [r2, r1]
+    str r4, [r0]
+    adds r1, #1
+    b 11b
+12: /* The event continues: the next receive is armed and staged, as after a
+     * launched TX (efr32_radio_tx_start(), SS7.63). */
+    movs r0, #EFR32_SEQ_CONN_OUT_DONE
+    tst r6, r0
+    bne 13f
+    ldr r0, =EFR32_SEQ_RX2TX_DECISION
+    movs r1, #EFR32_SEQ_RX2TX_STAGED
+    str r1, [r0]
+    ldr r0, =(EFR32_RAC_RXENSRCEN + EFR32_ALIAS_SET)
+    movs r1, #EFR32_RAC_RXENSRCEN_SWRXEN_BIT
+    str r1, [r0]
+13: movs r0, #1
+    pop {r4-r7, pc}
+.ltorg
+
+/*
+ * A SCAN_REQ for this advertiser (seq_abi.h EFR32_SEQ_CONN_ADV): type, length,
+ * RxAdd and AdvA, as isr_rx_pdu()'s isr_rx_sr_adva_check().  r7 the stage
+ * block, r4 the received header octet, r3 its length, r5 FLAGS.  Returns r0 = 1
+ * on a match.  Clobbers r0-r3; preserves r4-r7.
+ */
+.thumb_func
+efr32_seq_adv_scan_req_match:
+    push {r4-r6, lr}
+    movs r0, #EFR32_SEQ_ADV_TYPE_MASK
+    ands r0, r4
+    cmp r0, #EFR32_SEQ_ADV_SCAN_REQ_TYPE
+    bne 8f
+    cmp r3, #EFR32_SEQ_ADV_SCAN_REQ_LEN
+    bne 8f
+    /* RxAdd of the request is the advertiser's TxAdd. */
+    lsrs r0, r4, #EFR32_SEQ_ADV_RXADD_BIT
+    movs r1, #1
+    ands r0, r1
+    movs r1, #EFR32_SEQ_CONN_ADV_TXADD
+    ands r1, r5
+    beq 1f
+    movs r1, #1
+1:  cmp r0, r1
+    bne 8f
+    /* AdvA, at payload octet 6, against the staged one; the FIFO wraps. */
+    ldr r0, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r1, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    adds r1, #(2 + EFR32_SEQ_ADV_SCAN_REQ_ADVA)
+    movs r3, #0
+2:  mov r4, r1
+    adds r4, r4, r3
+    ands r4, r2
+    ldrb r4, [r0, r4]
+    movs r5, #EFR32_SEQ_CONN_ADVA
+    adds r5, r5, r3
+    ldrb r5, [r7, r5]
+    cmp r4, r5
+    bne 8f
+    adds r3, #1
+    cmp r3, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 2b
+    movs r0, #1
+    pop {r4-r6, pc}
+8:  movs r0, #0
+    pop {r4-r6, pc}
 .ltorg

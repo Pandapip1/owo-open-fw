@@ -95,21 +95,54 @@ static inline int efr32_dl_hold_start_by(uint32_t instant, uint32_t pre_ns, uint
 #define EFR32_DL_WAKE_CYC EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WAKE_LATENCY_NS)
 
 /*
+ * Launches timed by the sequencer (docs/radio-tables.md 7.82). The launch job runs at most pre
+ * (measured, EFR32_RADIO_{TX,RX}_LAUNCH_PRE_NS) from its start to posting its command; the
+ * sequencer polls the instant at most EFR32_RADIO_SEQ_TIMED_WAKE_NS after the post and issues
+ * the command at most EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS after the instant, or, polling only
+ * after the instant, that long after its first poll. No M33 interrupt can come between: a job
+ * that starts by instant - pre - wake commands within [instant, instant + hold_late], one that
+ * starts later commands that much later. With a spec tolerance its start-by deadline is
+ * instant - pre - wake + tolerance - hold_late, and the latest count at which the sequencer
+ * still issues the command (its limit) is instant + tolerance - hold_late.
+ *
+ * The job has no not-before bound (it only posts): it is released one interrupt allowance
+ * (EFR32_RADIO_INTERRUPT_BLOCKING_NS) before its start-by, so an interrupt arriving with the
+ * release cannot make it late, and armed the wake latency before that.
+ */
+static inline int efr32_dl_timed_start_by(uint32_t instant, uint32_t pre_ns, uint32_t tolerance_us)
+{
+	return (int)(instant - EFR32_DL_MEAS_CYC(pre_ns) -
+		     EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_WAKE_NS) +
+		     EFR32_DL_SPEC_CYC(tolerance_us) -
+		     EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS));
+}
+
+static inline uint32_t efr32_dl_timed_limit(uint32_t instant, uint32_t tolerance_us)
+{
+	return instant + EFR32_DL_SPEC_CYC(tolerance_us) -
+	       EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS);
+}
+
+static inline uint32_t efr32_dl_timed_release(int start_by)
+{
+	return (uint32_t)start_by - EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS);
+}
+
+/*
  * TX launch: the first packet of a scheduled event (ADV_IND on the first channel, a central's
  * anchor) starts at T_advEvent = advInterval + advDelay, held to the sleep clock's 16 us. TXEN
  * to the first bit is a fixed silicon path (91.7 us + d_tx, section 7.71), the same for every
  * event, so TXEN carries the event's timing.
  */
-static inline uint32_t efr32_dl_tx_launch_not_before(uint32_t instant)
-{
-	return efr32_dl_hold_not_before(instant, CONFIG_EFR32_RADIO_TX_LAUNCH_PRE_NS);
-}
-
 static inline int efr32_dl_tx_launch_start_by(uint32_t instant)
 {
-	return efr32_dl_hold_start_by(instant, CONFIG_EFR32_RADIO_TX_LAUNCH_PRE_NS,
-				      BT_SLEEP_CLOCK_JITTER_US,
-				      CONFIG_EFR32_RADIO_TX_LAUNCH_HOLD_LATE_NS);
+	return efr32_dl_timed_start_by(instant, CONFIG_EFR32_RADIO_TX_LAUNCH_PRE_NS,
+				       BT_SLEEP_CLOCK_JITTER_US);
+}
+
+static inline uint32_t efr32_dl_tx_launch_limit(uint32_t instant)
+{
+	return efr32_dl_timed_limit(instant, BT_SLEEP_CLOCK_JITTER_US);
 }
 
 /*
@@ -121,15 +154,14 @@ static inline int efr32_dl_tx_launch_start_by(uint32_t instant)
  * @p tolerance_us (hal/efr32/radio_conn.h) before that latest point: SWRXEN is held to the
  * instant and may come at most @p tolerance_us late.
  */
-static inline uint32_t efr32_dl_rx_window_not_before(uint32_t instant)
-{
-	return efr32_dl_hold_not_before(instant, CONFIG_EFR32_RADIO_RX_LAUNCH_PRE_NS);
-}
-
 static inline int efr32_dl_rx_window_start_by(uint32_t instant, uint32_t tolerance_us)
 {
-	return efr32_dl_hold_start_by(instant, CONFIG_EFR32_RADIO_RX_LAUNCH_PRE_NS, tolerance_us,
-				      CONFIG_EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS);
+	return efr32_dl_timed_start_by(instant, CONFIG_EFR32_RADIO_RX_LAUNCH_PRE_NS, tolerance_us);
+}
+
+static inline uint32_t efr32_dl_rx_window_limit(uint32_t instant, uint32_t tolerance_us)
+{
+	return efr32_dl_timed_limit(instant, tolerance_us);
 }
 
 /*
@@ -173,11 +205,13 @@ static inline int efr32_dl_rx_launch_start_by(uint32_t instant)
 #define EFR32_DL_TX_LAUNCH_LATEST_CYC \
 	((int32_t)(EFR32_DL_SPEC_CYC(BT_SLEEP_CLOCK_JITTER_US) - \
 		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_TX_LAUNCH_PRE_NS) - \
-		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_TX_LAUNCH_HOLD_LATE_NS)))
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_WAKE_NS) - \
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS)))
 #define EFR32_DL_RX_WINDOW_LATEST_CYC \
 	((int32_t)(EFR32_DL_SPEC_CYC(EVENT_TICKER_RES_MARGIN_US) - \
 		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_RX_LAUNCH_PRE_NS) - \
-		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS)))
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_WAKE_NS) - \
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS)))
 #define EFR32_DL_LAUNCH_LATEST_CYC \
 	((uint32_t)MIN(EFR32_DL_TX_LAUNCH_LATEST_CYC, EFR32_DL_RX_WINDOW_LATEST_CYC))
 /*
@@ -187,7 +221,22 @@ static inline int efr32_dl_rx_launch_start_by(uint32_t instant)
  * (EFR32_RADIO_AES_BLOCKING_NS). The connection runs and paths in Kconfig were measured on
  * unencrypted links, so these are added to them.
  */
-#if defined(CONFIG_BT_CTLR_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC) && defined(CONFIG_EFR32_RADIO_CONN_STAGED)
+/*
+ * With staged replies (7.82) a receive's completion decrypts the frame and stages the next two
+ * replies, both encrypted, and commits without encrypting; a prepare stages the event's first
+ * two replies, a Central's after encrypting its anchor PDU.
+ */
+#define EFR32_DL_CCM_STAGE_NS \
+	(2U * CONFIG_EFR32_RADIO_CCM_ENCRYPT_NS + CONFIG_EFR32_RADIO_AES_BLOCKING_NS)
+#define EFR32_DL_CCM_RX_TX_NS (CONFIG_EFR32_RADIO_CCM_DECRYPT_NS + EFR32_DL_CCM_STAGE_NS)
+/* The decrypt (and one accelerator wait) ahead of the commit. */
+#define EFR32_DL_CCM_RX_NS \
+	(CONFIG_EFR32_RADIO_CCM_DECRYPT_NS + CONFIG_EFR32_RADIO_AES_BLOCKING_NS)
+#define EFR32_DL_CCM_PREPARE_NS \
+	(EFR32_DL_CCM_STAGE_NS + COND_CODE_1(CONFIG_BT_CENTRAL, \
+		    (CONFIG_EFR32_RADIO_CCM_ENCRYPT_NS), (0)))
+#elif defined(CONFIG_BT_CTLR_LE_ENC)
 #define EFR32_DL_CCM_RX_TX_NS \
 	(CONFIG_EFR32_RADIO_CCM_DECRYPT_NS + CONFIG_EFR32_RADIO_CCM_ENCRYPT_NS + \
 	 CONFIG_EFR32_RADIO_AES_BLOCKING_NS)
@@ -197,6 +246,9 @@ static inline int efr32_dl_rx_launch_start_by(uint32_t instant)
 #else
 #define EFR32_DL_CCM_RX_TX_NS 0
 #define EFR32_DL_CCM_PREPARE_NS 0
+#endif
+#if !defined(EFR32_DL_CCM_RX_NS)
+#define EFR32_DL_CCM_RX_NS 0
 #endif
 /* The ULL worker derives the session key with one AES-ECB block (hal/ecb.c, ull_llcp_enc.c). */
 #define EFR32_DL_ECB_ULL_NS \
@@ -232,6 +284,55 @@ static inline int efr32_dl_completion_tx_rx_start_by(uint32_t post, uint32_t to_
 		     EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) -
 		     EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS) -
 		     EFR32_DL_MEAS_CYC(to_pending_ns));
+}
+
+/*
+ * Connection completions with staged replies (docs/radio-tables.md 7.82). The sequencer answers
+ * each received frame on its own at T_IFS; the M33's work only has to be done before the next
+ * frame needs it. The shortest exchange: our reply starts T_IFS less the active clock's 2 us after
+ * the received frame's end and is at least an empty PDU long; the peer's next frame starts as
+ * soon after that and ends an empty PDU later.
+ */
+#define BT_LE_1M_EMPTY_PDU_US \
+	((1U + 4U + 2U + BT_LE_CRC_OCTETS) * BT_LE_1M_US_PER_OCTET)
+#define EFR32_DL_CONN_TURN_US (BT_T_IFS_150_US - BT_ACTIVE_CLOCK_JITTER_US)
+
+/*
+ * Receive completion (isr_rx(): commit the outcome, stage the replies to the next receive) of
+ * the frame that ended at @p eof: it re-arms the RX FIFO (BUFC CLEAR, @p to_clear_ns from its
+ * start) before the next frame can begin, and posts the next stage (@p to_staged_ns) before
+ * that frame can end, when the sequencer takes it.
+ */
+static inline int efr32_dl_conn_rx_staged_start_by(uint32_t eof, uint32_t to_clear_ns,
+						   uint32_t to_staged_ns)
+{
+	int32_t clear = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US +
+							   BT_LE_1M_EMPTY_PDU_US) -
+				  EFR32_DL_MEAS_CYC(to_clear_ns));
+	int32_t staged = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * (EFR32_DL_CONN_TURN_US +
+								   BT_LE_1M_EMPTY_PDU_US)) -
+				   EFR32_DL_MEAS_CYC(to_staged_ns));
+
+	return ((staged - clear) < 0) ? (int)staged : (int)clear;
+}
+
+/*
+ * Transmit completion that turns to a staged receive (isr_tx(): label the receive, arm its
+ * timeout): the receive's completion is held off while it runs, so it must end before that
+ * completion's start-by. Our frame ended at the earliest frame_end_to_post and one blocked
+ * interrupt before @p post; the receive's frame ends at the earliest one exchange later.
+ */
+static inline int efr32_dl_conn_tx_staged_start_by(uint32_t post, uint32_t run_ns,
+						   uint32_t to_clear_ns, uint32_t to_staged_ns)
+{
+	uint32_t eof_next = post -
+			    EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) -
+			    EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS) +
+			    EFR32_DL_SPEC_CYC(EFR32_DL_CONN_TURN_US + BT_LE_1M_EMPTY_PDU_US);
+
+	return (int)((uint32_t)efr32_dl_conn_rx_staged_start_by(eof_next, to_clear_ns,
+								 to_staged_ns) -
+		     EFR32_DL_MEAS_CYC(run_ns));
 }
 
 /*
