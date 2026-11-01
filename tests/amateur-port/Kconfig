@@ -1,0 +1,106 @@
+# Test-only configuration for the EFR32 amateur-radio workload.
+
+menu "EFR32 amateur-port test"
+
+choice AMATEUR_PORT_ROLE
+	prompt "Role"
+	default AMATEUR_PORT_ADVERTISER
+
+config AMATEUR_PORT_ADVERTISER
+	bool "Non-connectable advertiser with the call sign in its advertising data"
+	depends on BT_BROADCASTER
+
+config AMATEUR_PORT_SCANNER
+	bool "Passive scanner that prints the names it receives"
+	depends on BT_OBSERVER
+
+endchoice
+
+config AMATEUR_PORT_CALLSIGN
+	string "Call sign"
+	default "KD3APL"
+
+config AMATEUR_PORT_AMATEUR
+	bool "Switch to amateur rules (off: stay under Part 15)"
+	default y
+
+choice AMATEUR_PORT_PLAN
+	prompt "Channel plan under amateur rules"
+	default AMATEUR_PORT_PLAN_ODD
+
+config AMATEUR_PORT_PLAN_ODD
+	bool "Every channel on an odd MHz inside 2400-2450 MHz (no standard carrier)"
+	help
+	  Standard carrier + 1 MHz up to 2447 MHz, the rest 47 MHz lower
+	  (2401-2433 MHz): a plan no Part 15 Bluetooth device listens on, all
+	  inside the ISM band as well as the 13 cm amateur band.
+
+config AMATEUR_PORT_PLAN_DEFAULT
+	bool "The module's default plan"
+
+config AMATEUR_PORT_PLAN_SINGLE
+	bool "Every channel on AMATEUR_PORT_SINGLE_KHZ"
+	help
+	  For transmitting on one carrier only (silicon synthesizer checks,
+	  docs/radio-tables.md 7.85). The module still refuses a carrier
+	  outside the band or the measured synthesizer range.
+
+endchoice
+
+config AMATEUR_PORT_SINGLE_KHZ
+	int "The single carrier (kHz)"
+	depends on AMATEUR_PORT_PLAN_SINGLE
+	default 2445000
+
+config AMATEUR_PORT_SYNTH_MONITOR
+	bool "Sample the synthesizer while transmitting (advertiser role)"
+	depends on AMATEUR_PORT_ADVERTISER && AMATEUR_PORT_PLAN_SINGLE
+	help
+	  While advertising and identifying, sample SYNTH.STATUS (lock,
+	  calibration error) and the VCO tuning code in the RAC TX state, and
+	  print them after the closing identification.
+
+config AMATEUR_PORT_ADV_SECONDS
+	int "Advertise this long, then stop and return to Part 15 (0: forever)"
+	default 0
+
+config AMATEUR_PORT_SELFTEST
+	bool "Check the amateur API before starting the role"
+	default y
+
+config AMATEUR_PORT_SYNTH_PROBE
+	bool "Receive-only synthesizer sweep, 2290-2500 MHz (scanner role)"
+	depends on AMATEUR_PORT_SCANNER
+	select EFR32_RADIO_AMATEUR_SYNTH_PROBE
+	help
+	  Scans passively with all three advertising channels moved to probe
+	  carriers, three at a time, and samples the synthesizer while the
+	  radio is in RXSEARCH: lock indication, calibration error and the
+	  VCO tuning code per carrier (docs/radio-tables.md 7.85). Transmits
+	  nothing: the module stops the radio on any transmission.
+
+config AMATEUR_PORT_PROBE_STEP_KHZ
+	int "Probe step (kHz)"
+	depends on AMATEUR_PORT_SYNTH_PROBE
+	default 5000
+
+config AMATEUR_PORT_PROBE_MIN_KHZ
+	int "Lowest probe carrier (kHz)"
+	depends on AMATEUR_PORT_SYNTH_PROBE
+	default 2290000
+
+config AMATEUR_PORT_PROBE_MAX_KHZ
+	int "Highest probe carrier (kHz)"
+	depends on AMATEUR_PORT_SYNTH_PROBE
+	default 2500000
+
+config AMATEUR_PORT_PROBE_DWELL_MS
+	int "Scan time per three carriers (ms)"
+	depends on AMATEUR_PORT_SYNTH_PROBE
+	default 900
+
+endmenu
+
+# Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
+osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
+source "Kconfig.zephyr"

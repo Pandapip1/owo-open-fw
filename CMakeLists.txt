@@ -30,6 +30,13 @@ endif()
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(owo_open_fw)
 
+# The OWO product needs link-layer encryption (pairing protects the output stage). Amateur
+# operation refuses encryption (47 CFR 97.113(a)(4)), so this firmware never carries it, in any
+# configuration (modules/efr32-radio, docs/amateur-radio.md).
+if(CONFIG_EFR32_RADIO_AMATEUR)
+  message(FATAL_ERROR "CONFIG_EFR32_RADIO_AMATEUR is not allowed in the OWO product firmware")
+endif()
+
 rust_cargo_application()
 
 if(CONFIG_OWO_GECKO_APP_PROPERTIES)

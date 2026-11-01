@@ -47,6 +47,9 @@
 #include "qemu_tifs_state.h"
 #endif
 #include "timer_state.h"
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+#include "amateur_radio.h"
+#endif
 
 #include "util/mem.h"
 #include "util/memq.h"
@@ -809,7 +812,20 @@ static uint8_t MALIGN(4) pkt_scratch[EFR32_PKT_SIZE_MAX];
  * the configured length), and FRC appends the CRC itself. RAIL's fixed 512 octets are
  * SIZE512 = 3; without data length extension and DTM the largest PDU (39 octets) needs SIZE64.
  */
-static uint8_t MALIGN(4) efr32_tx_fifo[EFR32_BUFC_FIFO_BYTES(EFR32_PKT_SIZE_MAX)];
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+/*
+ * The amateur Morse identification is one fixed-length OOK frame (efr32_radio_cw_transmit()):
+ * RAIL's 512 octets hold a 12-character call sign at 20 WPM (12 symbols a unit, at most 22 units
+ * a character: 396 octets).
+ */
+#define EFR32_CW_FRAME_OCTETS_MAX 512U
+#define EFR32_TX_FRAME_MAX MAX(EFR32_PKT_SIZE_MAX, EFR32_CW_FRAME_OCTETS_MAX)
+/* The staged TX is a Morse identification frame. */
+static bool efr32_cw_frame;
+#else
+#define EFR32_TX_FRAME_MAX EFR32_PKT_SIZE_MAX
+#endif
+static uint8_t MALIGN(4) efr32_tx_fifo[EFR32_BUFC_FIFO_BYTES(EFR32_TX_FRAME_MAX)];
 #if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 /*
  * The synthetic descriptor producer is a QEMU-only test seam.  Keep its
@@ -893,6 +909,8 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_SYNTH_FREQ_FRACTION_BITS 19U
 #define EFR32_SYNTH_REFERENCE_HZ 38400000ULL
 #define EFR32_BLE_CHANNEL_BASE_MHZ 2400U
+#define EFR32_KHZ_PER_MHZ 1000U
+#define EFR32_HZ_PER_KHZ 1000ULL
 
 #define EFR32_RFCRC_BASE 0xB8010000UL
 #define EFR32_RFCRC_EN_OFFSET 0x004U
@@ -1387,8 +1405,14 @@ static void efr32_packet_stage_arm_keep(enum efr32_radio_packet_direction direct
 		LL_ASSERT(efr32_packet_stage.tx_source != NULL);
 		LL_ASSERT(efr32_packet_stage.tx_fifo_configured);
 		LL_ASSERT(efr32_packet_stage.tx_bytes >= 2U);
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+		/* A Morse identification frame is not a link-layer PDU (efr32_radio_cw_transmit()). */
+		LL_ASSERT(efr32_cw_frame || efr32_packet_stage.tx_bytes <=
+			  (uint32_t)efr32_packet_stage.max_len + 2U);
+#else
 		LL_ASSERT(efr32_packet_stage.tx_bytes <=
 			  (uint32_t)efr32_packet_stage.max_len + 2U);
+#endif
 	}
 
 	/* The LLL reads completion state from its ISR callback, so clear only
@@ -2249,6 +2273,11 @@ static int ccm_run(bool encrypt, const struct ccm *ccm, const uint8_t *pdu_in, u
 	uint8_t nonce[BLE_CCM_NONCE_SIZE];
 	uint8_t aad = pdu_in[0] & BLE_CCM_AAD_MASK;
 
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+	if (!efr32_radio_amateur_ccm_permitted()) {
+		return -EPERM;
+	}
+#endif
 	ccm_nonce_build(ccm, nonce);
 	return efr32_radioaes_ccm(encrypt, ccm->key, sizeof(ccm->key), nonce, sizeof(nonce), &aad,
 				  sizeof(aad), pdu_in + PDU_DC_LL_HEADER_SIZE,
@@ -2287,6 +2316,12 @@ static uint16_t efr32_conn_image_build(uint8_t *image, const struct efr32_radio_
 		return PDU_DC_LL_HEADER_SIZE;
 	}
 	LL_ASSERT(r->len + (r->ccm != NULL ? BLE_CCM_MIC_SIZE : 0U) <= EFR32_PKT_PAYLOAD_MAX);
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+	/* Refused (and the radio shut down) under amateur rules: nothing is staged. */
+	if (r->ccm != NULL && !efr32_radio_amateur_ccm_permitted()) {
+		return 0U;
+	}
+#endif
 	if (r->ccm != NULL) {
 		struct ccm ccm = *r->ccm;
 		uint8_t nonce[BLE_CCM_NONCE_SIZE];
@@ -3014,6 +3049,20 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 		return;
 	}
 #endif
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+	/*
+	 * The end of a Morse identification: no link-layer event follows inside its ticker slot,
+	 * which reserves EVENT_OVERHEAD_XTAL_US + EVENT_OVERHEAD_END_US after the frame
+	 * (hal/amateur.c): the radio must be back in its Bluetooth configuration by then.
+	 */
+	if (!abort && direction == EFR32_RADIO_PACKET_TX && efr32_cw_frame) {
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS);
+		*deadline = (int)(now + k_us_to_cyc_floor32(EVENT_OVERHEAD_XTAL_US +
+							   EVENT_OVERHEAD_END_US) -
+				  EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS));
+		return;
+	}
+#endif
 	if (abort) {
 		wcet_ns = conn ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS :
 				 CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS;
@@ -3473,6 +3522,17 @@ void radio_tx_power_max_set(void)
 	radio_tx_power_set(0U);
 }
 
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+/* SYNTH.FREQ for a carrier in kHz, rounded to nearest as the captured words are. */
+static uint32_t efr32_synth_freq_word(uint32_t khz)
+{
+	uint64_t hz = (uint64_t)khz * EFR32_HZ_PER_KHZ;
+
+	return (uint32_t)(((hz << EFR32_SYNTH_FREQ_FRACTION_BITS) + (EFR32_SYNTH_REFERENCE_HZ / 2ULL)) /
+			  EFR32_SYNTH_REFERENCE_HZ);
+}
+#endif
+
 /* [hardware] Tune any BLE channel: carrier, channel index, channel-dependent modem rates (T4). */
 void radio_freq_chan_set(uint32_t chan)
 {
@@ -3482,6 +3542,11 @@ void radio_freq_chan_set(uint32_t chan)
 	/* Zephyr passes MHz relative to 2400: 2..80, always even. */
 	LL_ASSERT((chan >= 2U) && (chan <= 80U) && ((chan & 1U) == 0U));
 	channel_number = (chan - 2U) / 2U;
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+	/* Amateur operation: the plan's carrier for this RF channel (hal/amateur.c). */
+	frequency_word = efr32_synth_freq_word(efr32_radio_amateur_carrier_khz(
+		channel_number, (EFR32_BLE_CHANNEL_BASE_MHZ + chan) * EFR32_KHZ_PER_MHZ));
+#else
 	{
 		uint64_t hz = (uint64_t)(EFR32_BLE_CHANNEL_BASE_MHZ + chan) * 1000000ULL;
 
@@ -3490,6 +3555,7 @@ void radio_freq_chan_set(uint32_t chan)
 					     (EFR32_SYNTH_REFERENCE_HZ / 2ULL)) /
 					    EFR32_SYNTH_REFERENCE_HZ);
 	}
+#endif
 	/*
 	 * A hardware trace of the working RAIL_StartTx path establishes the
 	 * complete channel handoff: WCNTCMP2 and CHSP carry the zero-based 2 MHz
@@ -4014,6 +4080,10 @@ void radio_pkt_tx_set(void *tx_packet)
 	 */
 	LL_ASSERT(efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_IDLE);
 	LL_ASSERT(pdu != NULL);
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+	/* Every link-layer transmission passes here: the identification schedule counts it. */
+	efr32_radio_amateur_tx_notify();
+#endif
 	bytes = (uint32_t)pdu[1] + 2U;
 	EFR32_RADIO_TRACE_ONCE("tx-fifo bytes=%u pdu0=0x%02x len=%u",
 			       bytes, pdu[0], pdu[1]);
@@ -5170,6 +5240,173 @@ uint32_t radio_is_off(void)
 	return atomic_get(&efr32_radio_power_ref) == 0;
 }
 
+#if defined(CONFIG_EFR32_RADIO_AMATEUR)
+/*
+ * Amateur operation (docs/amateur-radio.md): what the radio can do, and the Morse
+ * identification sent by on-off keying the carrier.
+ *
+ * The synthesizer range is the one measured to calibrate and lock (docs/radio-tables.md
+ * SS7.85); outside it the plan is refused, so the radio never transmits off frequency.
+ */
+/*
+ * [F] SS7.85: the M0+'s VCO calibration converged, far from either end of its 11-bit code,
+ * at every carrier probed from 2290 to 2500 MHz (receive only, 5 MHz steps; code 0x58A at
+ * 2290 MHz to 0x1A8 at 2500 MHz), and the synthesizer reported lock throughout transmissions
+ * at the carriers tested (SS7.85). The datasheet specifies only 2400-2483.5 MHz (BGM220P
+ * Table 4.5, FRANGE). Outside the probed range nothing was measured.
+ */
+#define EFR32_AMATEUR_SYNTH_MIN_KHZ 2290000U
+#define EFR32_AMATEUR_SYNTH_MAX_KHZ 2500000U
+/* BGM220P datasheet Table 4.5: POUTMAX, 8 dBm output power part, typical 8.2 dBm. */
+#define EFR32_AMATEUR_MAX_POWER_MDBM 8200
+/*
+ * Guard either side of the carrier that stays inside the band: the first offset of the Bluetooth
+ * transmit spectrum mask (Core v6.1 Vol 6 Part A 3.2.2, Tables 3.3 and 3.4), where the power in
+ * 1 MHz is at most -20 dBm: 2 MHz with 1 Msym/s (LE 1M, LE Coded), 4 MHz with 2 Msym/s.
+ */
+#define EFR32_AMATEUR_HALF_BW_KHZ_1MSYM 2000U
+#define EFR32_AMATEUR_HALF_BW_KHZ_2MSYM 4000U
+
+const struct efr32_amateur_hw efr32_radio_amateur_hw = {
+	.synth_min_khz = EFR32_AMATEUR_SYNTH_MIN_KHZ,
+	.synth_max_khz = EFR32_AMATEUR_SYNTH_MAX_KHZ,
+	.max_power_mdbm = EFR32_AMATEUR_MAX_POWER_MDBM,
+};
+
+const uint32_t efr32_radio_amateur_half_bw_khz =
+	IS_ENABLED(CONFIG_BT_CTLR_PHY_2M) ? EFR32_AMATEUR_HALF_BW_KHZ_2MSYM :
+					     EFR32_AMATEUR_HALF_BW_KHZ_1MSYM;
+
+/*
+ * On-off keying (EFR32xG22 reference manual 5.1.2: "ASK / OOK" among the transmit modulation
+ * modes). MODEM.CTRL0.MODFORMAT selects it (public register model MODEM_S_field.py: bits 8:6;
+ * the configurator's calc_demodulator.py encodes OOK/ASK as 6). The Morse key pattern is sent as
+ * OOK symbols, EFR32_CW_SYMBOLS_PER_UNIT per Morse unit, so keying edges fall on symbol
+ * boundaries of a rate the modem supports (the reference manual: "below 100 Baud/s to 2
+ * MBaud/s").
+ */
+#define EFR32_MODEM_CTRL0_OFFSET 0x020U
+#define EFR32_MODEM_CTRL0_MODFORMAT_SHIFT 6U
+#define EFR32_MODEM_CTRL0_MODFORMAT_MASK (0x7U << EFR32_MODEM_CTRL0_MODFORMAT_SHIFT)
+#define EFR32_MODEM_CTRL0_MODFORMAT_OOKASK (6U << EFR32_MODEM_CTRL0_MODFORMAT_SHIFT)
+/* MODEM.TXBR: TXBRNUM bits 15:0, TXBRDEN bits 23:16; baud = f_HFXO / (8 x NUM / DEN). */
+#define EFR32_MODEM_TXBR_OFFSET 0x058U
+#define EFR32_MODEM_TXBR_DEN_SHIFT 16U
+#define EFR32_MODEM_TXBR_NUM_MAX 0xFFFFU
+#define EFR32_MODEM_TXBR_HFXO_DIVIDER 8U
+/* MODEM.PRE.TXBASES bits 31:16: preamble repetitions; none, so no keyed preamble. */
+#define EFR32_MODEM_PRE_OFFSET 0x064U
+#define EFR32_MODEM_PRE_TXBASES_MASK (0xFFFFU << 16)
+/* MODEM.MODINDEX: MODINDEXM bits 4:0, MODINDEXE bits 9:5 (two's complement). */
+#define EFR32_MODEM_MODINDEX_OFFSET 0x088U
+#define EFR32_MODEM_MODINDEX_ME_MASK 0x3FFU
+#define EFR32_MODEM_MODINDEXE_SHIFT 5U
+#define EFR32_MODEM_MODINDEXE_FIELD_MASK 0x1FU
+/* FRC.DFLCTRL.DFLMODE bits 2:0: 0 disables dynamic length (WCNTCMP0 fixes it). */
+#define EFR32_FRC_DFLCTRL_OFFSET 0x00CU
+#define EFR32_FRC_DFLCTRL_DFLMODE_MASK 0x7U
+#define EFR32_FRC_WCNTCMP0_FRAMELENGTH_MASK 0xFFFU
+/* FRC.FCDn.INCLUDECRC (10) and CALCCRC (11): no CRC is computed or sent. */
+#define EFR32_FRC_FCD_INCLUDECRC BIT(10)
+#define EFR32_FRC_FCD_CALCCRC BIT(11)
+
+/* OOK symbol rate: 200 Bd, 12 symbols per 60 ms unit at 20 WPM. */
+#define EFR32_CW_SYMBOL_RATE_HZ 200U
+#define EFR32_CW_TXBRNUM (EFR32_SYNTH_REFERENCE_HZ / \
+			  (EFR32_MODEM_TXBR_HFXO_DIVIDER * EFR32_CW_SYMBOL_RATE_HZ))
+#define EFR32_CW_TXBRDEN 1U
+BUILD_ASSERT(EFR32_SYNTH_REFERENCE_HZ % (EFR32_MODEM_TXBR_HFXO_DIVIDER * EFR32_CW_SYMBOL_RATE_HZ) ==
+	     0U, "the CW symbol rate must be exact");
+BUILD_ASSERT(EFR32_CW_TXBRNUM <= EFR32_MODEM_TXBR_NUM_MAX, "TXBRNUM is 16 bits");
+
+/*
+ * The OOK amplitude scale in MODEM.MODINDEX, as the configurator sets it for OOK/BPSK
+ * (calc_modulator.py calc_modindex_value): 150 x 16 / (shaping gain x interpolation gain).
+ * Shaping gain with CTRL0.SHAPING = 3 (the 1M table's) is max(COEFF0..7) = 0x53 = 83
+ * (calc_shaping.py, the 1M delta table's SHAPING0/1); the interpolation gain is TXBRNUM / 128
+ * for TXBRNUM >= 16384 (calc_demodulator.py) = 187.5. 2400 / (83 x 187.5) = 0.1542, whose
+ * nearest MODINDEXM x 2^MODINDEXE with M <= 31 (calc_utilities.py frac2exp) is 20 x 2^-7.
+ * tests/efr32-radio-contract replays the computation. [I] unmeasured on air.
+ */
+#define EFR32_CW_MODINDEXM 20U
+#define EFR32_CW_MODINDEXE (-7)
+
+uint32_t efr32_radio_cw_symbols_per_unit(uint32_t unit_us)
+{
+	return (uint32_t)(((uint64_t)EFR32_CW_SYMBOL_RATE_HZ * unit_us) / USEC_PER_SEC);
+}
+
+uint32_t efr32_radio_cw_symbol_rate_hz(void)
+{
+	return EFR32_CW_SYMBOL_RATE_HZ;
+}
+
+uint32_t efr32_radio_cw_max_octets(void)
+{
+	return MIN(sizeof(efr32_tx_fifo), EFR32_FRC_WCNTCMP0_FRAMELENGTH_MASK + 1U);
+}
+
+/* Read-modify-write through the SET/CLR aliases, as the rest of this file does. */
+static void efr32_reg_field(uintptr_t reg, uint32_t mask, uint32_t value)
+{
+	*radio_reg32(reg + EFR32_REGISTER_CLEAR_OFFSET) = mask & ~value;
+	*radio_reg32(reg + EFR32_REGISTER_SET_OFFSET) = value & mask;
+}
+
+void efr32_radio_cw_transmit(uint32_t khz, const uint8_t *bits, size_t octets,
+			     radio_isr_cb_t done, void *param)
+{
+	/* The sync word is sent before the frame: all zero, the key stays up. */
+	static const uint8_t key_up_sync[sizeof(uint32_t)];
+	uint32_t channel_number = 0U;
+
+	LL_ASSERT(octets > 0U && octets <= efr32_radio_cw_max_octets());
+	radio_reset();
+	radio_phy_set(PHY_1M, 0U);
+	radio_tx_power_max_set();
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_FREQ_OFFSET) = efr32_synth_freq_word(khz);
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WCNTCMP2_OFFSET) = channel_number;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHCTRL_OFFSET) = 0U;
+	*radio_reg32(EFR32_SYNTH_BASE + EFR32_SYNTH_CHSP_OFFSET) = channel_number;
+	radio_aa_set(key_up_sync);
+	radio_pkt_configure(8U, EFR32_PKT_PAYLOAD_MAX, 0U);
+
+	efr32_reg_field(EFR32_MODEM_BASE + EFR32_MODEM_CTRL0_OFFSET,
+			EFR32_MODEM_CTRL0_MODFORMAT_MASK, EFR32_MODEM_CTRL0_MODFORMAT_OOKASK);
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_TXBR_OFFSET) =
+		(EFR32_CW_TXBRDEN << EFR32_MODEM_TXBR_DEN_SHIFT) | EFR32_CW_TXBRNUM;
+	efr32_reg_field(EFR32_MODEM_BASE + EFR32_MODEM_PRE_OFFSET, EFR32_MODEM_PRE_TXBASES_MASK, 0U);
+	efr32_reg_field(EFR32_MODEM_BASE + EFR32_MODEM_MODINDEX_OFFSET, EFR32_MODEM_MODINDEX_ME_MASK,
+			EFR32_CW_MODINDEXM |
+			(((uint32_t)EFR32_CW_MODINDEXE & EFR32_MODEM_MODINDEXE_FIELD_MASK)
+			 << EFR32_MODEM_MODINDEXE_SHIFT));
+	efr32_reg_field(EFR32_FRC_BASE + EFR32_FRC_DFLCTRL_OFFSET, EFR32_FRC_DFLCTRL_DFLMODE_MASK, 0U);
+	*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_WCNTCMP0_OFFSET) = (uint32_t)octets - 1U;
+	for (uint32_t d = 0U; d < EFR32_FRC_FCD_COUNT; d++) {
+		efr32_reg_field(EFR32_FRC_BASE + EFR32_FRC_FCD0_OFFSET + d * EFR32_FRC_FCD_STRIDE,
+				EFR32_FRC_FCD_INCLUDECRC | EFR32_FRC_FCD_CALCCRC | EFR32_FRC_FCD_SKIPWHITE,
+				EFR32_FRC_FCD_SKIPWHITE);
+	}
+
+	memcpy(efr32_tx_fifo, bits, octets);
+	efr32_packet_stage.tx_source = bits;
+	efr32_packet_stage.tx_bytes = (uint32_t)octets;
+	efr32_packet_stage.tx_fifo_configured = true;
+	efr32_cw_frame = true;
+	radio_isr_set(done, param);
+	radio_switch_complete_and_disable();
+	radio_tx_enable();
+}
+
+void efr32_radio_cw_finish(void)
+{
+	efr32_cw_frame = false;
+	radio_status_reset();
+	/* The 1M tables restore MODEM and FRC; the next event re-tunes and re-frames. */
+	radio_phy_set(PHY_1M, 0U);
+}
+#endif /* CONFIG_EFR32_RADIO_AMATEUR */
+
 #if defined(CONFIG_SCHED_DEADLINE_MISS_CUSTOM)
 /*
  * Safe shutdown on a missed or infeasible deadline (include/zephyr/kernel/deadline_miss.h).
@@ -5292,6 +5529,26 @@ void k_deadline_miss_handler(const struct k_deadline_miss *miss)
 	if (suspend_self) {
 		k_thread_suspend(k_current_get());
 	}
+}
+
+/*
+ * A rule the radio must keep cannot be kept (for example an amateur station identification
+ * not sent by its deadline): the same safe shutdown, reported as a late start of @p event.
+ */
+void efr32_radio_policy_stop(const struct k_deadline_event *event, const char *why)
+{
+	static const struct k_deadline_miss_run no_runs[1];
+	struct k_deadline_miss miss = {
+		.kind = K_DEADLINE_MISS_START,
+		.object = event,
+		.name = why,
+		.now = k_cycle_get_32(),
+		.ran = no_runs,
+	};
+
+	miss.release = miss.now;
+	miss.deadline = (int)miss.now;
+	k_deadline_miss_handler(&miss);
 }
 #endif /* CONFIG_SCHED_DEADLINE_MISS_CUSTOM */
 
