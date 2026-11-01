@@ -24,6 +24,18 @@ void efr32_radio_cw_transmit(uint32_t khz, const uint8_t *bits, size_t octets,
 			     void (*done)(void *param), void *param);
 /* From @p done: the radio back to its Bluetooth configuration. */
 void efr32_radio_cw_finish(void);
+/*
+ * Data identification (EFR32_RADIO_AMATEUR_ID_DATA): send @p pdu (header, length,
+ * payload) on advertising channel @p chan (37..39, the plan's carrier) as an advertising PDU,
+ * @p done at its end. @p first: LLL context, radio idle (the whole advertising setup, as
+ * lll_adv.c's prepare); otherwise from the previous PDU's @p done (as lll_adv.c's isr_done).
+ */
+void efr32_radio_id_adv_transmit(uint8_t chan, const uint8_t *pdu, bool first,
+				 void (*done)(void *param), void *param);
+/* From the last PDU's @p done: no more identification PDUs. */
+void efr32_radio_id_adv_finish(void);
+/* TXEN to the first bit on air, us (Kconfig EFR32_RADIO_TX_READY_NS). */
+uint32_t efr32_radio_id_tx_ready_us(void);
 /* Safe shutdown (PA off, controller stopped) because a rule cannot be kept. */
 void efr32_radio_policy_stop(const struct k_deadline_event *event, const char *why);
 

@@ -403,3 +403,206 @@ bool efr32_amateur_id_next(const struct efr32_amateur_id_state *state,
 	due->release_ms = due->end_of_communication ? end : periodic;
 	return true;
 }
+
+/*
+ * The data identification, BLE Amateur Station Identification v1 (docs/ble-amateur-station-id.md,
+ * "BLE-ASI"), in a dedicated ADV_NONCONN_IND (BLE-ASI 6).
+ *
+ * Core v6.1 Vol 6 Part B 2.3: the advertising physical channel PDU header is PDU Type
+ * (bits 3:0), RFU, ChSel (5), TxAdd (6), RxAdd (7), then the payload length octet;
+ * ADV_NONCONN_IND is PDU Type 0b0010, its payload AdvA (6 octets) then AdvData (0-31 octets)
+ * (2.3.1.3). An AD structure is a length octet (counting the AD type and the data), the AD type
+ * and the data (Core v6.1 Vol 3 Part C 11). BLE-ASI 3: AD type 0x21, Service Data - 128-bit UUID
+ * (Supplement Part A 1.11), the UUID least significant octet first, a header octet, the call
+ * sign's ASCII octets.
+ */
+#define ADV_PDU_TYPE_NONCONN_IND 0x2U
+#define ADV_PDU_HEADER_TXADD (1U << 6)
+#define ADV_PDU_HEADER_TYPE_MASK 0xFU
+#define ADV_PDU_HEADER_OCTETS EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS
+#define ADV_DATA_MAX 31U
+#define AD_LENGTH_OCTETS 1U
+#define AD_TYPE_SERVICE_DATA_UUID128 0x21U
+#define UUID128_OCTETS 16U
+/* BLE-ASI 2: 47cf0097-0119-4de0-b1e0-ca1151600073, as sent (little-endian). */
+static const uint8_t ble_asi_uuid_le[UUID128_OCTETS] = {
+	0x73, 0x00, 0x60, 0x51, 0x11, 0xCA, 0xE0, 0xB1,
+	0xE0, 0x4D, 0x19, 0x01, 0x97, 0x00, 0xCF, 0x47,
+};
+/* BLE-ASI 4: version in bits 7-4, FINAL in bit 0, bits 3-1 reserved (0). */
+#define BLE_ASI_VERSION 1U
+#define BLE_ASI_VERSION_SHIFT 4U
+#define BLE_ASI_FLAG_FINAL 0x01U
+#define BLE_ASI_HEADER_OCTETS 1U
+/* AD type, UUID and header ahead of the call sign: AD length = 18 + N (BLE-ASI 3). */
+#define BLE_ASI_FIXED_OCTETS (1U + UUID128_OCTETS + BLE_ASI_HEADER_OCTETS)
+#define BLE_ASI_CALLSIGN_MIN 1U
+#define BLE_ASI_CALLSIGN_MAX 12U
+_Static_assert(EFR32_AMATEUR_CALLSIGN_MAX == BLE_ASI_CALLSIGN_MAX,
+	       "BLE-ASI 3: a call sign of at most 12 octets");
+
+/* BLE-ASI 5: A-Z, 0-9 and '/'. */
+static bool ble_asi_char_valid(char c)
+{
+	return is_upper(c) || is_digit(c) || c == '/';
+}
+
+size_t efr32_amateur_data_id_ad(const char *callsign, bool final, uint8_t *out, size_t out_size)
+{
+	size_t n = 0U;
+	size_t octets;
+	uint8_t *p = out;
+
+	if (callsign == NULL || out == NULL) {
+		return 0U;
+	}
+	for (; callsign[n] != '\0'; n++) {
+		if (n >= BLE_ASI_CALLSIGN_MAX || !ble_asi_char_valid(callsign[n])) {
+			return 0U;
+		}
+	}
+	octets = AD_LENGTH_OCTETS + BLE_ASI_FIXED_OCTETS + n;
+	if (n < BLE_ASI_CALLSIGN_MIN || octets > ADV_DATA_MAX || octets > out_size) {
+		return 0U;
+	}
+	*p++ = (uint8_t)(BLE_ASI_FIXED_OCTETS + n);
+	*p++ = AD_TYPE_SERVICE_DATA_UUID128;
+	memcpy(p, ble_asi_uuid_le, UUID128_OCTETS);
+	p += UUID128_OCTETS;
+	*p++ = (uint8_t)((BLE_ASI_VERSION << BLE_ASI_VERSION_SHIFT) |
+			 (final ? BLE_ASI_FLAG_FINAL : 0U));
+	memcpy(p, callsign, n);
+	return octets;
+}
+
+size_t efr32_amateur_data_id_pdu(const char *callsign, bool final, const uint8_t *addr,
+				 bool addr_random, uint8_t *out, size_t out_size)
+{
+	size_t ad;
+
+	if (addr == NULL || out == NULL ||
+	    out_size < ADV_PDU_HEADER_OCTETS + EFR32_AMATEUR_BDADDR_SIZE) {
+		return 0U;
+	}
+	ad = efr32_amateur_data_id_ad(callsign, final, &out[ADV_PDU_HEADER_OCTETS +
+							    EFR32_AMATEUR_BDADDR_SIZE],
+				      out_size - ADV_PDU_HEADER_OCTETS - EFR32_AMATEUR_BDADDR_SIZE);
+	if (ad == 0U) {
+		return 0U;
+	}
+	out[0] = (uint8_t)(ADV_PDU_TYPE_NONCONN_IND | (addr_random ? ADV_PDU_HEADER_TXADD : 0U));
+	out[1] = (uint8_t)(EFR32_AMATEUR_BDADDR_SIZE + ad);
+	memcpy(&out[ADV_PDU_HEADER_OCTETS], addr, EFR32_AMATEUR_BDADDR_SIZE);
+	return ADV_PDU_HEADER_OCTETS + EFR32_AMATEUR_BDADDR_SIZE + ad;
+}
+
+bool efr32_amateur_data_id_parse_ad(const uint8_t *ad, size_t octets, char *callsign, bool *final)
+{
+	size_t i = 0U;
+
+	/* BLE-ASI 8: by AD type and UUID, then the version; the rest is the call sign. */
+	while (i + AD_LENGTH_OCTETS < octets) {
+		size_t len = ad[i];
+		const uint8_t *s = &ad[i + AD_LENGTH_OCTETS];
+
+		if (len == 0U || i + AD_LENGTH_OCTETS + len > octets) {
+			return false;
+		}
+		if (s[0] == AD_TYPE_SERVICE_DATA_UUID128 && len > BLE_ASI_FIXED_OCTETS &&
+		    memcmp(&s[1], ble_asi_uuid_le, UUID128_OCTETS) == 0 &&
+		    (s[1U + UUID128_OCTETS] >> BLE_ASI_VERSION_SHIFT) == BLE_ASI_VERSION) {
+			size_t n = len - BLE_ASI_FIXED_OCTETS;
+			const uint8_t *c = &s[BLE_ASI_FIXED_OCTETS];
+
+			if (n > BLE_ASI_CALLSIGN_MAX) {
+				return false;
+			}
+			for (size_t k = 0U; k < n; k++) {
+				if (!ble_asi_char_valid((char)c[k])) {
+					return false;
+				}
+				callsign[k] = (char)c[k];
+			}
+			callsign[n] = '\0';
+			*final = (s[1U + UUID128_OCTETS] & BLE_ASI_FLAG_FINAL) != 0U;
+			return true;
+		}
+		i += AD_LENGTH_OCTETS + len;
+	}
+	return false;
+}
+
+bool efr32_amateur_data_id_parse(const uint8_t *pdu, size_t octets, char *callsign, bool *final)
+{
+	size_t ad = ADV_PDU_HEADER_OCTETS + EFR32_AMATEUR_BDADDR_SIZE;
+
+	if (octets < ad || (pdu[0] & ADV_PDU_HEADER_TYPE_MASK) != ADV_PDU_TYPE_NONCONN_IND ||
+	    (size_t)pdu[1] + ADV_PDU_HEADER_OCTETS != octets) {
+		return false;
+	}
+	return efr32_amateur_data_id_parse_ad(&pdu[ad], octets - ad, callsign, final);
+}
+
+/*
+ * A static device address for the identification only (BLE-ASI 6; Core v6.1 Vol 6 Part B
+ * 1.3.2.1): the two most significant bits 1, the other 46 random, not all 0 nor all 1.
+ */
+#define STATIC_ADDR_MSB_INDEX (EFR32_AMATEUR_BDADDR_SIZE - 1U)
+#define STATIC_ADDR_TYPE_MASK 0xC0U
+#define STATIC_ADDR_RANDOM_MASK 0x3FU
+#define OCTET_ALL_ONES 0xFFU
+
+bool efr32_amateur_static_addr(const uint8_t *random, uint8_t *addr)
+{
+	bool zeros = true;
+	bool ones = true;
+
+	for (size_t i = 0U; i < EFR32_AMATEUR_BDADDR_SIZE; i++) {
+		uint8_t v = random[i];
+		uint8_t mask = i == STATIC_ADDR_MSB_INDEX ? STATIC_ADDR_RANDOM_MASK : OCTET_ALL_ONES;
+
+		zeros &= (v & mask) == 0U;
+		ones &= (v & mask) == mask;
+		addr[i] = i == STATIC_ADDR_MSB_INDEX ? (uint8_t)((v & mask) | STATIC_ADDR_TYPE_MASK) :
+						       v;
+	}
+	return !zeros && !ones;
+}
+
+/* Core v6.1 Vol 6 Part B 2.1: LE 1M preamble 1 octet, access address 4, CRC 3; 1 Msym/s. */
+#define LE1M_PREAMBLE_OCTETS 1U
+#define LE_ACCESS_ADDRESS_OCTETS 4U
+#define LE_CRC_OCTETS 3U
+#define BITS_PER_OCTET 8U
+#define LE1M_US_PER_BIT 1U
+
+uint32_t efr32_amateur_le1m_airtime_us(size_t pdu_octets)
+{
+	return (uint32_t)((LE1M_PREAMBLE_OCTETS + LE_ACCESS_ADDRESS_OCTETS + pdu_octets +
+			   LE_CRC_OCTETS) * BITS_PER_OCTET * LE1M_US_PER_BIT);
+}
+
+uint32_t efr32_amateur_id_span_us(uint32_t methods, const struct efr32_amateur_id_timing *timing)
+{
+	uint32_t parts = 0U;
+	uint32_t last_us = 0U;
+	bool data = (methods & EFR32_AMATEUR_ID_METHOD_DATA) != 0U;
+	bool cw = (methods & EFR32_AMATEUR_ID_METHOD_CW) != 0U;
+
+	if (methods == 0U || (methods & ~EFR32_AMATEUR_ID_METHODS_ALL) != 0U) {
+		return 0U;
+	}
+	if (data) {
+		/* Every data PDU but the last is followed by another part. */
+		if (timing->tx_ready_us + timing->data_pdu_us > timing->spacing_us) {
+			return 0U;
+		}
+		parts += EFR32_AMATEUR_ADV_CHANNELS;
+		last_us = timing->data_pdu_us;
+	}
+	if (cw) {
+		parts++;
+		last_us = timing->cw_us;
+	}
+	return (parts - 1U) * timing->spacing_us + timing->tx_ready_us + last_us;
+}

@@ -11,14 +11,36 @@ config AMATEUR_PORT_ADVERTISER
 	depends on BT_BROADCASTER
 
 config AMATEUR_PORT_SCANNER
-	bool "Passive scanner that prints the names it receives"
+	bool "Passive scanner that prints the names and identifications it receives"
 	depends on BT_OBSERVER
+
+config AMATEUR_PORT_PERIPHERAL
+	bool "Connectable advertiser that stays in the connection a Central makes"
+	depends on BT_PERIPHERAL
+
+config AMATEUR_PORT_CENTRAL
+	bool "Central: connects to AMATEUR_PORT_PEER_NAME, then scans passively while connected"
+	depends on BT_CENTRAL && BT_OBSERVER
 
 endchoice
 
 config AMATEUR_PORT_CALLSIGN
 	string "Call sign"
 	default "KD3APL"
+
+config AMATEUR_PORT_ADV_NAME
+	string "The application's advertised name (empty: the call sign)"
+	default ""
+	help
+	  With the data identification (EFR32_RADIO_AMATEUR_ID_DATA) the
+	  application's advertising need not carry the call sign: the QEMU
+	  data-identification runs advertise another name and check that the
+	  identification frames are the station's own, apart from it.
+
+config AMATEUR_PORT_PEER_NAME
+	string "Name the Central connects to"
+	depends on AMATEUR_PORT_CENTRAL
+	default "owo-app"
 
 config AMATEUR_PORT_AMATEUR
 	bool "Switch to amateur rules (off: stay under Part 15)"
@@ -37,6 +59,15 @@ config AMATEUR_PORT_PLAN_ODD
 
 config AMATEUR_PORT_PLAN_DEFAULT
 	bool "The module's default plan"
+
+config AMATEUR_PORT_PLAN_INBAND
+	bool "Standard carriers that are in band; the rest on 2402 MHz"
+	help
+	  Every channel keeps its Bluetooth carrier where that is inside
+	  the 13 cm band with its guard (2402-2448 MHz: channels 0-21, 37,
+	  38); the others (22-36, 39) move to 2402 MHz. Only standard
+	  in-band ISM carriers, so a stock Bluetooth scanner hears channels
+	  37 and 38 (silicon checks with the laptop scanning).
 
 config AMATEUR_PORT_PLAN_SINGLE
 	bool "Every channel on AMATEUR_PORT_SINGLE_KHZ"
@@ -63,6 +94,16 @@ config AMATEUR_PORT_SYNTH_MONITOR
 config AMATEUR_PORT_ADV_SECONDS
 	int "Advertise this long, then stop and return to Part 15 (0: forever)"
 	default 0
+
+config AMATEUR_PORT_EOC_EVERY_S
+	int "Measurement only: end the communication this often while advertising (s, 0: never)"
+	depends on AMATEUR_PORT_ADVERTISER
+	default 0
+	help
+	  Calls efr32_amateur_end_of_communication() at this period while
+	  advertising, so an identification (FINAL) is sent every period: many
+	  samples of the identification's runs and airtime in one session
+	  (EFR32_RADIO_AMATEUR_ID_PROBE).
 
 config AMATEUR_PORT_SELFTEST
 	bool "Check the amateur API before starting the role"

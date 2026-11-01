@@ -4,8 +4,10 @@
  * The radio starts, and stays, under the unlicensed rules (US 47 CFR Part 15: the Bluetooth
  * channels, 2402-2480 MHz). efr32_amateur_enable() switches it to an amateur administration's
  * rules for a licensed station: the carrier follows a channel plan inside that administration's
- * bands, encryption is refused, and the station's call sign is sent in Morse code by keying the
- * carrier at least every identification interval during a communication and at its end.
+ * bands, encryption is refused, and the station's call sign is sent at least every
+ * identification interval during a communication and at its end: in Morse code by keying the
+ * carrier (the default), and/or (CONFIG_EFR32_RADIO_AMATEUR_ID_DATA, legal basis unconfirmed) as
+ * a BLE Amateur Station Identification frame (docs/ble-amateur-station-id.md).
  * efr32_amateur_disable() identifies a last time and returns to Part 15. Rules, rule text and
  * what is and is not measured: docs/amateur-radio.md.
  *
@@ -51,6 +53,8 @@ struct efr32_amateur_config {
  *         bandwidth) or outside the radio's measured synthesizer range;
  *         efr32_amateur_last_error_channel() names the channel.
  * @retval -EBUSY A connection exists; switch rules with no connection.
+ * @retval -EADDRNOTAVAIL The data identification (CONFIG_EFR32_RADIO_AMATEUR_ID_DATA) is to be
+ *         sent from the station's address and the controller has none.
  * @retval -EALREADY Already under amateur rules.
  */
 int efr32_amateur_enable(const struct efr32_amateur_config *config);

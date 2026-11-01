@@ -29,7 +29,7 @@ import re, sys
 out, min_ids = sys.argv[1], int(sys.argv[2])
 INTERVAL_MS = 600000  # 47 CFR 97.119(a)
 console = open(out + "/console.txt", errors="replace").read()
-ends = [int(m) for m in re.findall(r"identification \d+ \(\S+, CW\) ended at (\d+) ms", console)]
+ends = [int(m) for m in re.findall(r"identification \d+ \(\S+, [^)]+\) ended at (\d+) ms", console)]
 fail = False
 if "SAFE SHUTDOWN" in console:
     print("FAIL: safe shutdown"); fail = True

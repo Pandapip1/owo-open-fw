@@ -213,8 +213,138 @@ static void ook_modindex(void)
 	assert(best_m == 20 && best_e == -7);
 }
 
+/*
+ * The data identification against BLE-ASI v1 (docs/ble-amateur-station-id.md): the octets of
+ * its section 9 example, written out here from the document.
+ */
+static const unsigned char asi_example_kd3apl[25] = {
+	0x18, 0x21, 0x73, 0x00, 0x60, 0x51, 0x11, 0xCA, 0xE0, 0xB1, 0xE0, 0x4D, 0x19,
+	0x01, 0x97, 0x00, 0xCF, 0x47, 0x10, 0x4B, 0x44, 0x33, 0x41, 0x50, 0x4C,
+};
+
+static void data_id(void)
+{
+	uint8_t ad[EFR32_AMATEUR_DATA_ID_AD_MAX];
+	uint8_t pdu[EFR32_AMATEUR_DATA_ID_PDU_MAX];
+	const uint8_t addr[EFR32_AMATEUR_BDADDR_SIZE] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0xC6 };
+	char call[EFR32_AMATEUR_CALLSIGN_MAX + 1U];
+	bool final = true;
+
+	/* Section 9: AdvData 25 octets, AD length 24, header 0x10. */
+	assert(efr32_amateur_data_id_ad("KD3APL", false, ad, sizeof(ad)) == 25U);
+	assert(memcmp(ad, asi_example_kd3apl, sizeof(asi_example_kd3apl)) == 0);
+	/* Section 4: FINAL is header 0x11, nothing else changes. */
+	assert(efr32_amateur_data_id_ad("KD3APL", true, ad, sizeof(ad)) == 25U);
+	assert(ad[18] == 0x11);
+	assert(memcmp(ad, asi_example_kd3apl, 18) == 0 && memcmp(&ad[19], &asi_example_kd3apl[19], 6) == 0);
+
+	/* Section 3: 19 + N octets; N = 12 fills the 31-octet legacy AdvData. */
+	assert(efr32_amateur_data_id_ad("W1AW/KH6", false, ad, sizeof(ad)) == 19U + 8U);
+	assert(efr32_amateur_data_id_ad("KD3APL/AB12C", false, ad, sizeof(ad)) == 31U);
+	/* Section 5: 1-12 of A-Z, 0-9, '/'; nothing else, and the buffer must hold it. */
+	assert(efr32_amateur_data_id_ad("", false, ad, sizeof(ad)) == 0U);
+	assert(efr32_amateur_data_id_ad("KD3APL/AB12CD", false, ad, sizeof(ad)) == 0U);
+	assert(efr32_amateur_data_id_ad("kd3apl", false, ad, sizeof(ad)) == 0U);
+	assert(efr32_amateur_data_id_ad("KD3APL-1", false, ad, sizeof(ad)) == 0U);
+	assert(efr32_amateur_data_id_ad("KD3APL", false, ad, 24U) == 0U);
+
+	/* Section 6: the dedicated ADV_NONCONN_IND, AdvData only the structure. */
+	assert(efr32_amateur_data_id_pdu("KD3APL", false, addr, true, pdu, sizeof(pdu)) == 33U);
+	assert(pdu[0] == 0x42); /* PDU Type 0b0010 ADV_NONCONN_IND, TxAdd (random) */
+	assert(pdu[1] == 31U);  /* AdvA 6 + AdvData 25 */
+	assert(memcmp(&pdu[2], addr, sizeof(addr)) == 0);
+	assert(memcmp(&pdu[8], asi_example_kd3apl, sizeof(asi_example_kd3apl)) == 0);
+	assert(efr32_amateur_data_id_pdu("KD3APL", false, addr, false, pdu, sizeof(pdu)) == 33U);
+	assert(pdu[0] == 0x02); /* public address: TxAdd clear */
+	/* Section 9: 41 octets on LE 1M with preamble, access address and CRC: 328 us. */
+	assert(efr32_amateur_le1m_airtime_us(33U) == 328U);
+
+	/* Section 8: a receiver finds it by type and UUID and reads the call sign and FINAL. */
+	assert(efr32_amateur_data_id_parse(pdu, 33U, call, &final));
+	assert(strcmp(call, "KD3APL") == 0 && !final);
+	assert(efr32_amateur_data_id_pdu("KD3APL", true, addr, true, pdu, sizeof(pdu)) == 33U);
+	assert(efr32_amateur_data_id_parse(pdu, 33U, call, &final) && final);
+	/* Behind another AD structure (Flags), still found. */
+	{
+		uint8_t two[3 + 25];
+
+		two[0] = 2U;
+		two[1] = 0x01U;
+		two[2] = 0x06U;
+		memcpy(&two[3], asi_example_kd3apl, sizeof(asi_example_kd3apl));
+		assert(efr32_amateur_data_id_parse_ad(two, sizeof(two), call, &final));
+		assert(strcmp(call, "KD3APL") == 0 && !final);
+	}
+	/* Another version, another UUID, a bad character: not an identification. */
+	memcpy(ad, asi_example_kd3apl, sizeof(asi_example_kd3apl));
+	ad[18] = 0x20;
+	assert(!efr32_amateur_data_id_parse_ad(ad, 25U, call, &final));
+	memcpy(ad, asi_example_kd3apl, sizeof(asi_example_kd3apl));
+	ad[2] ^= 0x01;
+	assert(!efr32_amateur_data_id_parse_ad(ad, 25U, call, &final));
+	memcpy(ad, asi_example_kd3apl, sizeof(asi_example_kd3apl));
+	ad[19] = 'k';
+	assert(!efr32_amateur_data_id_parse_ad(ad, 25U, call, &final));
+	/* A truncated structure. */
+	assert(!efr32_amateur_data_id_parse_ad(asi_example_kd3apl, 24U, call, &final));
+	/* Not an ADV_NONCONN_IND. */
+	assert(efr32_amateur_data_id_pdu("KD3APL", false, addr, true, pdu, sizeof(pdu)) == 33U);
+	pdu[0] = 0x40; /* ADV_IND */
+	assert(!efr32_amateur_data_id_parse(pdu, 33U, call, &final));
+}
+
+/* The identification's own address (BLE-ASI 6): a static random address. */
+static void static_addr(void)
+{
+	const uint8_t draw[6] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+	const uint8_t zeros[6] = { 0 };
+	const uint8_t ones[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F };
+	const uint8_t ones_type[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	uint8_t addr[6];
+
+	assert(efr32_amateur_static_addr(draw, addr));
+	assert(addr[5] == 0xC6 && memcmp(addr, draw, 5) == 0); /* two MSBs 0b11 */
+	/* The 46 random bits must be neither all 0 nor all 1 (Core v6.1 Vol 6 Part B 1.3.2.1). */
+	assert(!efr32_amateur_static_addr(zeros, addr));
+	assert(!efr32_amateur_static_addr(ones, addr));
+	assert(!efr32_amateur_static_addr(ones_type, addr));
+}
+
+/*
+ * The identification methods (Kconfig EFR32_RADIO_AMATEUR_ID_DATA, EFR32_RADIO_AMATEUR_ID_CW):
+ * every combination's span, from the first TXEN to the end of the last frame.
+ */
+static void id_methods(void)
+{
+	const struct efr32_amateur_id_timing t = {
+		.tx_ready_us = 100U, /* placeholder figures; only the arithmetic is checked */
+		.spacing_us = 10000U,
+		.data_pdu_us = 328U,
+		.cw_us = 4320000U,
+	};
+	struct efr32_amateur_id_timing tight = t;
+
+	/* CW only (the default): the Morse frame after its TX ramp. */
+	assert(efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHOD_CW, &t) == 100U + 4320000U);
+	/* Data only: three PDUs, each within the spacing of the previous TXEN. */
+	assert(efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHOD_DATA, &t) ==
+	       2U * 10000U + 100U + 328U);
+	/* Both: the three PDUs, then the Morse frame within the spacing of the last. */
+	assert(efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHODS_ALL, &t) ==
+	       3U * 10000U + 100U + 4320000U);
+	/* None, or an unknown method: refused. */
+	assert(efr32_amateur_id_span_us(0U, &t) == 0U);
+	assert(efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHODS_ALL + 1U, &t) == 0U);
+	/* A data PDU that does not fit its spacing cannot be followed: refused. */
+	tight.spacing_us = 400U;
+	assert(efr32_amateur_id_span_us(EFR32_AMATEUR_ID_METHOD_DATA, &tight) == 0U);
+}
+
 int main(void)
 {
+	data_id();
+	static_addr();
+	id_methods();
 	ook_modindex();
 	callsigns();
 	bands();

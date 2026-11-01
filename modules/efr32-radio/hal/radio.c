@@ -822,6 +822,12 @@ static uint8_t MALIGN(4) pkt_scratch[EFR32_PKT_SIZE_MAX];
 #define EFR32_TX_FRAME_MAX MAX(EFR32_PKT_SIZE_MAX, EFR32_CW_FRAME_OCTETS_MAX)
 /* The staged TX is a Morse identification frame. */
 static bool efr32_cw_frame;
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+/* The staged TX is a data-identification PDU (efr32_radio_id_adv_transmit()). */
+static bool efr32_id_adv_frame;
+#define EFR32_ID_COMPLETION_NS \
+	(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS + CONFIG_EFR32_RADIO_WCET_AMATEUR_ID_COMPLETION_NS)
+#endif
 #else
 #define EFR32_TX_FRAME_MAX EFR32_PKT_SIZE_MAX
 #endif
@@ -3062,6 +3068,20 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 				  EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS));
 		return;
 	}
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	/*
+	 * A data-identification PDU: its completion launches the next part of the identification
+	 * (hal/amateur.c), which starts within the advertising PDU spacing of this TXEN, the bound
+	 * the identification's slot is sized with (efr32_amateur_id_span_us()).
+	 */
+	if (!abort && direction == EFR32_RADIO_PACKET_TX && efr32_id_adv_frame) {
+		/* A transmit's measured completion plus the identification's own callback. */
+		*budget = EFR32_DL_MEAS_CYC(EFR32_ID_COMPLETION_NS);
+		*deadline = efr32_dl_adv_next_start_by(efr32_radio_last_txen,
+						       EFR32_ID_COMPLETION_NS);
+		return;
+	}
+#endif
 #endif
 	if (abort) {
 		wcet_ns = conn ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS :
@@ -3272,6 +3292,9 @@ void radio_reset(void)
 	efr32_hw_turnaround_reset();
 	/* Every prepare starts here; a connection's sets its facts after (radio_conn.h). */
 	efr32_radio_conn_interval_us = 0U;
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+	efr32_id_adv_frame = false;
+#endif
 	efr32_radio_rx_window_tolerance_us = 0U;
 	efr32_radio_rx_eof_valid = false;
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
@@ -5405,6 +5428,61 @@ void efr32_radio_cw_finish(void)
 	/* The 1M tables restore MODEM and FRC; the next event re-tunes and re-frames. */
 	radio_phy_set(PHY_1M, 0U);
 }
+
+#if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
+/*
+ * The data identification's advertising PDUs, outside any LLL event, in the identification's
+ * reserved slot: the setup of OpenISA lll_adv.c (prepare_cb() for the first PDU, chan_prepare()
+ * and isr_done() for the next), with the advertising access address and CRC (Core v6.1 Vol 6
+ * Part B 2.1.2, 3.1.1) and the channel's carrier and whitening (lll_chan_set(),
+ * radio_whiten_iv_set()).
+ */
+/* The advertising PDU's Length field: 8 bits (Core v6.1 Vol 6 Part B 2.3). */
+#define EFR32_ID_ADV_LENGTH_BITS 8U
+
+void efr32_radio_id_adv_transmit(uint8_t chan, const uint8_t *pdu, bool first,
+				 radio_isr_cb_t done, void *param)
+{
+	LL_ASSERT(chan >= EFR32_AMATEUR_ADV_CHANNEL_FIRST && chan < EFR32_AMATEUR_CHANNELS);
+	if (first) {
+		uint32_t aa = sys_cpu_to_le32(PDU_AC_ACCESS_ADDR);
+
+		radio_reset();
+		radio_tx_power_max_set();
+		radio_phy_set(PHY_LEGACY, PHY_FLAGS_UNUSED);
+		/* An 8-bit length field, legacy PHY (OpenISA lll_adv.c prepare_cb()). */
+		radio_pkt_configure(EFR32_ID_ADV_LENGTH_BITS, PDU_AC_LEG_PAYLOAD_SIZE_MAX, 0U);
+		radio_aa_set((uint8_t *)&aa);
+		radio_crc_configure(PDU_CRC_POLYNOMIAL, PDU_AC_CRC_IV);
+	} else {
+		radio_status_reset();
+		radio_tmr_status_reset();
+	}
+	/* radio_freq_chan_set() takes MHz above 2400; it tunes to the plan's carrier. */
+	radio_freq_chan_set(efr32_amateur_ble_channel_khz(chan) / EFR32_KHZ_PER_MHZ -
+			    EFR32_BLE_CHANNEL_BASE_MHZ);
+	radio_whiten_iv_set(chan);
+	efr32_id_adv_frame = true;
+	/* An advertising event: its next PDU is due within the PDU spacing of this one. */
+	efr32_radio_event_tx = true;
+	radio_pkt_tx_set((void *)pdu);
+	radio_isr_set(done, param);
+	radio_switch_complete_and_disable();
+	radio_tx_enable();
+}
+
+void efr32_radio_id_adv_finish(void)
+{
+	efr32_id_adv_frame = false;
+	radio_status_reset();
+	radio_tmr_status_reset();
+}
+
+uint32_t efr32_radio_id_tx_ready_us(void)
+{
+	return radio_tx_ready_delay_get(PHY_1M, 0U);
+}
+#endif
 #endif /* CONFIG_EFR32_RADIO_AMATEUR */
 
 #if defined(CONFIG_SCHED_DEADLINE_MISS_CUSTOM)
@@ -5478,6 +5556,16 @@ static void efr32_radio_miss_report(struct k_work *work)
 
 static K_WORK_DEFINE(efr32_radio_miss_work, efr32_radio_miss_report);
 
+#if defined(CONFIG_EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES)
+static bool efr32_radio_policy_stopping;
+static atomic_t efr32_radio_test_ll_misses;
+
+uint32_t efr32_radio_test_ll_miss_count(void)
+{
+	return (uint32_t)atomic_get(&efr32_radio_test_ll_misses);
+}
+#endif
+
 void k_deadline_miss_handler(const struct k_deadline_miss *miss)
 {
 	const k_tid_t jobs[] = {
@@ -5493,8 +5581,20 @@ void k_deadline_miss_handler(const struct k_deadline_miss *miss)
 	};
 	bool suspend_self;
 	bool first;
-	unsigned int key = irq_lock();
+	unsigned int key;
 
+#if defined(CONFIG_EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES)
+	/*
+	 * Test only, QEMU: a link-layer deadline the model cannot meet (connection turnarounds,
+	 * docs/radio-tables.md 7.79) is counted, as the QEMU connection profiles' MISS_COUNT does;
+	 * a broken rule (efr32_radio_policy_stop()) still shuts the radio down.
+	 */
+	if (!efr32_radio_policy_stopping) {
+		atomic_inc(&efr32_radio_test_ll_misses);
+		return;
+	}
+#endif
+	key = irq_lock();
 	first = atomic_cas(&efr32_radio_halted, 0, 1);
 	/* A failure may be detected before radio_setup(): its RAC accesses need the clocks. */
 	efr32_radio_bus_clocks_on();
@@ -5548,6 +5648,9 @@ void efr32_radio_policy_stop(const struct k_deadline_event *event, const char *w
 
 	miss.release = miss.now;
 	miss.deadline = (int)miss.now;
+#if defined(CONFIG_EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES)
+	efr32_radio_policy_stopping = true;
+#endif
 	k_deadline_miss_handler(&miss);
 }
 #endif /* CONFIG_SCHED_DEADLINE_MISS_CUSTOM */

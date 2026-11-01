@@ -44,13 +44,13 @@ for ep in 0 1; do
 done
 echo "--- advertiser"; grep -aE 'amateur|adv_|bt_enable|SAFE|efr32-radio' "$OUT/console0.txt" || true
 echo "--- scanner"; grep -aE 'amateur|scan_|bt_enable|SAFE|efr32-radio' "$OUT/console1.txt" || true
-echo "--- scanner names: $(grep -ac "^rx_name: $CALLSIGN\$" "$OUT/console1.txt" || true)"
+echo "--- scanner names: $(grep -ac "^rx_name: $CALLSIGN addr=" "$OUT/console1.txt" || true)"
 
 fail=0
 grep -aq 'amateur-selftest: PASS' "$OUT/console0.txt" || { echo "FAIL: advertiser self-test"; fail=1; }
 grep -aq '^amateur: enable 0' "$OUT/console0.txt" || { echo "FAIL: advertiser enable"; fail=1; }
 grep -aq '^amateur: enable 0' "$OUT/console1.txt" || { echo "FAIL: scanner enable"; fail=1; }
-grep -aq "^rx_name: $CALLSIGN\$" "$OUT/console1.txt" || { echo "FAIL: call sign not received"; fail=1; }
+grep -aq "^rx_name: $CALLSIGN addr=" "$OUT/console1.txt" || { echo "FAIL: call sign not received"; fail=1; }
 if grep -aq 'SAFE SHUTDOWN' "$OUT/console0.txt" "$OUT/console1.txt"; then
     echo "FAIL: safe shutdown"; fail=1
 fi
