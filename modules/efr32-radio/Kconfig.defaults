@@ -1,0 +1,19 @@
+# Defaults this module sets on Zephyr symbols that already have an unconditional default in a file
+# Kconfig reads before this module's Kconfig. Kconfig takes the first default whose condition
+# holds, so these must be read first: an application's Kconfig sources this file before
+# Kconfig.zephyr:
+#
+#   osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
+#   source "Kconfig.zephyr"
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# The TF-PSA-Crypto dispatch derived with the RADIOAES driver's calls (crypto/CMakeLists.txt,
+# which checks that this is where it writes it; zephyr/modules/mbedtls/Kconfig.tf-psa-crypto
+# defaults to TF-PSA-Crypto's own) and the header that declares the driver and its accelerated
+# algorithms.
+configdefault TF_PSA_CRYPTO_DISPATCH_DIR
+	default "$(KCONFIG_BINARY_DIR)/../efr32_psa_dispatch" if EFR32_RADIOAES_PSA
+
+configdefault TF_PSA_CRYPTO_DRIVER_CONFIG_FILE
+	default "efr32_radioaes_psa_config.h" if EFR32_RADIOAES_PSA

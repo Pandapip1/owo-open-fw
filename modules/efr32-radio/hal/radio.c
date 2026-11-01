@@ -22,7 +22,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <soc.h>
-#include <psa/crypto.h>
+#include "hal/efr32/radioaes.h"
 
 #include "hal/ccm.h"
 #include "hal/cntr.h"
@@ -265,7 +265,8 @@ static void efr32_radio_hold_init(void)
 	    MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS, \
 		COND_CODE_1(CONFIG_BT_CONN, \
 			    (MAX(MAX(CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_TX_RX_NS, \
-				     CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS), \
+				     CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS + \
+				     EFR32_DL_CCM_RX_TX_NS), \
 				 CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS)), (0))))
 K_DEADLINE_EVENT_DEFINE(efr32_radio_tx_event);
 K_DEADLINE_EVENT_DEFINE(efr32_radio_rx_event);
@@ -2050,7 +2051,6 @@ static struct {
 	bool pending_rx;
 	bool done;
 	bool mic_valid;
-	bool empty;
 } ccm_ctx;
 
 static void ccm_nonce_build(const struct ccm *ccm, uint8_t nonce[BLE_CCM_NONCE_SIZE])
@@ -2062,24 +2062,24 @@ static void ccm_nonce_build(const struct ccm *ccm, uint8_t nonce[BLE_CCM_NONCE_S
 	memcpy(&nonce[5], ccm->iv, sizeof(ccm->iv));
 }
 
-static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
+BUILD_ASSERT(BLE_CCM_NONCE_SIZE == EFR32_RADIOAES_CCM_NONCE_SIZE);
+
+/*
+ * The link layer's AES-CCM (Core v6.1 Vol 6 Part E 2: 13-byte nonce, the header's first octet
+ * masked as the one octet of associated data, a 4-octet MIC) on RADIOAES, called directly: no
+ * PSA key slot, key schedule or allocation on the radio's deadline path. ccm->key is the session
+ * key in the byte order AES takes it (ull_llcp_enc.c stores ecb_encrypt()'s big-endian output).
+ */
+static int ccm_run(bool encrypt, const struct ccm *ccm, const uint8_t *pdu_in, uint8_t *pdu_out,
+		   size_t len, uint8_t *mic)
 {
-	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-	psa_key_id_t id = 0;
-	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
+	uint8_t nonce[BLE_CCM_NONCE_SIZE];
+	uint8_t aad = pdu_in[0] & BLE_CCM_AAD_MASK;
 
-	if (psa_crypto_init() != PSA_SUCCESS) {
-		return 0;
-	}
-	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&attr, 128);
-	psa_set_key_usage_flags(&attr, usage);
-	psa_set_key_algorithm(&attr, alg);
-	if (psa_import_key(&attr, ccm->key, sizeof(ccm->key), &id) != PSA_SUCCESS) {
-		return 0;
-	}
-
-	return id;
+	ccm_nonce_build(ccm, nonce);
+	return efr32_radioaes_ccm(encrypt, ccm->key, sizeof(ccm->key), nonce, sizeof(nonce), &aad,
+				  sizeof(aad), pdu_in + PDU_DC_LL_HEADER_SIZE,
+				  pdu_out + PDU_DC_LL_HEADER_SIZE, len, mic, BLE_CCM_MIC_SIZE);
 }
 
 /*
@@ -2091,6 +2091,7 @@ static psa_key_id_t ccm_key_import(const struct ccm *ccm, psa_key_usage_t usage)
  */
 static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadline,
 					  uint32_t *budget);
+static void efr32_ccm_rx_complete(void);
 
 static void efr32_radio_completion_publish(radio_isr_cb_t callback, void *param,
 						   bool abort)
@@ -2173,6 +2174,8 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 
 		if (rx_cb) {
 			EFR32_RX2TX_M33_STAMP(1);
+			/* An encrypted receive is decrypted before the LLL reads it. */
+			efr32_ccm_rx_complete();
 		}
 		callback(param);
 		if (rx_cb) {
@@ -2527,8 +2530,12 @@ static int efr32_radio_next_start_by(uint32_t now, uint32_t path_ns)
  * Measured run of each completion kind (Kconfig): connection events run lll_conn.c's callbacks,
  * advertising and scanning their own.
  */
+/* An encrypted connection's RX->TX callback also runs CCM (include/hal/efr32/ll_deadlines.h). */
+#define EFR32_CONN_CCM_TX_RX_NS 0
+#define EFR32_CONN_CCM_RX_TX_NS EFR32_DL_CCM_RX_TX_NS
 #define EFR32_COMPLETION_NS(conn, kind) \
-	((conn) ? CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_##kind##_NS : \
+	((conn) ? (CONFIG_EFR32_RADIO_WCET_CONN_COMPLETION_##kind##_NS + \
+		   EFR32_CONN_CCM_##kind##_NS) : \
 		  CONFIG_EFR32_RADIO_WCET_COMPLETION_##kind##_NS)
 
 /*
@@ -2590,7 +2597,8 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 
 			*deadline = (int)(at + left -
 					  EFR32_DL_MEAS_CYC(conn ?
-						CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS :
+						(CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS +
+						 EFR32_DL_CCM_RX_TX_NS) :
 						CONFIG_EFR32_RADIO_COMPLETION_TO_RESPOND_NS));
 			return;
 		}
@@ -4287,7 +4295,7 @@ void radio_gpio_pa_lna_disable(void)
 	/* No front-end module on the target board. */
 }
 
-/* [software] Synchronous BLE AES-CCM through PSA. */
+/* [hardware: RADIOAES] Synchronous BLE AES-CCM; the decrypt runs in radio_ccm_is_done(). */
 void *radio_ccm_rx_pkt_set(struct ccm *ccm, uint8_t phy, void *pkt)
 {
 	ARG_UNUSED(phy);
@@ -4297,95 +4305,82 @@ void *radio_ccm_rx_pkt_set(struct ccm *ccm, uint8_t phy, void *pkt)
 	ccm_ctx.pending_rx = true;
 	ccm_ctx.done = false;
 	ccm_ctx.mic_valid = false;
-	ccm_ctx.empty = false;
 
 	return pkt_scratch;
 }
 
-/* [software] Encrypts synchronously; returned storage remains valid until the next radio packet. */
+/* [hardware: RADIOAES] Encrypts synchronously; returned storage remains valid until the next
+ * radio packet.
+ */
 void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 {
 	struct pdu_data *in = pkt;
-	uint8_t nonce[BLE_CCM_NONCE_SIZE];
-	uint8_t aad = *(uint8_t *)pkt & BLE_CCM_AAD_MASK;
-	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
-	psa_key_id_t id;
-	size_t out_len;
-	psa_status_t status;
+	size_t len = in->len;
 
 	ccm_ctx.pending_rx = false;
 	ccm_ctx.done = false;
 	ccm_ctx.mic_valid = false;
-	ccm_ctx.empty = false;
-	if (in->len == 0U) {
+	if (len == 0U) {
 		ccm_ctx.done = true;
 		return pkt;
 	}
-
-	id = ccm_key_import(ccm, PSA_KEY_USAGE_ENCRYPT);
-	if (id == 0) {
-		return NULL;
-	}
-	ccm_nonce_build(ccm, nonce);
-	status = psa_aead_encrypt(id, alg, nonce, sizeof(nonce), &aad, sizeof(aad),
-				  (uint8_t *)pkt + 2, in->len, pkt_scratch + 2,
-				  sizeof(pkt_scratch) - 2, &out_len);
-	(void)psa_destroy_key(id);
-	if (status != PSA_SUCCESS || out_len != in->len + BLE_CCM_MIC_SIZE) {
+	if (len + BLE_CCM_MIC_SIZE > sizeof(pkt_scratch) - PDU_DC_LL_HEADER_SIZE ||
+	    ccm_run(true, ccm, pkt, pkt_scratch, len,
+		    pkt_scratch + PDU_DC_LL_HEADER_SIZE + len) != 0) {
 		return NULL;
 	}
 
 	pkt_scratch[0] = *(uint8_t *)pkt;
-	pkt_scratch[1] = in->len + BLE_CCM_MIC_SIZE;
+	pkt_scratch[1] = len + BLE_CCM_MIC_SIZE;
 	ccm_ctx.done = true;
 	return pkt_scratch;
 }
 
-/* [software] Completes a pending receive decrypt synchronously. */
-uint32_t radio_ccm_is_done(void)
+/*
+ * [hardware: RADIOAES] Finish an encrypted receive into the LLL's PDU: called by the completion
+ * job before the LLL's RX callback runs. lll_conn.c (isr_rx_pdu()) reads the received header's
+ * SN and NESN from that PDU before it asks radio_ccm_is_done(), and asks only for a non-empty
+ * PDU, as a CCM that runs while the frame arrives (Nordic's) allows; the frame itself landed in
+ * pkt_scratch (radio_ccm_rx_pkt_set()). An empty PDU carries no MIC (Core v6.1 Vol 6 Part E 1)
+ * and is copied; a frame with a CRC error is not decrypted (the LLL does not use it); a PDU too
+ * short for a MIC, or whose MIC does not verify, completes as a MIC failure with the received
+ * header in place (lll_conn.c then checks for an unencrypted control PDU in pkt_scratch).
+ */
+static void efr32_ccm_rx_complete(void)
 {
-	uint8_t nonce[BLE_CCM_NONCE_SIZE];
-	uint8_t aad;
-	psa_algorithm_t alg = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, BLE_CCM_MIC_SIZE);
-	psa_key_id_t id;
-	size_t out_len;
-	psa_status_t status;
+	size_t len;
 
 	if (!ccm_ctx.pending_rx) {
-		return ccm_ctx.done;
+		return;
 	}
 	ccm_ctx.pending_rx = false;
-	if (ccm_ctx.rx_in->len == 0U) {
-		memcpy(ccm_ctx.rx_out, ccm_ctx.rx_in, 2);
-		ccm_ctx.empty = true;
-		ccm_ctx.mic_valid = true;
-		ccm_ctx.done = true;
-		return 1;
-	}
-	if (ccm_ctx.rx_in->len <= BLE_CCM_MIC_SIZE) {
-		return 0;
-	}
-
-	id = ccm_key_import(&ccm_ctx.config, PSA_KEY_USAGE_DECRYPT);
-	if (id == 0) {
-		return 0;
-	}
-	ccm_nonce_build(&ccm_ctx.config, nonce);
-	aad = *(uint8_t *)ccm_ctx.rx_in & BLE_CCM_AAD_MASK;
-	status = psa_aead_decrypt(id, alg, nonce, sizeof(nonce), &aad, sizeof(aad),
-				  (uint8_t *)ccm_ctx.rx_in + 2, ccm_ctx.rx_in->len,
-				  (uint8_t *)ccm_ctx.rx_out + 2,
-				  ccm_ctx.rx_in->len - BLE_CCM_MIC_SIZE, &out_len);
-	(void)psa_destroy_key(id);
-	if (status != PSA_SUCCESS || out_len != ccm_ctx.rx_in->len - BLE_CCM_MIC_SIZE) {
-		return 0;
-	}
-
-	*(uint8_t *)ccm_ctx.rx_out = *(uint8_t *)ccm_ctx.rx_in;
-	ccm_ctx.rx_out->len = out_len;
-	ccm_ctx.mic_valid = true;
 	ccm_ctx.done = true;
-	return 1;
+	ccm_ctx.mic_valid = false;
+	memcpy(ccm_ctx.rx_out, ccm_ctx.rx_in, PDU_DC_LL_HEADER_SIZE);
+	if (ccm_ctx.rx_in->len == 0U) {
+		ccm_ctx.mic_valid = true;
+		return;
+	}
+	if (!efr32_rx_crc_ok || ccm_ctx.rx_in->len <= BLE_CCM_MIC_SIZE) {
+		return;
+	}
+
+	len = ccm_ctx.rx_in->len - BLE_CCM_MIC_SIZE;
+	if (ccm_run(false, &ccm_ctx.config, (const uint8_t *)ccm_ctx.rx_in,
+		    (uint8_t *)ccm_ctx.rx_out, len,
+		    (uint8_t *)ccm_ctx.rx_in + PDU_DC_LL_HEADER_SIZE + len) != 0) {
+		return;
+	}
+
+	ccm_ctx.rx_out->len = len;
+	ccm_ctx.mic_valid = true;
+}
+
+/* [hardware: RADIOAES] The decrypt ran before the LLL callback (efr32_ccm_rx_complete()). */
+uint32_t radio_ccm_is_done(void)
+{
+	efr32_ccm_rx_complete();
+	return ccm_ctx.done;
 }
 
 /* [software] */
@@ -4394,10 +4389,17 @@ uint32_t radio_ccm_mic_is_valid(void)
 	return ccm_ctx.mic_valid;
 }
 
-/* [software] OpenISA uses this to report an empty received PDU. */
+/*
+ * [hardware: RADIOAES] lll_conn_pdu_tx_prep() sends an empty PDU (MD set) instead of data while
+ * this is false: on the RV32M1 one CAU both decrypts the received PDU and encrypts the next, so
+ * its HAL reports the unit free only after an empty (undecrypted) receive. RADIOAES encrypts
+ * synchronously in radio_ccm_tx_pkt_set() whatever the last receive was, so it is always free.
+ * Returning the RV32M1's answer here stalled every encrypted transmission that could not follow
+ * an empty receive within one event, LL_START_ENC_RSP first (QEMU connection pair).
+ */
 uint32_t radio_ccm_is_available(void)
 {
-	return ccm_ctx.empty;
+	return 1U;
 }
 
 /* [software] Snapshot AAR-order IRKs for the next normalized advertising PDU. */

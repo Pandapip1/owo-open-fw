@@ -180,14 +180,39 @@ static inline int efr32_dl_rx_launch_start_by(uint32_t instant)
 		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS)))
 #define EFR32_DL_LAUNCH_LATEST_CYC \
 	((uint32_t)MIN(EFR32_DL_TX_LAUNCH_LATEST_CYC, EFR32_DL_RX_WINDOW_LATEST_CYC))
+/*
+ * Link-layer AES-CCM on an encrypted connection (Kconfig EFR32_RADIO_CCM_*, measured): the RX->TX
+ * completion decrypts the received PDU and encrypts the reply before RESPOND, a Central's prepare
+ * encrypts its anchor PDU, and either may first wait out one lower-priority accelerator run
+ * (EFR32_RADIO_AES_BLOCKING_NS). The connection runs and paths in Kconfig were measured on
+ * unencrypted links, so these are added to them.
+ */
+#if defined(CONFIG_BT_CTLR_LE_ENC)
+#define EFR32_DL_CCM_RX_TX_NS \
+	(CONFIG_EFR32_RADIO_CCM_DECRYPT_NS + CONFIG_EFR32_RADIO_CCM_ENCRYPT_NS + \
+	 CONFIG_EFR32_RADIO_AES_BLOCKING_NS)
+#define EFR32_DL_CCM_PREPARE_NS \
+	COND_CODE_1(CONFIG_BT_CENTRAL, \
+		    (CONFIG_EFR32_RADIO_CCM_ENCRYPT_NS + CONFIG_EFR32_RADIO_AES_BLOCKING_NS), (0))
+#else
+#define EFR32_DL_CCM_RX_TX_NS 0
+#define EFR32_DL_CCM_PREPARE_NS 0
+#endif
+/* The ULL worker derives the session key with one AES-ECB block (hal/ecb.c, ull_llcp_enc.c). */
+#define EFR32_DL_ECB_ULL_NS \
+	COND_CODE_1(CONFIG_BT_CTLR_LE_ENC, \
+		    (CONFIG_EFR32_RADIO_ECB_NS + CONFIG_EFR32_RADIO_AES_BLOCKING_NS), (0))
+/* The LLL context's budget: its measured run plus a Central's anchor encryption. */
+#define EFR32_DL_WCET_LLL_NS (CONFIG_EFR32_RADIO_WCET_LLL_NS + EFR32_DL_CCM_PREPARE_NS)
+
 /* Ticker expiry to the latest start of the LLL prepare it causes. */
 #define EFR32_DL_LLL_WINDOW_CYC \
 	(EFR32_DL_PREPARE_LEAD_CYC + EFR32_DL_LAUNCH_LATEST_CYC - \
-	 EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_LLL_NS))
+	 EFR32_DL_MEAS_CYC(EFR32_DL_WCET_LLL_NS))
 /* Ticker expiry to the latest start of the ULL worker run that serves it. */
 #define EFR32_DL_ULL_WINDOW_CYC \
 	(EFR32_DL_LLL_WINDOW_CYC - EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_LLL_DOORBELL_LATENCY_NS) - \
-	 EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_ULL_NS))
+	 EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_ULL_NS + EFR32_DL_ECB_ULL_NS))
 
 /*
  * FRC completion of a transmission that the sequencer turns to RX (ADV_IND of a scannable

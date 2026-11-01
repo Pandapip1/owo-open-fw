@@ -317,7 +317,7 @@ bool efr32_ll_threads_stop(void)
 static int ll_threads_budgets_init(void)
 {
 	k_deadline_event_budget_set(&lll_ctx.event,
-				    k_ns_to_cyc_ceil32(CONFIG_EFR32_RADIO_WCET_LLL_NS));
+				    k_ns_to_cyc_ceil32(EFR32_DL_WCET_LLL_NS));
 	return 0;
 }
 

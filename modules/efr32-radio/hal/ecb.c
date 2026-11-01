@@ -1,33 +1,25 @@
 /*
- * AES-128 ECB for the link layer (Zephyr's hal/ecb.h contract) through the PSA Crypto API, which is
- * what Zephyr's own host uses for SMP (subsys/bluetooth/crypto/bt_crypto_psa.c). The key is imported
- * per call: simple, not fast. CRYPTOACC could replace it later; this needs no hardware knowledge.
+ * AES-128 ECB for the link layer (Zephyr's hal/ecb.h contract) on the RADIOAES accelerator
+ * (crypto/radioaes.c), called directly: the controller's ECB (session key derivation in
+ * ull_llcp_enc.c, bt_encrypt_le() through controller/crypto/crypto.c) takes no PSA key slot.
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <string.h>
 #include <zephyr/sys/byteorder.h>
-#include <psa/crypto.h>
 
 #include "hal/ecb.h"
 #include "hal/debug.h"
+#include "hal/efr32/radioaes.h"
+
+#define ECB_KEY_SIZE 16U
 
 void ecb_encrypt_be(uint8_t const *const key_be, uint8_t const *const clear_text_be,
 		    uint8_t *const cipher_text_be)
 {
-	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-	psa_key_id_t id;
-	size_t len;
+	int err = efr32_radioaes_ecb(true, key_be, ECB_KEY_SIZE, clear_text_be, cipher_text_be,
+				     EFR32_RADIOAES_BLOCK_SIZE);
 
-	LL_ASSERT(psa_crypto_init() == PSA_SUCCESS);
-	psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-	psa_set_key_bits(&attr, 128);
-	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
-	psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);
-	LL_ASSERT(psa_import_key(&attr, key_be, 16, &id) == PSA_SUCCESS);
-	LL_ASSERT(psa_cipher_encrypt(id, PSA_ALG_ECB_NO_PADDING, clear_text_be, 16, cipher_text_be, 16,
-				     &len) == PSA_SUCCESS);
-	LL_ASSERT(len == 16);
-	(void)psa_destroy_key(id);
+	LL_ASSERT(err == 0);
 }
 
 void ecb_encrypt(uint8_t const *const key_le, uint8_t const *const clear_text_le,

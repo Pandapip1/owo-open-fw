@@ -50,9 +50,63 @@ static void disconnected(struct bt_conn *c, uint8_t reason)
 	printk("central_disconnected: 0x%02x at %lld ms\n", reason, k_uptime_get());
 }
 
+#if defined(CONFIG_RADIO_RX_PORT_PAIRING)
+/* Given when the link reached security level 4 (LE Secure Connections, authenticated). */
+static K_SEM_DEFINE(secured, 0, 1);
+static int64_t security_requested_ms;
+
+static void security_changed(struct bt_conn *c, bt_security_t level, enum bt_security_err err)
+{
+	ARG_UNUSED(c);
+	printk("central_security: level %d err %d after %lld ms\n", level, err,
+	       k_uptime_get() - security_requested_ms);
+	if (err == BT_SECURITY_ERR_SUCCESS && level >= BT_SECURITY_L4) {
+		k_sem_give(&secured);
+	}
+}
+
+/* Keyboard-only: the Central enters the Peripheral's passkey. */
+static void passkey_entry(struct bt_conn *c)
+{
+	printk("central_passkey_entry: %06u\n", CONFIG_RADIO_RX_PORT_PASSKEY);
+	(void)bt_conn_auth_passkey_entry(c, CONFIG_RADIO_RX_PORT_PASSKEY);
+}
+
+static void auth_cancel(struct bt_conn *c)
+{
+	ARG_UNUSED(c);
+	printk("central_pairing_cancelled\n");
+}
+
+static void pairing_complete(struct bt_conn *c, bool bonded)
+{
+	ARG_UNUSED(c);
+	printk("central_paired: bonded %d\n", bonded);
+}
+
+static void pairing_failed(struct bt_conn *c, enum bt_security_err reason)
+{
+	ARG_UNUSED(c);
+	printk("central_pairing_failed: %d\n", reason);
+}
+
+static const struct bt_conn_auth_cb auth_cb = {
+	.passkey_entry = passkey_entry,
+	.cancel = auth_cancel,
+};
+
+static struct bt_conn_auth_info_cb auth_info_cb = {
+	.pairing_complete = pairing_complete,
+	.pairing_failed = pairing_failed,
+};
+#endif /* CONFIG_RADIO_RX_PORT_PAIRING */
+
 BT_CONN_CB_DEFINE(central_conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+#if defined(CONFIG_RADIO_RX_PORT_PAIRING)
+	.security_changed = security_changed,
+#endif
 };
 
 /*
@@ -90,12 +144,22 @@ static void scan_result(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 #define CENTRAL_GATT_PERIOD_MS 1000
 #define CENTRAL_GATT_REPORT_EVERY 30
 #define CENTRAL_GATT_TIMEOUT_MS 5000
+#if defined(CONFIG_RADIO_RX_PORT_PEER_PRODUCT)
+/* The product's "Test" characteristic (src/ble.rs U_TEST): it keeps a written 20-octet frame and
+ * returns it on read, both only over an authenticated encrypted link.
+ */
+static const struct bt_uuid_128 test_chr_uuid = BT_UUID_INIT_128(
+	BT_UUID_128_ENCODE(0xb1f5a059, 0xc717, 0x11e4, 0x8731, 0x1681e6b88ec1));
+#define CENTRAL_VALUE_LEN 20U
+#else
 static const struct bt_uuid_128 test_chr_uuid = BT_UUID_INIT_128(
 	BT_UUID_128_ENCODE(0x5b2a1c01, 0x6f3e, 0x4c1d, 0x9a7b, 0x0e1f2d3c4b5a));
+#define CENTRAL_VALUE_LEN 4U
+#endif
 static K_SEM_DEFINE(gatt_done, 0, 1);
 static uint16_t value_handle;
 static uint8_t gatt_err;
-static uint8_t read_back[4];
+static uint8_t read_back[CENTRAL_VALUE_LEN];
 static uint16_t read_len;
 
 static uint8_t discovered(struct bt_conn *c, const struct bt_gatt_attr *attr,
@@ -158,22 +222,23 @@ static void gatt_loop(void)
 	printk("gatt_discover: handle 0x%04x\n", value_handle);
 	for (;;) {
 		uint32_t counter = rounds + 1U;
+		uint8_t value[CENTRAL_VALUE_LEN] = { 0 };
 		struct bt_gatt_write_params write = {
-			.func = written, .handle = value_handle, .data = &counter,
-			.length = sizeof(counter),
+			.func = written, .handle = value_handle, .data = value,
+			.length = sizeof(value),
 		};
 		struct bt_gatt_read_params read = {
 			.func = read_cb, .handle_count = 1, .single.handle = value_handle,
 		};
 		bool good;
 
+		memcpy(value, &counter, sizeof(counter));
 		k_msleep(CENTRAL_GATT_PERIOD_MS);
 		gatt_err = 0U;
 		read_len = 0U;
 		good = bt_gatt_write(conn, &write) == 0 && gatt_wait() == 0 && gatt_err == 0U &&
 		       bt_gatt_read(conn, &read) == 0 && gatt_wait() == 0 && gatt_err == 0U &&
-		       read_len == sizeof(counter) &&
-		       memcmp(read_back, &counter, sizeof(counter)) == 0;
+		       read_len == sizeof(value) && memcmp(read_back, value, sizeof(value)) == 0;
 		rounds++;
 		if (good) {
 			ok++;
@@ -201,7 +266,20 @@ void radio_rx_port_central_start(void)
 	if (err != 0) {
 		return;
 	}
+#if defined(CONFIG_RADIO_RX_PORT_PAIRING)
+	printk("auth_register: %d %d\n", bt_conn_auth_cb_register(&auth_cb),
+	       bt_conn_auth_info_cb_register(&auth_info_cb));
+#endif
 	printk("scan_start: %d\n", bt_le_scan_start(&scan, scan_result));
 	k_sem_take(&link_up, K_FOREVER);
+#if defined(CONFIG_RADIO_RX_PORT_PAIRING)
+	/* Pair (LE Secure Connections, passkey entry) and encrypt before any GATT access. */
+	security_requested_ms = k_uptime_get();
+	printk("set_security: %d\n", bt_conn_set_security(conn, BT_SECURITY_L4));
+	if (k_sem_take(&secured, K_SECONDS(120)) != 0) {
+		printk("central_security: timeout\n");
+		return;
+	}
+#endif
 	gatt_loop();
 }

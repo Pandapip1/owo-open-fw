@@ -25,6 +25,34 @@ config RADIO_RX_PORT_CENTRAL
 	  turn-around to deliver CONNECT_IND to the advertiser and the first
 	  connection-event packet back. Do not select it for a hardware build.
 
+config RADIO_RX_PORT_PAIRING
+	bool "Pair with LE Secure Connections and a passkey before the GATT rounds"
+	depends on RADIO_RX_PORT_CENTRAL && BT_SMP
+	help
+	  Once connected, request security level 4 (LE Secure Connections, authenticated),
+	  enter RADIO_RX_PORT_PASSKEY as a keyboard-only device, and run the GATT rounds only on
+	  the encrypted link. prj-central-pairing.conf.
+
+config RADIO_RX_PORT_PASSKEY
+	int "Passkey the Central enters"
+	depends on RADIO_RX_PORT_PAIRING
+	range 0 999999
+	default 123456
+	help
+	  The radio-port advertiser's RADIO_PORT_PASSKEY, or the product's (the Jenkins
+	  one-at-a-time hash of its serial modulo 10^6, crates/owo-core proto::pairing_code();
+	  426134 for the default serial 000000000000).
+
+config RADIO_RX_PORT_PEER_PRODUCT
+	bool "The Peripheral is the product image"
+	depends on RADIO_RX_PORT_PAIRING
+	help
+	  Run the GATT rounds on the product's "Test" characteristic (src/ble.rs: a 20-octet value
+	  written and read back, authenticated encrypted link only) instead of the radio-port
+	  test characteristic. prj-central-product.conf.
+
 endmenu
 
+# Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
+osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
 source "Kconfig.zephyr"

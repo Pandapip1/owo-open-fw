@@ -7481,3 +7481,20 @@ sequencer, or the RX callback at interrupt level), not a wider tolerance; not do
 sequencer's RX2TX power-up, the prepare lead in deep sleep) need a connection that holds, which the
 channel-dependent receive above prevents. The ram-fit TX launch stack watermark and the 64-octet
 TX FIFO byte-exact check were not reached.
+### 7.81 Link-layer encryption on RADIOAES
+
+Tags as in 7.79. Details, sources and measurements: `docs/crypto.md`. The controller's AES (the
+session-key ECB in the ULL worker, link-layer CCM in the completion job and a Central's prepare)
+runs on the RADIOAES accelerator, called directly (`crypto/radioaes.c`); the host's ECB and CMAC
+reach it through PSA Crypto. Encrypted connections now work in QEMU (they never had: no CCM, no
+heap), which exposed two OpenISA-LLL contract points in `hal/radio.c`: a received PDU is now
+decrypted (or, if empty, copied) into the LLL's buffer before the LLL callback, because
+`lll_conn.c` reads SN/NESN first; and `radio_ccm_is_available()` is always true (the RV32M1's
+"CAU free" meaning), where the old answer had stalled `LL_START_ENC_RSP`.
+
+Deadlines: with `BT_CTLR_LE_ENC` the connection RX->TX completion budget and its path to RESPOND
+gain decrypt + encrypt + one lower-priority accelerator run, a Central's LLL budget an encrypt, and
+the ULL window the session-key ECB (Kconfig `EFR32_RADIO_CCM_DECRYPT_NS`, `_CCM_ENCRYPT_NS`,
+`_AES_BLOCKING_NS`, `_ECB_NS`; silicon 15.69, 15.25, 5.37, 6.30 us for 27-octet PDUs [F];
+`include/hal/efr32/ll_deadlines.h`). [Q] encrypted GATT: Peripheral RX->TX run 164.3 us, path to
+RESPOND 159.9 us (unencrypted 136.6, 133.0); Central 160.5, 146.9 (134.6, 121.2).
