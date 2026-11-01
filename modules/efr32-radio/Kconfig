@@ -161,6 +161,22 @@ config EFR32_RADIO_QEMU_TIFS
 		vendor LLL's generic deadline scheduling support; deadline ordering is not
 		a hardware timing claim.
 
+config EFR32_RADIO_CONN_STAGED
+	bool "Stage connection replies before the frame ends"
+	default y
+	depends on BT_CONN && !EFR32_RADIO_QEMU_TIFS
+	help
+	  Before each receive in a connection event the link layer works out
+	  both replies it can give (lll/lll_conn_stage.c) and the HAL hands
+	  them, encrypted when the link is, to the radio sequencer, which
+	  decides at the frame's end by the link layer's own rules
+	  (acknowledgement, new data, MD, CRC errors) and turns around at
+	  T_IFS without the M33; the LLL callback then commits the same
+	  outcome. Without it the turnaround waits for the M33's callback,
+	  whose path is longer than T_IFS allows on silicon
+	  (docs/radio-tables.md 7.80, 7.82). The QEMU-only TIFS seam keeps
+	  the callback-driven turnaround.
+
 config EFR32_RADIO_ADMISSION
 	bool "Admit radio work against its execution budgets"
 	default y if EFR32_RADIO_TIMING_SILICON
@@ -224,21 +240,30 @@ config EFR32_RADIO_WCET_TX_LAUNCH_NS
 	  27.9 us (29.5 us with a longer hold); QEMU 29.0 us.
 
 config EFR32_RADIO_TX_LAUNCH_PRE_NS
-	int "TX launch: start to TXEN hold (ns)"
+	int "TX launch: start to the sequencer post (ns)"
 	default 16600 if EFR32_RADIO_TIMING_QEMU
 	default 12000
 	help
-	  Longest path from the TX launch job's start to its TXEN hold (TX
-	  FIFO publish, pre-TX handshake, mapping the instant): silicon
-	  12.0 us, QEMU 16.6 us.
+	  Longest path from the TX launch job's start to posting TXEN to the
+	  sequencer (TX FIFO publish, pre-TX handshake, mapping the instant,
+	  the mailbox store; docs/radio-tables.md 7.82).
 
-config EFR32_RADIO_TX_LAUNCH_HOLD_LATE_NS
-	int "TX launch: instant to TXEN (ns)"
-	default 680 if EFR32_RADIO_TIMING_QEMU
-	default 890
+config EFR32_RADIO_SEQ_TIMED_WAKE_NS
+	int "Timed command: post to the sequencer's first poll (ns)"
+	default 3000
 	help
-	  Longest time from the held instant to just after the TXEN store
-	  (TIMER0.CNT read after the store): silicon 0.89 us, QEMU 0.68 us.
+	  Longest time from the M33's RDMAILBOX1 store to the sequencer's
+	  first TIMER0 poll of a timed command (TIMER0 counts the M33 reads
+	  after its store and the sequencer at its first poll;
+	  docs/radio-tables.md 7.82).
+
+config EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS
+	int "Timed command: instant to the command store (ns)"
+	default 1000
+	help
+	  Longest time from a timed command's instant to the sequencer's
+	  TIMER0 read right after its TXEN or SWRXEN store
+	  (docs/radio-tables.md 7.82).
 
 config EFR32_RADIO_SPIN_EXIT_NS
 	int "Not-before wait exit to job start (ns)"
@@ -250,23 +275,13 @@ config EFR32_RADIO_SPIN_EXIT_NS
 	  silicon 5.8 us, QEMU 36.3 us.
 
 config EFR32_RADIO_RX_LAUNCH_PRE_NS
-	int "RX launch: start to SWRXEN hold (ns)"
+	int "RX launch: start to the sequencer post (ns)"
 	default 7200 if EFR32_RADIO_TIMING_QEMU
 	default 10300
 	help
 	  Longest path from a held RX launch's start (a Peripheral's receive
-	  window) to its SWRXEN hold, the instant's mapping included (as the
-	  TX launch's PRE). Silicon 10.3 us (one connection from a host
-	  Central, docs/radio-tables.md 7.80), QEMU 7.2 us (connection pair).
-
-config EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS
-	int "RX launch: instant to SWRXEN (ns)"
-	default 1250
-	help
-	  Longest time from the held instant to just after the SWRXEN store,
-	  TIMER0 read after the store: QEMU 48 counts at 38.4 MHz = 1.25 us
-	  (holds that waited). Silicon: not measured; the QEMU figure is
-	  PROVISIONAL there (the TX launch's same loop measured 0.89 us).
+	  window) to posting SWRXEN to the sequencer, the instant's mapping
+	  included (as the TX launch's PRE).
 
 config EFR32_RADIO_RX_READY_NS
 	int "SWRXEN to RXSEARCH (ns)"
@@ -423,7 +438,8 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	help
 	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store:
 	  silicon 103.2 us (Peripheral), QEMU 133.0 us (Peripheral; Central
-	  121.2 us).
+	  121.2 us). With EFR32_RADIO_CONN_STAGED the same store commits the
+	  reply the sequencer sent and re-arms the RX FIFO (7.82).
 
 # Link-layer AES-CCM on RADIOAES (crypto/radioaes.c, docs/crypto.md), for encrypted connections:
 # the completion job decrypts each received PDU before the LLL callback and the callback (or a
@@ -432,6 +448,17 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 # Silicon: tests/crypto-port on the BGM220 explorer kit, HCLK 76.8 MHz, the call through
 # efr32_radioaes_ccm() with interrupts locked, longest of 64 (DWT). QEMU: the same test in
 # build/qemu. With data length extension a PDU carries up to 251 octets, else 27.
+
+config EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS
+	int "Connection receive completion: start to the next stage posted (ns)"
+	default 160000
+	help
+	  With EFR32_RADIO_CONN_STAGED: longest path from a connection
+	  receive's completion start (isr_rx(), committing the sequencer's
+	  outcome) to the replies to the next receive staged
+	  (efr32_radio_conn_stage()), unencrypted; an encrypted link adds two
+	  encryptions and one accelerator wait (ll_deadlines.h).
+	  docs/radio-tables.md 7.82.
 
 config EFR32_RADIO_CCM_ENCRYPT_NS
 	int "Link-layer CCM: encrypt the longest PDU (ns)"

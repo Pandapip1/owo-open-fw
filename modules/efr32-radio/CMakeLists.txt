@@ -94,6 +94,30 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   efr32_radio_patch(lll/lll_conn.c "\tp->resv = 0U;\n" "\t/* p->resv does not exist in current pdu.h */\n"
             "struct pdu_data has no resv member")
 
+  # Connection replies staged before the frame ends (docs/radio-tables.md 7.82): the sequencer
+  # answers a received frame at T_IFS by lll_conn.c's own rules, and isr_rx() commits the same
+  # outcome afterwards. lll/lll_conn_stage.c is built into lll_conn.c (it reads its state) and
+  # these hooks call it; with EFR32_RADIO_CONN_STAGED off they reduce to the original code.
+  efr32_radio_patch(lll/lll_conn.c "static struct pdu_data *empty_tx_enqueue(struct lll_conn *lll);\n"
+            "static struct pdu_data *empty_tx_enqueue(struct lll_conn *lll);\nstatic int efr32_conn_commit_begin(struct lll_conn *lll);\nstatic bool efr32_conn_rx_free(void);\nstatic void efr32_conn_tx_prep(struct lll_conn *lll, struct pdu_data **pdu_data_tx);\nstatic void efr32_conn_reply_abort(void *param);\nstatic void efr32_conn_stage_next(struct lll_conn *lll);\n"
+            "staged replies: declarations")
+  efr32_radio_patch(lll/lll_conn.c "\t\treturn;\n\t}\n\n\ttrx_cnt++;\n"
+            "\t\treturn;\n\t}\n\n\ttrx_cnt++;\n\n\t/* Staged reply the sequencer took no decision on: nothing was sent, the event ends. */\n\tif (efr32_conn_commit_begin(lll) != 0) {\n\t\tradio_isr_set(isr_done, param);\n\t\tradio_disable();\n\n\t\treturn;\n\t}\n"
+            "staged replies: commit the sequencer's outcome")
+  efr32_radio_patch(lll/lll_conn.c "\t\tif (err) {\n\t\t\tgoto lll_conn_isr_rx_exit;\n\t\t}\n"
+            "\t\tif (err) {\n\t\t\t/* MIC failure: a staged reply already went out; end the event now. */\n\t\t\tefr32_conn_reply_abort(param);\n\t\t\tgoto lll_conn_isr_rx_exit;\n\t\t}\n"
+            "staged replies: MIC failure")
+  efr32_radio_patch(lll/lll_conn.c "\t    (ull_pdu_rx_alloc_peek(3) != 0)) {\n"
+            "\t    efr32_conn_rx_free()) {\n"
+            "staged replies: the RX buffer state the reply was staged with")
+  efr32_radio_patch(lll/lll_conn.c "\tis_empty_pdu_tx_retry = lll->empty;\n\tlll_conn_pdu_tx_prep(lll, &pdu_data_tx);\n"
+            "\tis_empty_pdu_tx_retry = lll->empty;\n\tefr32_conn_tx_prep(lll, &pdu_data_tx);\n"
+            "staged replies: the reply the sequencer sent")
+  efr32_radio_patch(lll/lll_conn.c "\tif (is_ull_rx) {\n\t\tull_rx_sched();\n\t}\n"
+            "\tefr32_conn_stage_next(lll);\n\n\tif (is_ull_rx) {\n\t\tull_rx_sched();\n\t}\n"
+            "staged replies: stage the next receive's")
+  file(APPEND ${GEN}/lll/lll_conn.c "\n#include \"${CMAKE_CURRENT_LIST_DIR}/lll/lll_conn_stage.c\"\n")
+
   # OpenISA's lll_adv.c declares its advertising-PDU pool, stale-PDU FIFO,
   # and semaphore, but its init_reset() is an empty stub.  Consequently the
   # first lll_adv_data_init() sees an empty free list; ull_adv.c does not
@@ -147,7 +171,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
               "connection timing hooks")
     efr32_radio_patch(lll/lll_peripheral.c
               "\tremainder = p->remainder;\n\tremainder_us = radio_tmr_start(0, ticks_at_start, remainder);\n"
-              "\tremainder = p->remainder;\n\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tefr32_radio_rx_window_set(EVENT_TICKER_RES_MARGIN_US);\n\tremainder_us = radio_tmr_start(0, ticks_at_start, remainder);\n"
+              "\tremainder = p->remainder;\n\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tefr32_radio_rx_window_set(EVENT_TICKER_RES_MARGIN_US);\n\tefr32_conn_stage_prepare(lll);\n\tremainder_us = radio_tmr_start(0, ticks_at_start, remainder);\n"
               "Peripheral receive window and connection interval")
   endif()
   if(CONFIG_BT_CENTRAL)
@@ -156,7 +180,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
               "connection timing hooks")
     efr32_radio_patch(lll/lll_central.c
               "\tremainder_us = radio_tmr_start(1, ticks_at_start, remainder);\n"
-              "\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tremainder_us = radio_tmr_start(1, ticks_at_start, remainder);\n"
+              "\tefr32_radio_conn_event_set(lll->interval * CONN_INT_UNIT_US);\n\tefr32_conn_stage_prepare(lll);\n\tremainder_us = radio_tmr_start(1, ticks_at_start, remainder);\n"
               "Central connection interval")
   endif()
 

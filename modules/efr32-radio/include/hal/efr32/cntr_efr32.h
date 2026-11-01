@@ -27,11 +27,11 @@ void cntr_qemu_tifs_cmp_cancel(void);
 /* Cancel every scheduler clock event of the controller (ISR-safe); none fires again. */
 void cntr_shutdown(void);
 /*
- * A TX launch, and an RX launch with @p hold, holds its command to @p instant; such runs wait
- * out @p not_before. Every run starts by @p deadline.
+ * A TX launch, and an RX launch with @p hold, posts its command to the sequencer, which issues it
+ * at @p instant and not after @p limit (ll_deadlines.h). Every run starts by @p deadline.
  */
 void efr32_radio_launch_wake(uint8_t trx, bool hold, uint32_t generation, uint32_t instant,
-			     uint32_t not_before, int deadline);
+			     uint32_t limit, int deadline);
 void efr32_radio_qemu_tifs_wake(uint32_t generation, uint32_t not_before, int deadline);
 /* Deadline events the launch and TIFS wakes publish (NULL without the QEMU TIFS seam). */
 struct k_deadline_event *efr32_radio_launch_event(uint8_t trx);
