@@ -257,6 +257,13 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     hal/radio.c
     hal/timer_state.c
   )
+
+  # Amateur operation (docs/amateur-radio.md): never in a build without the option.
+  if(CONFIG_EFR32_RADIO_AMATEUR)
+    # ull_vendor.h for the controller's user extensions (its ticker nodes only).
+    zephyr_include_directories(${CMAKE_CURRENT_LIST_DIR}/include/user_ext)
+    zephyr_library_sources(hal/amateur.c hal/amateur_rules.c)
+  endif()
 endif()
 
 add_subdirectory(crypto)

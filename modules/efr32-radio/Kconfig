@@ -684,6 +684,70 @@ config EFR32_RADIO_TEST_OVERRUN_AFTER_MS
 	default 2000
 	depends on EFR32_RADIO_TEST_OVERRUN_US > 0
 
+menuconfig EFR32_RADIO_AMATEUR
+	bool "Amateur-radio operation at run time (US 47 CFR Part 97)"
+	depends on SCHED_DEADLINE_MISS_CUSTOM
+	depends on BT_CTLR_ADVANCED_FEATURES
+	select BT_CTLR_USER_EXT
+	select BT_CTLR_LE_ENC_POLICY if BT_CTLR_LE_ENC
+	help
+	  Lets the application switch the radio, at run time and with a
+	  licensee's call sign, from the unlicensed Bluetooth rules (Part 15,
+	  2402-2480 MHz) to amateur rules: the carrier then follows a channel
+	  plan inside the 13 cm amateur band (2300-2310 and 2390-2450 MHz,
+	  47 CFR 97.301(a)) and the radio's measured synthesizer range,
+	  link-layer encryption is refused (97.113(a)(4)), and the call sign is
+	  sent in Morse code by on-off keying the carrier at least every 10
+	  minutes during a communication and at its end (97.119). Off, nothing
+	  of it is compiled. The radio stays under Part 15 until
+	  efr32_amateur_enable() (include/hal/efr32/amateur.h). Only for
+	  licensed amateur stations; see docs/amateur-radio.md.
+
+if EFR32_RADIO_AMATEUR
+
+config EFR32_RADIO_AMATEUR_CW_WPM
+	int "Morse identification speed (words per minute, PARIS)"
+	range 5 20
+	default 20
+	help
+	  47 CFR 97.119(b)(1): an automatically keyed identification must not
+	  exceed 20 WPM. A Morse unit must be a whole number of the radio's
+	  200 Bd OOK symbols (240 / WPM symbols): 5, 6, 8, 10, 12, 15, 16 or
+	  20.
+
+config EFR32_RADIO_AMATEUR_ID_LEAD_S
+	int "Identification released this long before its latest start (s)"
+	range 1 60
+	default 30
+	help
+	  The identification job is released this long before the latest
+	  time it can start and still end 10 minutes after the previous one;
+	  the controller's ticker places it in the first free radio slot after
+	  the release. At most 60 s: start-by deadlines are 32-bit scheduler
+	  clock times.
+
+config EFR32_RADIO_AMATEUR_ID_STACK_SIZE
+	int "Identification job stack size"
+	default 768
+
+config EFR32_RADIO_WCET_AMATEUR_ID_NS
+	int "Identification job budget (ns)"
+	default 200000
+	help
+	  [P] Placeholder, unmeasured: one run of the identification job (a
+	  ticker request, or the bookkeeping after the identification). Its
+	  airtime is not CPU time: the ticker reserves the radio for it.
+
+config EFR32_RADIO_AMATEUR_SYNTH_PROBE
+	bool "Test only: receive-only synthesizer probe, 2290-2500 MHz"
+	help
+	  For measuring where the synthesizer calibrates and locks
+	  (docs/radio-tables.md 7.85): a plan may put any channel anywhere in
+	  2290-2500 MHz, in or out of band, and any transmission stops the
+	  radio (safe shutdown). Never in an image that transmits.
+
+endif # EFR32_RADIO_AMATEUR
+
 endif # BT_LLL_VENDOR_EFR32
 
 # Starting a kernel timeout runs the scheduler clock arm path on the caller's stack: the
