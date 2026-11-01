@@ -7347,3 +7347,137 @@ RX from OFF untuned; chain delays (d_rx/d_tx split) unmeasured; T_MCES and the C
 length are not enforced by the OpenISA LLL beyond its slot reservation; 2M/Coded PHYs not
 supported (PHY update stays on 1M); the QEMU-configuration seams cannot run a spec-timed
 connection (no air time; T_IFS from the callback).
+
+### 7.80 Silicon receive from OFF; data channels; the first silicon connection
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548). Code: `sequencer/radio_seq.S`
+(RXWARM handler), `hal/radio.c`, `CMakeLists.txt` (one LLL patch), `Kconfig`; `tests/radio-rx-port`
+gains a hardware profile (`prj-hardware.conf`, `boards/bgm220_ek4314a.overlay`);
+`tests/radio-port/src/gatt.c` prints link events. QEMU: two `vendor/qemu` commits. Tooling and logs:
+`scratch/silicon-rx/` (build.sh, hw.sh, prs-probe.tcl, chcrc.sh, recover2.sh, ...).
+
+**Why a window opened from OFF heard nothing [F].** The open sequencer had no IRQ1 (RXWARM)
+handler: the common tail acknowledged STATERXWARM and the RAC went to RXSEARCH with nothing
+powered. Hardware passive scanner, 3 s: RXWARM, RXSEARCH, RXPD 30 each, RXFRAME 0. A dump of the
+radio blocks held in that RXSEARCH (M33 halted) against our own RXSEARCH after a TX->RX turnaround
+(the path that receives, 7.64-7.66): `RAC.SYEN` 0 (0x1FBF), `SYLOEN` 0 (3), `RFPATHEN` 0 (6),
+`LNAMIXEN` 0 (1), `IFADCDBG` 0x0C (0x1F), `RAC.RX` 0 (0x6D6), `RAC.PRESC` 0 (7), `SYNTH.STATUS`
+0x4 (0x6: not started, IF off), `PGACAL` uncalibrated.
+
+**Fix.** Stock's IRQ1 (`fn_0x23a0`) opens with the same RAC.PRESC pulse as its TXWARM, then
+dispatches stock's job machinery (not ported, 7.3). The open RXWARM now runs the PRESC pulse
+(`efr32_seq_presc_pulse`), brings the synthesizer up exactly as TXWARM does
+(`efr32_seq_synth_power_up`, TX calibration cached for this channel, so an RX2TX from this window
+retunes with the cache as after TX2RX), then the receive half of TX2RX (`efr32_seq_rx_tune`, split
+out of `efr32_seq_rx_turnaround`). RXSEARCH is reached in the TX2RX register state by construction.
+Result [F]: the hardware passive scanner reports advertising from the devices around it (1165
+reports in 40 s; no miss).
+
+Two more defects found on the way [F]:
+- OpenISA's scanner arms RX->TX for every window, a passive scanner's included. The armed window
+  gives each received frame the T_IFS RESPOND deadline; admission found it unsat at the first
+  advertisement (window 53.6 us after release against a 58.1 us interrupt allowance) and shut the
+  radio down. A passive scanner never responds: `lll_scan.c` is patched to arm only for an active
+  scanner or an initiator (`efr32_scan_switch()`).
+- The RX->TX decision word (SEQRAM 0x4FA4) survives an M33 reset like the rest of SEQRAM: a
+  PENDING left by the previous image made the sequencer request TX at every frame of a window
+  never armed (an RX2TX and a decision timeout per frame). The HAL clears it with the image
+  install.
+
+**RX ready delay [F]** (7.79 item 1): PRS RACL.ACTIVE rise (SWRXEN with the RAC in OFF) reload-
+starts TIMER1, RACL.RX rise captured (`prs-probe.tcl`; TIMER1 on HFRCODPLL 76.8 MHz,
+EM01GRPACLKCTRL = 1, calibrated in 7.71): **166.55-166.76 us**, n = 899 (12791-12807 ticks).
+`EFR32_RADIO_RX_READY_NS` silicon 166760 (was the QEMU 3121 placeholder).
+
+**LO-count measurement time [F] and the QEMU model.** The model's RXWARM ran 155.5-156.3 us. The
+known [I] gap (7.75: QEMU never reported `SYNTH.LOCNTSTATUS.BUSY`) was measured: a scratch
+sequencer stamped the M0+ SysTick (38.4 MHz) from just after `LOCNTCTRL.RUN` to the first poll that
+reads BUSY clear, 200 calibrations: 70 cycles at NUMCYCLE 5 (rarely 71), 40 at 4 (some 30), 20 at 3
+and at 2 (the instrumented poll's floor). [I] BUSY lasting 2^(NUMCYCLE+1) HFXO periods reproduces
+all four after the poll's granularity; modelled. Model after (dual run, shift 3): RXWARM
+166.01-167.63 us (silicon 166.55-166.76), TXWARM 90.96-92.52 (91.03), TX2RX 124.50-125.51
+(123.4-123.7; the model's PA ramp-down uses the 3.96 us median of a 0.81-3.96 us range).
+`EFR32_RADIO_RX_READY_NS` QEMU 167630. The model also now detects a frame only with the receive
+chain up (synthesizer started in IF mode, `RFPATHEN.LNAMIXEN`, `IFADCDBG.IFADCENCLK`; which one is
+individually required is [I]); before, it received with all of them off.
+
+**Data channels [F mechanism].** `radio_freq_chan_set()` knew only the three advertising channels
+and returned without touching the synthesizer for every data channel, so no silicon connection
+could follow its hop sequence. QEMU took the medium channel from `SYNTH.CHSP`, which the HAL did
+not update either, so a QEMU pair kept meeting on the last advertising channel. The captured words
+0x01F46AAB, 0x01F96AAB, 0x0204AAAB (2402, 2426, 2480 MHz) are each round(f x 2^19 / 38.4 MHz)
+exactly: SYNTH.FREQ is the carrier in units of f_HFXO / 2^19 (public field FREQ, 28 bits). The HAL
+now computes it for every channel; the model takes the carrier from FREQ (+ CHCTRL x CHSP, [I],
+zero in every observed configuration). QEMU connection pair with hopping: 240/240 GATT rounds.
+
+**Silicon receive is channel-dependent: an open blocker [F].** Per-channel CRC counts in the
+hardware scanner (`FRC.WHITEINIT` channel at RXDONE, 20 s): ch37 1586 ok / 475 fail (77 %), ch38
+16 / 1557 (1 %), ch39 1 / 204 (0 %). The Peripheral, the laptop actively scanning at about
+-46 dBm: ch37 8 / 7, ch38 0 / 15, ch39 0 / 2. Failing frames mostly carry a correct header and go
+wrong part way through (SCAN_REQs whose AdvA bits flip). This is why CONNECT_INDs rarely arrive.
+Ruled out, each on silicon: VCO calibration (our per-channel results, recorded by channel and mode,
+equal stock's three clusters 0x8334, 0x82CC, 0x81E6); HFXO tuning (stock runs the same `XTALCTRL`,
+0x83959508); carrier offset (`MODEM.FREQOFFEST` mean 8.5, 8.7, 14.4 on ch37, 38, 39; stock about 9
+on the laptop's SCAN_REQs); whitening (headers decode); interference (a strong close signal fails
+the same); live pokes of stock's `AGC.CTRL0`, `MODEM.IRCALCOEFWR1`, `DIGMIXCTRL`, `BLEIQDSA` and the
+retime limit fields (no change). Enabling RAC clock retiming (`XORETIMECTRL`/`DIGCLKRETIMECTRL`
+ENRETIME with stock's RXSEARCH limits) in the RX tune wedged the debug port within milliseconds of
+every boot (recovered: `scratch/silicon-rx/recover2.sh fpb`: J-Link nRESET, attach at release,
+DHCSR halt and an FPB comparator on the reset handler, then a normal flash). Stock runs its CPU
+from the HFXO (38.4 MHz), ours from HFRCODPLL (76.8 MHz); a build with SYSCLK on the HFXO left the
+radio silent and was not pursued. Next: a stock RX capture on ch38 (AP3 watchpoint, as 7.64) and a
+diff against ours.
+
+**RX FIFO overflow [F]** (the ram-fit question): with the M33 halted 2 s while the scanner
+received, frames filled the 512-octet FIFO (WRITEOFFSET 512, READOFFSET 0), `BUFC.IF` read 0x100
+(channel 1 overflow) and the RAC sat in RXOVERFLOW (6) with no state event pending (SEQACTIVE
+clear, the M0+'s IRQ6 never ran), and stayed there after the M33 resumed: the radio stopped. RXDIS,
+SWRXEN withdrawn, BUFC CLEAR, `FRC.CMD.RXABORT` and clearing `BUFC.IF` each left it in RXOVERFLOW;
+FORCEDISABLE went to OFF through SHUTDOWN and the radio resumed once it was cleared. The HAL has no
+recovery path, so the RX FIFO must stay large enough never to fill (512 octets, consumed per
+frame). Modelled in QEMU: a frame that does not fit writes what fits, raises BUF1OF, no RXDONE,
+RXOVERFLOW without a SEQIF event; FORCEDISABLE leaves it.
+
+**Jobs waiting on a frame in progress [F].** Hardware scanner, probe build: RX completion 75.7 us
+(the Kconfig silicon budget had the QEMU 129.3 us), but ABORT completions ran 1206.9 us and RX
+launches 1106.4 us: `efr32_radio_rx_start()` spins on `radio_is_idle()` while the RAC finishes a
+frame it was told to abandon (an instrumented build saw a 297 us wait entered in RXFRAME,
+`RAC.STATUS` 0x23400000). RXDIS does not end RXFRAME; FORCEDISABLE does (debugger, 5/5: RXFRAME to
+OFF at once). Not fixed yet: the scanner's abort and launch budgets are exceeded on silicon whenever
+a window closes during a frame. Also fixed for measurement: the probe recorded a completion under
+the kind of a later publication (an abort the callback raises republishes the mailbox mid-run), so
+7.77's ABORT maximum may hold RX runs; it now records the kind dispatched.
+
+**First silicon connection [F].** Peripheral image (radio-port hardware profile, GATT test, probes,
+admission off, misses counted) against the laptop's controller: in the third attempt the
+Peripheral accepted a CONNECT_IND (`peripheral_connected: 0`) and dropped at the supervision
+timeout (`0x08`); the host reported `le-connection-abort-by-local`; 8 misses counted. Figures from
+that connection (TIMING_PROBE, scheduler clock 33554432 Hz):
+
+| figure | silicon | QEMU (7.79) |
+|---|---|---|
+| conn completion TX->RX run | 143.7 us | 125.3 us |
+| conn completion RX->TX run | 109.3 us | 136.6 us |
+| conn close/abort run | 31.1 us | 241.7 us |
+| path to PENDING (conn) | 95.1 us | 99.2 us |
+| path to RESPOND (conn) | 103.2 us | 133.0 us |
+| held RX launch PRE / run | 10.3 / 14.0 us | 7.2 / 69.6 us |
+| held RX launch hold lateness | no hold waited | 1.25 us |
+| adv completion RX->TX (CONNECT_IND) | 52.5 us | 45.6 us |
+
+Kconfig silicon defaults now take these (the close budget keeps the QEMU 241.7 us, as no abort after
+a receive was seen; the hold lateness stays PROVISIONAL).
+
+**Feasibility (admission verdict).** RX->TX in a connection event: RESPOND must land by
+EFR32_RX2TX_RESPOND_BY_STIMER, about 106.9 us after the frame end, and the completion is posted
+about 11.5 us after it (FRAME_END_TO_COMPLETION_POST): 95.4 us for a 103.2 us path, before any
+interrupt allowance. **Infeasible on silicon by measurement**, as 7.79 predicted. TX->RX (PENDING):
+188 - 11.5 - 95.1 = 81.4 us of slack against one 58.1 us interrupt: feasible. A silicon Peripheral
+with admission on would stop at its first connection event, correctly. The fix is the architectural
+one 7.79 names (stage the reply before the frame ends, the empty PDU and SN/NESN completed by the
+sequencer, or the RX callback at interrupt level), not a wider tolerance; not done here.
+
+**Not measured (7.79 list).** Items 3-7 (EOF dating error, window margin, connection T_IFS, the
+sequencer's RX2TX power-up, the prepare lead in deep sleep) need a connection that holds, which the
+channel-dependent receive above prevents. The ram-fit TX launch stack watermark and the 64-octet
+TX FIFO byte-exact check were not reached.

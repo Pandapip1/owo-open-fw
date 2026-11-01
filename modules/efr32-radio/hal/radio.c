@@ -841,15 +841,14 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_SYNTH_FREQ_OFFSET 0x034U
 
 /*
- * Hardware-watchpoint captures at the working stage-2 channel-preparation
- * boundary.  Keep these named by their Bluetooth physical use instead of
- * scattering captured words through the launch path.  The general xG22
- * frequency-word encoding still needs a source-backed derivation before data
- * channels are enabled by this open port.
+ * SYNTH.FREQ (public field FREQ, bits 27:0) is the carrier in units of f_HFXO / 2^19: the three
+ * words captured at the working stage-2 channel-preparation boundary, 0x01F46AAB (2402 MHz),
+ * 0x01F96AAB (2426 MHz) and 0x0204AAAB (2480 MHz), are each round(f * 2^19 / 38.4 MHz)
+ * exactly, and stock programs every channel with CHCTRL = 0 (docs/radio-tables.md 7.80).
  */
-#define EFR32_SYNTH_BLE_ADV37_FREQ 0x01F46AABU /* 2402 MHz */
-#define EFR32_SYNTH_BLE_ADV38_FREQ 0x01F96AABU /* 2426 MHz */
-#define EFR32_SYNTH_BLE_ADV39_FREQ 0x0204AAABU /* 2480 MHz */
+#define EFR32_SYNTH_FREQ_FRACTION_BITS 19U
+#define EFR32_SYNTH_REFERENCE_HZ 38400000ULL
+#define EFR32_BLE_CHANNEL_BASE_MHZ 2400U
 
 #define EFR32_RFCRC_BASE 0xB8010000UL
 #define EFR32_RFCRC_EN_OFFSET 0x004U
@@ -988,6 +987,12 @@ static uint8_t MALIGN(4) efr32_rx_fifo[EFR32_BUFC_FIFO_BYTES(EFR32_RX_FRAME_BYTE
 #define EFR32_SEQ_RAM_SIZE 0x00008000U
 #define EFR32_SEQ_STACK_TOP 0x00003E00U
 #define EFR32_SEQ_IDENTITY_ADDRESS 0xB0004FE0UL
+/* The RX->TX decision word shared with the sequencer (see efr32_hw_rx2tx_armed). */
+#define EFR32_SEQ_RX2TX_DECISION_ADDRESS 0xB0004FA4UL
+#define EFR32_SEQ_RX2TX_IDLE 0U
+#define EFR32_SEQ_RX2TX_PENDING 3U
+#define EFR32_SEQ_RX2TX_RESPOND 1U
+#define EFR32_SEQ_RX2TX_CANCEL 2U
 #define EFR32_SEQ_IDENTITY_OPEN_V1 0x4F535131U
 #define EFR32_SEQ_TRACE_TXWARM_ADDRESS 0xB0004FC0UL
 #define EFR32_SEQ_TRACE_TX_ADDRESS 0xB0004FD0UL
@@ -1152,6 +1157,13 @@ static void efr32_radio_sequencer_install(void)
 	 * not implement our OSQ1 ABI. */
 	if (efr32_radio_seq_image_is_open) {
 		*radio_reg32(EFR32_SEQ_IDENTITY_ADDRESS) = 0U;
+		/*
+		 * The decision word retains too: a PENDING left by the previous image made the
+		 * sequencer request TX at every received frame of a window never armed for a
+		 * response (an RX2TX hold and a decision timeout per frame, measured on
+		 * silicon, docs/radio-tables.md 7.80).
+		 */
+		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_IDLE;
 	}
 	__DSB();
 }
@@ -2113,6 +2125,10 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		radio_isr_cb_t callback = NULL;
 		void *param = NULL;
 		bool abort = false;
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		uint8_t probe_kind = 0U;
+		bool probe_conn = false;
+#endif
 		unsigned int key;
 
 		k_deadline_event_wait(&efr32_radio_completion_event);
@@ -2125,6 +2141,15 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			callback = efr32_radio_completion_work.callback;
 			param = efr32_radio_completion_work.param;
 			abort = efr32_radio_completion_work.abort;
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+			/*
+			 * The run is recorded under the kind it was published as: an abort the
+			 * callback itself raises (radio_disable() in the LLL's isr_rx) republishes
+			 * the mailbox while this run is still going.
+			 */
+			probe_kind = efr32_radio_completion_work.kind;
+			probe_conn = efr32_radio_completion_work.conn;
+#endif
 		}
 		irq_unlock(key);
 
@@ -2167,8 +2192,7 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
 		}
-		EFR32_PROBE_MAX(completion_run[efr32_radio_completion_work.conn ? 1 : 0]
-					      [efr32_radio_completion_work.kind],
+		EFR32_PROBE_MAX(completion_run[probe_conn ? 1 : 0][probe_kind],
 				k_cycle_get_32() - efr32_radio_probe_job_start);
 	}
 }
@@ -2411,10 +2435,6 @@ static bool efr32_hw_tx_after_rx_requested;
  * for the LLL's decision: RESPOND once the response PDU is in BUFC, CANCEL
  * when the LLL disables instead.
  */
-#define EFR32_SEQ_RX2TX_DECISION_ADDRESS 0xB0004FA4UL
-#define EFR32_SEQ_RX2TX_PENDING 3U
-#define EFR32_SEQ_RX2TX_RESPOND 1U
-#define EFR32_SEQ_RX2TX_CANCEL 2U
 static bool efr32_hw_rx2tx_armed;
 
 #define EFR32_RAC_STIMER_OFFSET 0x030U
@@ -2875,19 +2895,13 @@ void radio_freq_chan_set(uint32_t chan)
 	/* Zephyr passes MHz relative to 2400: 2..80, always even. */
 	LL_ASSERT((chan >= 2U) && (chan <= 80U) && ((chan & 1U) == 0U));
 	channel_number = (chan - 2U) / 2U;
-	switch (chan) {
-	case 2U:
-		frequency_word = EFR32_SYNTH_BLE_ADV37_FREQ;
-		break;
-	case 26U:
-		frequency_word = EFR32_SYNTH_BLE_ADV38_FREQ;
-		break;
-	case 80U:
-		frequency_word = EFR32_SYNTH_BLE_ADV39_FREQ;
-		break;
-	default:
-		EFR32_RADIO_AIR_TODO("source-backed SYNTH frequency encoding for data channels");
-		return;
+	{
+		uint64_t hz = (uint64_t)(EFR32_BLE_CHANNEL_BASE_MHZ + chan) * 1000000ULL;
+
+		/* Rounded to nearest, as the captured advertising-channel words are. */
+		frequency_word = (uint32_t)(((hz << EFR32_SYNTH_FREQ_FRACTION_BITS) +
+					     (EFR32_SYNTH_REFERENCE_HZ / 2ULL)) /
+					    EFR32_SYNTH_REFERENCE_HZ);
 	}
 	/*
 	 * A hardware trace of the working RAIL_StartTx path establishes the

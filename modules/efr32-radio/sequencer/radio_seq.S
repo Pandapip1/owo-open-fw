@@ -84,6 +84,7 @@
  * (SS7.63); those without a handler are acknowledged by the common tail. */
 .equ EFR32_RAC_SEQIF_STATE_SHIFT,     16
 .equ EFR32_RAC_IRQ_STATE_EVENTS,      (EFR32_RAC_SEQIF_STATE_EVENTS >> EFR32_RAC_SEQIF_STATE_SHIFT)
+.equ EFR32_EXCEPTION_RXWARM,          (16 + 1)
 .equ EFR32_EXCEPTION_RXPD,            (16 + 4)
 .equ EFR32_EXCEPTION_RX2TX,           (16 + 7)
 .equ EFR32_EXCEPTION_RXFRAME,         (16 + 3)
@@ -347,7 +348,17 @@ efr32_radio_seq_exception:
     pop {r0}
     mov lr, r0
     b 2f
-16: cmp r3, #EFR32_EXCEPTION_RXPD
+16: cmp r3, #EFR32_EXCEPTION_RXWARM
+    bne 17f
+    /* RX warm-up from OFF (SS7.80): synthesizer and receiver up, then the
+     * common tail acknowledges STATERXWARM. */
+    mov r0, lr
+    push {r0}
+    bl efr32_seq_rx_warm
+    pop {r0}
+    mov lr, r0
+    b 2f
+17: cmp r3, #EFR32_EXCEPTION_RXPD
     bne 18f
     /* RX power-down (SS7.65): receive chain, then synthesizer. */
     mov r0, lr
@@ -1290,6 +1301,69 @@ efr32_seq_rx_turnaround:
     ldr r0, =(EFR32_RAC_RXENSRCEN + EFR32_ALIAS_SET)
     movs r1, #EFR32_RAC_RXENSRCEN_SWRXEN
     str r1, [r0]
+    bl efr32_seq_rx_tune
+    pop {r4, pc}
+
+/*
+ * RX warm-up from OFF (IRQ1, SWRXEN in OFF: a scan window, a Peripheral's anchor window).
+ * Nothing in this event powered the synthesizer (the last RXPD/TXPD powered it down, RADIOEN
+ * reads 0), and without a handler the RAC reached RXSEARCH with the synthesizer stopped and the
+ * whole receive chain off (SYEN, SYLOEN, LNAMIXEN, RFPATHEN, IFADCDBG and RAC.RX all 0, measured
+ * on silicon, docs/radio-tables.md SS7.80): it never detected a frame.  Stock's IRQ1 opens with
+ * the same RAC.PRESC pulse as its TXWARM (SS7.2, fn_0x23a0).  Then: the synthesizer up exactly
+ * as TXWARM brings it up, calibrated for this channel's TX and cached (a response from this
+ * window then retunes with the cache, as after a TX->RX turnaround), and the receiver tuned and
+ * powered exactly as TX2RX does.  So RXSEARCH is reached in the register state of the TX->RX
+ * turnaround, the path that receives on silicon (SS7.64-SS7.66).  The common tail acknowledges
+ * STATERXWARM.  Clobbers r0-r3.
+ */
+.thumb_func
+efr32_seq_rx_warm:
+    push {r4, lr}
+    bl efr32_seq_presc_pulse
+    bl efr32_seq_synth_power_up
+    cmp r0, #0
+    bne 9f
+    bl efr32_seq_rx_tune
+9:  pop {r4, pc}
+
+/*
+ * Stock's TXWARM and RXWARM prologue (SS7.2): the SR0 gate pulse around RAC.PRESC SET 5, the
+ * wait on the SR0 wait bit bounded (the TXWARM path keeps its inline copy: its duration is part
+ * of the measured TX ready delay).  Returns r0 = the wait's remaining count (0: bound hit).
+ * Clobbers r0-r3.
+ */
+.thumb_func
+efr32_seq_presc_pulse:
+    ldr r0, =EFR32_RAC_SR0_SET
+    ldr r1, =EFR32_RAC_SR0_GATE_BIT
+    str r1, [r0]
+    ldr r3, =EFR32_RAC_TXWARM_WAIT_BOUND
+1:  ldr r0, =EFR32_RAC_SR0_BASE
+    ldr r1, [r0]
+    ldr r2, =EFR32_RAC_SR0_WAIT_BIT
+    ands r1, r2
+    beq 2f
+    subs r3, #1
+    bne 1b
+2:  ldr r0, =EFR32_RAC_PRESC_SET
+    movs r1, #EFR32_RAC_PRESC_SET_VALUE
+    str r1, [r0]
+    ldr r0, =EFR32_RAC_SR0_CLR
+    ldr r1, =EFR32_RAC_SR0_GATE_BIT
+    str r1, [r0]
+    mov r0, r3
+    bx lr
+
+.ltorg
+
+/*
+ * The receive half of the TX->RX turnaround (SS7.63): retune the running synthesizer for RX,
+ * power the receive chain, calibrate the IF PGA's DC offset.  Clobbers r0-r3.
+ */
+.thumb_func
+efr32_seq_rx_tune:
+    push {r4, lr}
     ldr r0, =EFR32_SYNTH_VCORANGE
     ldr r1, =EFR32_SYNTH_VCORANGE_RX
     str r1, [r0]
@@ -1657,11 +1731,11 @@ efr32_seq_tx_turnaround:
      * TX while the M33 decides; the PA comes up only on RESPOND, so nothing
      * radiates for a declined frame (SS7.67). */
     bl efr32_seq_rx_frontend_stop
-    /* A window the M33 opened from OFF (SWRXEN: RXWARM, then RXSEARCH; a Peripheral's anchor,
-     * an initiator's scan) had no TXWARM in this event, so the synthesizer is powered down
-     * (efr32_seq_synth_power_down leaves RADIOEN zero): bring it up and calibrate it as TXWARM
-     * does, PA still off.  After a TX->RX turnaround it is up: retune with the cached
-     * calibration. */
+    /* After a TX->RX turnaround, and after a window opened from OFF (RXWARM brings the
+     * synthesizer up as TXWARM does and caches this channel's TX calibration, SS7.80), the
+     * synthesizer is up: retune with the cached calibration.  Should it be down (RADIOEN
+     * zero, as efr32_seq_synth_power_down leaves it, e.g. the RXWARM calibration aborted),
+     * bring it up and calibrate it as TXWARM does, PA still off. */
     ldr r0, =EFR32_RAC_RADIOEN
     ldr r0, [r0]
     movs r1, #EFR32_RAC_RADIOEN_PREEN
