@@ -92,15 +92,18 @@ For a version 1 identification the header octet is therefore `0x10` (periodic) o
 
 ## 7. Notes for US operators (informative)
 
-47 CFR 97.119(b)(3) allows identification by a RTTY or data emission using a specified digital
-code when all or part of the communication is sent by such an emission. 47 CFR 97.309(a) lists
-specified digital codes, including ASCII.
+47 CFR 97.119(b)(3) allows identification "by a RTTY emission using a specified digital code when
+all or part of the communications are transmitted by a RTTY or data emission". So the
+communication may be a data emission, but the identification itself is to be a RTTY emission.
+47 CFR 97.309(a) lists specified digital codes, including ASCII. (Verify both quotations against
+the current eCFR text.)
 
 This format carries the callsign as unencrypted ASCII. The framing around it (Bluetooth LE GFSK,
-whitening, CRC) is publicly documented in the Bluetooth Core Specification.
+whitening, CRC) is publicly documented in the Bluetooth Core Specification. The emission, however,
+is a roughly 1 MHz wide F1D data emission, not a narrow-band RTTY emission.
 
-Whether that combination is acceptable identification under 97.119(b)(3) is the operator's
-determination. Until it is confirmed, a station can also identify in CW (A1A) under
+Whether that is acceptable identification under 97.119(b)(3) is the operator's determination, and
+this point is the crux of it. Until it is confirmed, a station can also identify in CW (A1A) under
 97.119(b)(1), at 20 words per minute or slower when keyed automatically.
 
 ## 8. Receiver behaviour
