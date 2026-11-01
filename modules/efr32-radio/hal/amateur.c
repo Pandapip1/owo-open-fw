@@ -96,6 +96,8 @@ static bool efr32_amateur_id_started;
 static bool efr32_amateur_id_completed;
 static bool efr32_amateur_slot_requested;
 static bool efr32_amateur_id_now;
+/* The identification was cut before its end (efr32_amateur_frame_expiry()). */
+static bool efr32_amateur_id_failed;
 /* efr32_amateur_disable() waits for the last identification. */
 static bool efr32_amateur_closing;
 static atomic_t efr32_amateur_enc_refusals;
@@ -106,6 +108,18 @@ static void efr32_amateur_release_expiry(struct k_timer *timer);
 static void efr32_amateur_watchdog_expiry(struct k_timer *timer);
 static K_TIMER_DEFINE(efr32_amateur_release_timer, efr32_amateur_release_expiry, NULL);
 static K_TIMER_DEFINE(efr32_amateur_watchdog_timer, efr32_amateur_watchdog_expiry, NULL);
+static void efr32_amateur_frame_expiry(struct k_timer *timer);
+static K_TIMER_DEFINE(efr32_amateur_frame_timer, efr32_amateur_frame_expiry, NULL);
+
+/*
+ * The radio slot an identification reserves: its airtime plus the controller's own event
+ * overheads around it (the prepare lead and the end of event, lll_vendor.h).
+ */
+static uint32_t efr32_amateur_slot_us(void)
+{
+	return efr32_amateur_cw_airtime_us + EVENT_OVERHEAD_START_US + EVENT_OVERHEAD_XTAL_US +
+	       EVENT_OVERHEAD_END_US;
+}
 
 static const char efr32_amateur_id_rule[] =
 	"amateur station identification, 47 CFR 97.119(a)";
@@ -311,8 +325,30 @@ static void efr32_amateur_cw_start(void *param)
 	khz = efr32_amateur_tx_khz;
 	k_spin_unlock(&efr32_amateur_lock, key);
 	k_timer_stop(&efr32_amateur_watchdog_timer);
+	/* The frame must end inside its reserved slot (efr32_amateur_slot_us()). */
+	k_timer_start(&efr32_amateur_frame_timer,
+		      K_USEC(efr32_amateur_slot_us() + EVENT_TICKER_RES_MARGIN_US), K_NO_WAIT);
 	efr32_radio_cw_transmit(khz, efr32_amateur_cw, efr32_amateur_cw_octets,
 				efr32_amateur_cw_done, NULL);
+}
+
+/*
+ * The identification did not end in its slot: something took the radio and cut the frame.
+ * It counts as not sent: try again while its latest start allows, else stop the radio.
+ */
+static void efr32_amateur_frame_expiry(struct k_timer *timer)
+{
+	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
+	bool failed = efr32_amateur_id_started && !efr32_amateur_id_completed;
+
+	ARG_UNUSED(timer);
+	if (failed) {
+		efr32_amateur_id_failed = true;
+	}
+	k_spin_unlock(&efr32_amateur_lock, key);
+	if (failed) {
+		efr32_amateur_post(0U);
+	}
 }
 
 static void efr32_amateur_ticker_op(uint32_t status, void *param)
@@ -339,8 +375,11 @@ static void efr32_amateur_slot_start(uint32_t ticks_at_expire, uint32_t ticks_dr
 		/* Not yet: the periodic slot request tries again one slot later. */
 		return;
 	}
-	(void)ticker_stop(TICKER_INSTANCE_ID_CTLR, TICKER_USER_ID_ULL_HIGH,
-			  EFR32_AMATEUR_TICKER_SLOT, efr32_amateur_ticker_op, NULL);
+	/*
+	 * The slot request keeps running until the identification has ended: stopping a ticker
+	 * node releases its slot reservation, and the next link-layer event would then take the
+	 * radio in the middle of the frame (QEMU, a 10-minute advertiser: cut 77 ms in).
+	 */
 	(void)mayfly_enqueue(TICKER_USER_ID_ULL_HIGH, TICKER_USER_ID_LLL, 0U, &mfy);
 }
 
@@ -367,8 +406,7 @@ static void efr32_amateur_slot_granted(uint32_t ticks_at_expire, uint32_t ticks_
 /* Thread: ask the ticker for a slot as long as the identification, starting now. */
 static int efr32_amateur_slot_request(void)
 {
-	uint32_t slot_us = efr32_amateur_cw_airtime_us + EVENT_OVERHEAD_START_US +
-			   EVENT_OVERHEAD_XTAL_US + EVENT_OVERHEAD_END_US;
+	uint32_t slot_us = efr32_amateur_slot_us();
 	uint32_t ticks_slot = HAL_TICKER_US_TO_TICKS(slot_us);
 	uint32_t ret;
 
@@ -386,13 +424,36 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 	for (;;) {
 		bool request = false;
+		bool report = false;
+		bool release_slot = false;
+		bool stop = false;
 		k_spinlock_key_t key;
 		uint64_t now;
 
 		k_deadline_event_wait(&efr32_amateur_id_event);
 		key = k_spin_lock(&efr32_amateur_lock);
 		now = efr32_amateur_now_ms();
-		if (efr32_amateur_id_completed) {
+		if (efr32_amateur_id_failed) {
+			struct efr32_amateur_id_due due;
+			uint32_t airtime_ms = DIV_ROUND_UP(efr32_amateur_cw_airtime_us,
+							   USEC_PER_MSEC);
+
+			efr32_amateur_id_failed = false;
+			efr32_amateur_id_started = false;
+			release_slot = true;
+			/* Again, in a new slot, while the latest start allows. */
+			if (efr32_amateur_id_next(&efr32_amateur_id, efr32_amateur_admin,
+						  EFR32_AMATEUR_END_IDLE_MS, EFR32_AMATEUR_LEAD_MS,
+						  airtime_ms, &due) &&
+			    now < due.latest_start_ms) {
+				request = true;
+				k_timer_start(&efr32_amateur_watchdog_timer,
+					      K_MSEC(due.latest_start_ms - now), K_NO_WAIT);
+			} else {
+				stop = true;
+			}
+		} else if (efr32_amateur_id_completed) {
+			release_slot = true;
 			efr32_amateur_id_completed = false;
 			efr32_amateur_id_started = false;
 			efr32_amateur_slot_requested = false;
@@ -400,6 +461,7 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 			efr32_amateur_ids++;
 			efr32_amateur_schedule(now);
 			k_sem_give(&efr32_amateur_id_sem);
+			report = true;
 		} else if (atomic_get(&efr32_amateur_on) != 0 && !efr32_amateur_slot_requested &&
 			   (efr32_amateur_id.unidentified || efr32_amateur_id_now)) {
 			efr32_amateur_slot_requested = true;
@@ -410,6 +472,20 @@ static void efr32_amateur_id_job(void *a, void *b, void *c)
 			k_sem_give(&efr32_amateur_id_sem);
 		}
 		k_spin_unlock(&efr32_amateur_lock, key);
+		if (release_slot) {
+			/* The identification is over: give the radio back to the link layer. */
+			k_timer_stop(&efr32_amateur_frame_timer);
+			(void)ticker_stop(TICKER_INSTANCE_ID_CTLR, TICKER_USER_ID_THREAD,
+					  EFR32_AMATEUR_TICKER_SLOT, efr32_amateur_ticker_op, NULL);
+		}
+		if (stop) {
+			efr32_radio_policy_stop(&efr32_amateur_id_event, efr32_amateur_id_rule);
+		}
+		if (report) {
+			printk("efr32-radio: identification %u (%s, CW) ended at %llu ms on %u kHz\n",
+			       efr32_amateur_ids, efr32_amateur_call, (unsigned long long)now,
+			       efr32_amateur_tx_khz);
+		}
 		if (request && efr32_amateur_slot_request() != 0) {
 			efr32_radio_policy_stop(&efr32_amateur_id_event, efr32_amateur_id_rule);
 		}

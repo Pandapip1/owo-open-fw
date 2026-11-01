@@ -62,7 +62,16 @@ static void plan_build(void)
 
 static const uint32_t *test_plan(void)
 {
+#if defined(CONFIG_AMATEUR_PORT_PLAN_SINGLE)
+	static uint32_t single[EFR32_AMATEUR_PLAN_CHANNELS];
+
+	for (uint32_t ch = 0U; ch < EFR32_AMATEUR_PLAN_CHANNELS; ch++) {
+		single[ch] = CONFIG_AMATEUR_PORT_SINGLE_KHZ;
+	}
+	return single;
+#else
 	return IS_ENABLED(CONFIG_AMATEUR_PORT_PLAN_ODD) ? plan : NULL;
+#endif
 }
 
 static int checks;
@@ -151,11 +160,99 @@ static void amateur_on(void)
 		return;
 	}
 	err = enable_with(CONFIG_AMATEUR_PORT_CALLSIGN, test_plan());
+	const uint32_t *p = test_plan();
+
 	printk("amateur: enable %d (ch37 %u kHz, ch38 %u kHz, ch39 %u kHz)\n", err,
-	       test_plan() != NULL ? plan[ADV37] : 0U,
-	       test_plan() != NULL ? plan[ADV37 + 1U] : 0U,
-	       test_plan() != NULL ? plan[ADV37 + 2U] : 0U);
+	       p != NULL ? p[ADV37] : 0U, p != NULL ? p[ADV37 + 1U] : 0U,
+	       p != NULL ? p[ADV37 + 2U] : 0U);
 }
+
+#if defined(CONFIG_AMATEUR_PORT_SYNTH_PROBE) || defined(CONFIG_AMATEUR_PORT_SYNTH_MONITOR)
+/*
+ * Synthesizer probe and monitor (docs/radio-tables.md 7.85). Register map: Silicon Labs' public
+ * xG22 register model (SYNTH_S_register.py / _field.py; RAC as in hal/radio.c), non-secure
+ * aliases. The probe samples in RXSEARCH (receive only), the monitor in TX.
+ */
+#define RAC_STATUS 0xB802000CUL
+#define RAC_STATUS_STATE_SHIFT 24U
+#define RAC_STATUS_STATE_MASK 0xFU
+#define RAC_STATE_RXSEARCH 2U
+#define RAC_STATE_TX 9U
+#define SYNTH_STATUS 0xB8018008UL
+#define SYNTH_STATUS_INLOCK BIT(0)
+#define SYNTH_STATUS_CAPCALERROR BIT(14)
+#define SYNTH_FREQ 0xB8018034UL
+#define SYNTH_FREQ_MASK 0x0FFFFFFFU
+#define SYNTH_VCOTUNING 0xB801804CUL
+#define SYNTH_VCOTUNING_MASK 0xFFFFU
+/* SYNTH.FREQ unit: f_HFXO / 2^19 (hal/radio.c). */
+#define HFXO_HZ 38400000ULL
+#define SYNTH_FREQ_FRACTION_BITS 19U
+#define HZ_PER_KHZ 1000U
+#define PROBE_SAMPLE_US 500U
+#define PROBE_PER_BLOCK 3U
+
+struct probe_point {
+	uint32_t khz;
+	uint32_t samples;
+	uint32_t inlock;
+	uint32_t capcal_error;
+	uint16_t tune_min;
+	uint16_t tune_max;
+};
+
+static struct probe_point probe_block[PROBE_PER_BLOCK];
+static uint32_t probe_state = IS_ENABLED(CONFIG_AMATEUR_PORT_SYNTH_PROBE) ? RAC_STATE_RXSEARCH :
+									      RAC_STATE_TX;
+
+static uint32_t reg(uintptr_t address)
+{
+	return *(volatile uint32_t *)address;
+}
+
+static void probe_sample(struct k_timer *timer)
+{
+	uint32_t state = (reg(RAC_STATUS) >> RAC_STATUS_STATE_SHIFT) & RAC_STATUS_STATE_MASK;
+	uint64_t word = reg(SYNTH_FREQ) & SYNTH_FREQ_MASK;
+	uint32_t khz = (uint32_t)(((word * HFXO_HZ) >> SYNTH_FREQ_FRACTION_BITS) / HZ_PER_KHZ);
+
+	ARG_UNUSED(timer);
+	if (state != probe_state) {
+		return;
+	}
+	for (uint32_t i = 0U; i < PROBE_PER_BLOCK; i++) {
+		struct probe_point *p = &probe_block[i];
+		/* FREQ rounds to 73 Hz: match to the kHz. */
+		if (p->khz != 0U && (khz + 1U >= p->khz && khz <= p->khz + 1U)) {
+			uint32_t status = reg(SYNTH_STATUS);
+			uint16_t tune = (uint16_t)(reg(SYNTH_VCOTUNING) & SYNTH_VCOTUNING_MASK);
+
+			p->samples++;
+			p->inlock += (status & SYNTH_STATUS_INLOCK) != 0U;
+			p->capcal_error += (status & SYNTH_STATUS_CAPCALERROR) != 0U;
+			p->tune_min = p->samples == 1U ? tune : MIN(p->tune_min, tune);
+			p->tune_max = p->samples == 1U ? tune : MAX(p->tune_max, tune);
+			break;
+		}
+	}
+}
+
+static K_TIMER_DEFINE(probe_timer, probe_sample, NULL);
+
+static void probe_print(const char *what, int err)
+{
+	for (uint32_t i = 0U; i < PROBE_PER_BLOCK; i++) {
+		const struct probe_point *q = &probe_block[i];
+
+		if (q->khz == 0U || (i > 0U && q->khz == probe_block[0].khz)) {
+			continue;
+		}
+		printk("%s khz=%u err=%d n=%u inlock=%u capcalerr=%u tune=0x%04x..0x%04x\n", what,
+		       q->khz, err, q->samples, q->inlock, q->capcal_error, q->tune_min,
+		       q->tune_max);
+	}
+}
+#endif
 
 #if defined(CONFIG_AMATEUR_PORT_ADVERTISER)
 static void advertise(void)
@@ -175,6 +272,11 @@ static void advertise(void)
 	if (err != 0 || CONFIG_AMATEUR_PORT_ADV_SECONDS == 0) {
 		return;
 	}
+#if defined(CONFIG_AMATEUR_PORT_SYNTH_MONITOR)
+	/* The synthesizer while transmitting on the single carrier, identification included. */
+	probe_block[0].khz = CONFIG_AMATEUR_PORT_SINGLE_KHZ;
+	k_timer_start(&probe_timer, K_USEC(PROBE_SAMPLE_US), K_USEC(PROBE_SAMPLE_US));
+#endif
 	k_sleep(K_SECONDS(CONFIG_AMATEUR_PORT_ADV_SECONDS));
 	err = bt_le_adv_stop();
 	printk("adv_stop: %d\n", err);
@@ -184,6 +286,10 @@ static void advertise(void)
 		printk("amateur: disable %d, identifications %u, active %d\n", err,
 		       efr32_amateur_id_count(), efr32_amateur_active());
 	}
+#if defined(CONFIG_AMATEUR_PORT_SYNTH_MONITOR)
+	k_timer_stop(&probe_timer);
+	probe_print("tx-monitor", err);
+#endif
 }
 #endif
 
@@ -209,73 +315,6 @@ static struct bt_le_scan_cb scan_callbacks = {
 };
 
 #if defined(CONFIG_AMATEUR_PORT_SYNTH_PROBE)
-/*
- * Synthesizer probe (docs/radio-tables.md 7.85). Register map: Silicon Labs' public xG22 register
- * model (SYNTH_S_register.py / _field.py, RAC as in hal/radio.c), non-secure aliases.
- */
-#define RAC_STATUS 0xB802000CUL
-#define RAC_STATUS_STATE_SHIFT 24U
-#define RAC_STATUS_STATE_MASK 0xFU
-#define RAC_STATE_RXSEARCH 2U
-#define SYNTH_STATUS 0xB8018008UL
-#define SYNTH_STATUS_INLOCK BIT(0)
-#define SYNTH_STATUS_CAPCALERROR BIT(14)
-#define SYNTH_FREQ 0xB8018034UL
-#define SYNTH_FREQ_MASK 0x0FFFFFFFU
-#define SYNTH_VCOTUNING 0xB801804CUL
-#define SYNTH_VCOTUNING_MASK 0xFFFFU
-/* SYNTH.FREQ unit: f_HFXO / 2^19 (hal/radio.c). */
-#define HFXO_HZ 38400000ULL
-#define SYNTH_FREQ_FRACTION_BITS 19U
-#define HZ_PER_KHZ 1000U
-#define PROBE_SAMPLE_US 500U
-#define PROBE_PER_BLOCK 3U
-
-struct probe_point {
-	uint32_t khz;
-	uint32_t samples;
-	uint32_t inlock;
-	uint32_t capcal_error;
-	uint16_t tune_min;
-	uint16_t tune_max;
-};
-
-static struct probe_point probe_block[PROBE_PER_BLOCK];
-
-static uint32_t reg(uintptr_t address)
-{
-	return *(volatile uint32_t *)address;
-}
-
-static void probe_sample(struct k_timer *timer)
-{
-	uint32_t state = (reg(RAC_STATUS) >> RAC_STATUS_STATE_SHIFT) & RAC_STATUS_STATE_MASK;
-	uint64_t word = reg(SYNTH_FREQ) & SYNTH_FREQ_MASK;
-	uint32_t khz = (uint32_t)(((word * HFXO_HZ) >> SYNTH_FREQ_FRACTION_BITS) / HZ_PER_KHZ);
-
-	ARG_UNUSED(timer);
-	if (state != RAC_STATE_RXSEARCH) {
-		return;
-	}
-	for (uint32_t i = 0U; i < PROBE_PER_BLOCK; i++) {
-		struct probe_point *p = &probe_block[i];
-		/* FREQ rounds to 73 Hz: match to the kHz. */
-		if (p->khz != 0U && (khz + 1U >= p->khz && khz <= p->khz + 1U)) {
-			uint32_t status = reg(SYNTH_STATUS);
-			uint16_t tune = (uint16_t)(reg(SYNTH_VCOTUNING) & SYNTH_VCOTUNING_MASK);
-
-			p->samples++;
-			p->inlock += (status & SYNTH_STATUS_INLOCK) != 0U;
-			p->capcal_error += (status & SYNTH_STATUS_CAPCALERROR) != 0U;
-			p->tune_min = p->samples == 1U ? tune : MIN(p->tune_min, tune);
-			p->tune_max = p->samples == 1U ? tune : MAX(p->tune_max, tune);
-			break;
-		}
-	}
-}
-
-static K_TIMER_DEFINE(probe_timer, probe_sample, NULL);
-
 static void probe(void)
 {
 	const struct bt_le_scan_param param = {
@@ -311,16 +350,7 @@ static void probe(void)
 			(void)bt_le_scan_stop();
 			(void)efr32_amateur_disable();
 		}
-		for (uint32_t i = 0U; i < PROBE_PER_BLOCK; i++) {
-			const struct probe_point *q = &probe_block[i];
-
-			if (i > 0U && q->khz == probe_block[0].khz) {
-				continue;
-			}
-			printk("probe khz=%u err=%d n=%u inlock=%u capcalerr=%u tune=0x%04x..0x%04x\n",
-			       q->khz, err, q->samples, q->inlock, q->capcal_error, q->tune_min,
-			       q->tune_max);
-		}
+		probe_print("probe", err);
 		khz += PROBE_PER_BLOCK * CONFIG_AMATEUR_PORT_PROBE_STEP_KHZ;
 	}
 	k_timer_stop(&probe_timer);

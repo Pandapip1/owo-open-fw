@@ -30,9 +30,9 @@
 
 #if defined(CONFIG_EFR32_RADIO_AMATEUR)
 /*
- * Amateur identification (hal/amateur.c): its slot request from thread context; the slot's
- * delayed start and the request's stop from ULL_HIGH.
+ * Amateur identification (hal/amateur.c): its slot request, and its release or retry, from
+ * thread context; the start inside the slot from ULL_HIGH.
  */
-#define TICKER_USER_THREAD_VENDOR_OPS 1
-#define TICKER_USER_ULL_HIGH_VENDOR_OPS 2
+#define TICKER_USER_THREAD_VENDOR_OPS 2
+#define TICKER_USER_ULL_HIGH_VENDOR_OPS 1
 #endif

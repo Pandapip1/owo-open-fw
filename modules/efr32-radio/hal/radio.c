@@ -5248,9 +5248,15 @@ uint32_t radio_is_off(void)
  * The synthesizer range is the one measured to calibrate and lock (docs/radio-tables.md
  * SS7.85); outside it the plan is refused, so the radio never transmits off frequency.
  */
-/* BGM220P datasheet Table 4.5: FRANGE 2400-2483.5 MHz. [P] until measured below 2400 MHz. */
-#define EFR32_AMATEUR_SYNTH_MIN_KHZ 2400000U
-#define EFR32_AMATEUR_SYNTH_MAX_KHZ 2483500U
+/*
+ * [F] SS7.85: the M0+'s VCO calibration converged, far from either end of its 11-bit code,
+ * at every carrier probed from 2290 to 2500 MHz (receive only, 5 MHz steps; code 0x58A at
+ * 2290 MHz to 0x1A8 at 2500 MHz), and the synthesizer reported lock throughout transmissions
+ * at the carriers tested (SS7.85). The datasheet specifies only 2400-2483.5 MHz (BGM220P
+ * Table 4.5, FRANGE). Outside the probed range nothing was measured.
+ */
+#define EFR32_AMATEUR_SYNTH_MIN_KHZ 2290000U
+#define EFR32_AMATEUR_SYNTH_MAX_KHZ 2500000U
 /* BGM220P datasheet Table 4.5: POUTMAX, 8 dBm output power part, typical 8.2 dBm. */
 #define EFR32_AMATEUR_MAX_POWER_MDBM 8200
 /*

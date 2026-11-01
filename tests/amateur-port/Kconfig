@@ -38,7 +38,27 @@ config AMATEUR_PORT_PLAN_ODD
 config AMATEUR_PORT_PLAN_DEFAULT
 	bool "The module's default plan"
 
+config AMATEUR_PORT_PLAN_SINGLE
+	bool "Every channel on AMATEUR_PORT_SINGLE_KHZ"
+	help
+	  For transmitting on one carrier only (silicon synthesizer checks,
+	  docs/radio-tables.md 7.85). The module still refuses a carrier
+	  outside the band or the measured synthesizer range.
+
 endchoice
+
+config AMATEUR_PORT_SINGLE_KHZ
+	int "The single carrier (kHz)"
+	depends on AMATEUR_PORT_PLAN_SINGLE
+	default 2445000
+
+config AMATEUR_PORT_SYNTH_MONITOR
+	bool "Sample the synthesizer while transmitting (advertiser role)"
+	depends on AMATEUR_PORT_ADVERTISER && AMATEUR_PORT_PLAN_SINGLE
+	help
+	  While advertising and identifying, sample SYNTH.STATUS (lock,
+	  calibration error) and the VCO tuning code in the RAC TX state, and
+	  print them after the closing identification.
 
 config AMATEUR_PORT_ADV_SECONDS
 	int "Advertise this long, then stop and return to Part 15 (0: forever)"
