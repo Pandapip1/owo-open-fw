@@ -11,6 +11,22 @@ config RADIO_PORT_GATT_TEST
 	  workload's Central writes and reads back to check the link end to
 	  end. QEMU connection profile only.
 
+config RADIO_PORT_PAIRING_TEST
+	bool "Require LE Secure Connections pairing with a passkey for the test characteristic"
+	depends on RADIO_PORT_GATT_TEST && BT_SMP && BT_APP_PASSKEY
+	help
+	  The characteristic needs an authenticated (MITM) encrypted link, as the product's do,
+	  and the passkey is RADIO_PORT_PASSKEY through the app_passkey callback, as the
+	  product's is (src/ble.rs). prj-pairing.conf.
+
+config RADIO_PORT_PASSKEY
+	int "Fixed pairing passkey"
+	depends on RADIO_PORT_PAIRING_TEST
+	range 0 999999
+	default 123456
+
 endmenu
 
+# Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
+osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
 source "Kconfig.zephyr"

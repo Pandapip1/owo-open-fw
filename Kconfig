@@ -30,4 +30,6 @@ config OWO_SIM_INJECT
 	  a Bluetooth connection. Never enable it in a product or hardware build: anything that
 	  can write RAM over a debug port could then command output.
 
+# Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
+osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
 source "Kconfig.zephyr"

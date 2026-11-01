@@ -210,3 +210,5 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     hal/timer_state.c
   )
 endif()
+
+add_subdirectory(crypto)

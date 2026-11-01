@@ -48,10 +48,11 @@ RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-connection-e2e-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 
 "$QEMU_BIN" \
-	-M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
+	-M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE${MACHINE_OPTS:+,$MACHINE_OPTS}" \
 	-display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
 	-D "$RUNTIME_DIR/qemu.log" \
-	-trace enable=efr32bg22_usart_tx \
+	-chardev file,id=soc0.usart1,path="$RUNTIME_DIR/console0" \
+	-chardev file,id=soc1.usart1,path="$RUNTIME_DIR/console1" \
 	-trace enable=efr32bg22_tx_snapshot \
 	-trace enable=efr32bg22_rf_rx_handoff \
 	-trace enable=efr32bg22_rac_state \
@@ -80,10 +81,10 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
 	exit "$status"
 fi
 
-console=$(sed -n 's/.*USART[01] TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-	"$RUNTIME_DIR/radio.trace" | LC_ALL=C awk '{ printf "%c", strtonum("0x" $0) }' |
-	tr -d '\r\000')
-printf '%s\n' "$console" | grep -aE '^(bt_enable|scan_start|scan_stop|conn_le_create|adv_start|central_connected|gatt_discover|gatt_rw):' || true
+# Each endpoint's console (USART1, the boards' zephyr,console) goes to its own file, so the
+# two guests' lines cannot interleave.
+console=$(cat "$RUNTIME_DIR/console0" "$RUNTIME_DIR/console1" 2>/dev/null | tr -d '\r\000')
+printf '%s\n' "$console" | grep -aE '^(bt_enable|scan_start|scan_stop|conn_le_create|adv_start|central_connected|gatt_discover|gatt_rw|set_security|central_[a-z_]*|peripheral_[a-z_]*):' || true
 
 # A fatal error on either endpoint (stack overflow, deadline panic, assert) is
 # a failure regardless of how far the exchange got.
@@ -94,8 +95,6 @@ if printf '%s\n' "$console" | grep -q 'FATAL ERROR'; then
 fi
 
 # 1. The central must have issued bt_conn_le_create with no host-side error.
-# The two guests share one decoded console stream, so their lines interleave
-# byte-for-byte at word boundaries; match the payload, not a line anchor.
 if ! printf '%s\n' "$console" | grep -aq 'conn_le_create: 0'; then
 	echo "connection-e2e: central did not accept the connection-create request" >&2
 	exit 1
@@ -149,6 +148,17 @@ fi
 if printf '%s\n' "$console" | grep -aq 'central_disconnected'; then
 	echo "connection-e2e: the central lost the connection" >&2
 	printf '%s\n' "$console" | grep -a 'central_disconnected' >&2
+	exit 1
+fi
+
+# 5b. With the pairing profiles (PAIRING=1: prj-pairing.conf and prj-central-pairing.conf, or a
+#     product image as the Peripheral) the link reached security level 4 (LE Secure Connections,
+#     authenticated by passkey entry) before the GATT rounds, so every round below ran over the
+#     encrypted link: the test characteristic (and the product's) refuses access otherwise.
+if [ "${PAIRING:-0}" = 1 ] &&
+   ! printf '%s\n' "$console" | grep -aq 'central_security: level 4 err 0'; then
+	echo "connection-e2e: the link did not reach LE Secure Connections security level 4" >&2
+	printf '%s\n' "$console" | grep -aE 'central_(security|pair|passkey)|peripheral_pair' >&2 || true
 	exit 1
 fi
 

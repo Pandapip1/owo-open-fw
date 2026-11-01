@@ -10,7 +10,8 @@ config BT_LLL_VENDOR_EFR32
 	default y
 	# Same feature selection as Zephyr's OpenISA LLL (subsys/bluetooth/controller/
 	# Kconfig.ll_sw_split, BT_LLL_VENDOR_OPENISA): legacy advertising/scanning, one-PHY connections,
-	# software AES (PSA) and software TIFS. Nothing here is a claim about what the radio can do.
+	# AES and software TIFS. Nothing here is a claim about what the radio can do. Its AES (the
+	# session-key ECB and the link-layer CCM) runs on the RADIOAES accelerator (crypto/).
 	select BT_HAS_HCI_VS
 	# The LLL context and radio jobs run at a higher meta-IRQ priority than the ULL worker
 	# (hal/ll_threads.c), so the controller's LLL and ULL priorities are settable and distinct.
@@ -26,7 +27,7 @@ config BT_LLL_VENDOR_EFR32
 	select BT_CTLR_EXT_REJ_IND_SUPPORT
 	select BT_TICKER_REMAINDER_SUPPORT
 	select BT_TICKER_UPDATE if BT_BROADCASTER || BT_CONN
-	select PSA_CRYPTO
+	select EFR32_RADIOAES
 	# TX/RX launch uses generic deadline-event latches to atomically retain an
 	# IRQ publication while its persistent consumer is running.
 	select SCHED_DEADLINE
@@ -35,6 +36,38 @@ config BT_LLL_VENDOR_EFR32
 	  sources are derived at configure time from Zephyr's OpenISA LLL (Apache-2.0); only the
 	  hardware abstraction in this module is new. Replaces the Silicon Labs binary controller
 	  (BT_SILABS_EFR32); the two are mutually exclusive.
+
+config EFR32_RADIOAES
+	bool "AES-ECB, AES-CMAC and AES-CCM on the RADIOAES accelerator"
+	depends on SOC_SERIES_EFR32BG22 || SOC_SERIES_BGM22
+	help
+	  Driver for the BG22's RADIOAES block (a BA411E AES engine behind a scatter-gather DMA):
+	  crypto/radioaes.c, include/hal/efr32/radioaes.h. Every register, bit and descriptor field
+	  is cited there to the reference manual or to Silicon Labs' Zlib-licensed sources in
+	  hal_silabs (docs/crypto.md). Synchronous; callers of any priority may preempt each other.
+
+config EFR32_RADIOAES_PSA
+	bool "PSA Crypto transparent driver on RADIOAES"
+	default y
+	depends on EFR32_RADIOAES && MBEDTLS_PSA_CRYPTO_C
+	depends on TF_PSA_CRYPTO_CONFIG_FILE = "config-tf-psa-crypto.h"
+	help
+	  Routes PSA Crypto's one-shot AES-ECB (psa_cipher_encrypt/decrypt), AES-CMAC
+	  (psa_mac_compute) and AES-CCM (psa_aead_encrypt/decrypt) to RADIOAES, and builds no
+	  software AES for them. The TF-PSA-Crypto dispatch that calls the driver is derived from
+	  vendor/tf-psa-crypto at configure time (crypto/CMakeLists.txt). Other AES modes, and
+	  multi-part operations, are not accelerated.
+
+	  An application using this module sources Kconfig.defaults from its own Kconfig before
+	  Kconfig.zephyr (see that file); configuration fails otherwise.
+
+config EFR32_RADIOAES_PROBE
+	bool "TEST ONLY: record the accelerator's busy time"
+	depends on EFR32_RADIOAES
+	help
+	  Stores the CPU cycles (DWT CYCCNT, which the test enables) from each operation's start
+	  command to the DMA going idle in efr32_radioaes_probe_cycles: the hardware time that the
+	  QEMU model reproduces (tests/crypto-port).
 
 if BT_LLL_VENDOR_EFR32
 
@@ -377,6 +410,56 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	help
 	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store: QEMU
 	  133.0 us (Peripheral; Central 121.2 us). PROVISIONAL on silicon.
+
+# Link-layer AES-CCM on RADIOAES (crypto/radioaes.c, docs/crypto.md), for encrypted connections:
+# the completion job decrypts each received PDU before the LLL callback and the callback (or a
+# Central's prepare) encrypts the next. The connection figures above were measured without
+# encryption, so these are added to them where encryption runs (include/hal/efr32/ll_deadlines.h).
+# Silicon: tests/crypto-port on the BGM220 explorer kit, HCLK 76.8 MHz, the call through
+# efr32_radioaes_ccm() with interrupts locked, longest of 64 (DWT). QEMU: the same test in
+# build/qemu. With data length extension a PDU carries up to 251 octets, else 27.
+
+config EFR32_RADIO_CCM_ENCRYPT_NS
+	int "Link-layer CCM: encrypt the longest PDU (ns)"
+	depends on BT_CTLR_LE_ENC
+	default 37253 if EFR32_RADIO_TIMING_QEMU && BT_CTLR_DATA_LENGTH
+	default 16784 if EFR32_RADIO_TIMING_QEMU
+	default 35677 if BT_CTLR_DATA_LENGTH
+	default 15248
+	help
+	  Silicon: 27 octets 1171 cycles (15.25 us), 251 octets 2740 (35.68 us).
+	  QEMU: 1289 (16.78 us), 2861 (37.25 us).
+
+config EFR32_RADIO_CCM_DECRYPT_NS
+	int "Link-layer CCM: decrypt and verify the longest PDU (ns)"
+	depends on BT_CTLR_LE_ENC
+	default 37735 if EFR32_RADIO_TIMING_QEMU && BT_CTLR_DATA_LENGTH
+	default 17318 if EFR32_RADIO_TIMING_QEMU
+	default 36081 if BT_CTLR_DATA_LENGTH
+	default 15690
+	help
+	  Silicon: 27 octets 1205 cycles (15.69 us), 251 octets 2771 (36.08 us).
+	  QEMU: 1330 (17.32 us), 2898 (37.74 us).
+
+config EFR32_RADIO_ECB_NS
+	int "Session-key AES-ECB in the ULL worker (ns)"
+	depends on BT_CTLR_LE_ENC
+	default 5404 if EFR32_RADIO_TIMING_QEMU
+	default 6302
+	help
+	  ull_llcp_enc.c derives the session key with one block (hal/ecb.c): silicon 484
+	  cycles (6.30 us), QEMU 415 (5.40 us).
+
+config EFR32_RADIO_AES_BLOCKING_NS
+	int "Longest accelerator run a lower-priority caller can have in flight (ns)"
+	depends on BT_CTLR_LE_ENC
+	default 5586 if EFR32_RADIO_TIMING_QEMU
+	default 5365
+	help
+	  A radio job that preempts the host's AES-CMAC or AES-ECB waits for that operation's
+	  hardware run once (crypto/radioaes.c). The host's longest is an LE Secure Connections
+	  CMAC of five blocks (f4, f6, g2: 65 to 80 octets): start command to DMA idle 412
+	  cycles on silicon (5.37 us), 429 in QEMU.
 
 config EFR32_RADIO_WCET_LLL_NS
 	int "LLL context budget (ns)"
