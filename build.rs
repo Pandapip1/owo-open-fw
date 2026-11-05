@@ -1,6 +1,7 @@
 //! Build script.
 //!
-//! 1. The pairing serial is baked in at build time (`OWO_SERIAL`): Zephyr's Rust
+//! 1. The fallback pairing serial is baked in at build time (`OWO_SERIAL`; a board with a
+//!    serial record supplies the unit's own at run time, src/serial.c): Zephyr's Rust
 //!    support exposes only bool/int/hex Kconfig values, not strings.
 //! 2. Bindings for the Bluetooth connection and GATT APIs. zephyr-lang-rust's
 //!    `zephyr-sys` only wraps `<zephyr/bluetooth/bluetooth.h>`, so `bt_conn_*` and

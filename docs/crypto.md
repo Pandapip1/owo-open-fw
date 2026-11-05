@@ -39,12 +39,14 @@ payload). Every register, bit, tag field and mode word carries its citation in t
   the controller) and `hal/radio.c` (link-layer CCM). No PSA key slot, key schedule or allocation
   is on the radio's deadline path. The host reaches it through PSA Crypto: a transparent driver
   (`crypto/radioaes_psa.c`) for one-shot `psa_cipher_encrypt/decrypt` (ECB), `psa_mac_compute`
-  (CMAC) and `psa_aead_encrypt/decrypt` (CCM). TF-PSA-Crypto's dispatch is derived at configure
-  time from `vendor/tf-psa-crypto/dispatch` with five exact insertions (`crypto/CMakeLists.txt`),
-  as the LLL sources are; `efr32_radioaes_psa_config.h` declares the accelerated algorithms, so
-  no software AES is built (flash -7.0 to -7.4 KB). An application sources
-  `modules/efr32-radio/Kconfig.defaults` before `Kconfig.zephyr`, because Zephyr's own default
-  for `TF_PSA_CRYPTO_DISPATCH_DIR` is read before any module's Kconfig.
+  (CMAC) and `psa_aead_encrypt/decrypt` (CCM), and multi-part CMAC (`psa_mac_sign_setup`,
+  `psa_mac_update`, `psa_mac_sign_finish` and the verify forms: the GATT database hash).
+  TF-PSA-Crypto's dispatch is derived at configure time from `vendor/tf-psa-crypto/dispatch` with
+  exact insertions (`crypto/CMakeLists.txt`), as the LLL sources are: the driver calls, its driver
+  ID and its member of the MAC operation context union; `efr32_radioaes_psa_config.h` declares
+  the accelerated algorithms, so no software AES is built (flash -7.0 to -7.4 KB). An application
+  sources `modules/efr32-radio/Kconfig.defaults` before `Kconfig.zephyr`, because Zephyr's own
+  default for `TF_PSA_CRYPTO_DISPATCH_DIR` is read before any module's Kconfig.
 * **Concurrency without a lock.** Callers run at different priorities (BT long work queue, BT RX
   thread, ULL worker, LLL-priority jobs) and preempt each other anywhere. Each call waits for the
   DMA to be idle (finishing a preempted caller's operation into that caller's buffers), saves
@@ -58,8 +60,16 @@ payload). Every register, bit, tag field and mode word carries its citation in t
   it saves (an interrupt here is 10 to 40 us, docs/radio-tables.md 7.76).
 * **Not implemented:** an empty CCM payload (on silicon [Z]'s all-padding block gives a tag that
   is not SP 800-38C's, and decryption of its own output fails, [F]; Bluetooth never encrypts an
-  empty PDU), 192-bit keys (not in this BA411E, [Z]), multi-part PSA operations. The last means
-  the GATT database hash (`BT_GATT_CACHING`, off in the product) gets `PSA_ERROR_NOT_SUPPORTED`.
+  empty PDU), 192-bit keys (not in this BA411E, [Z]), multi-part PSA operations other than CMAC
+  (the Bluetooth host uses no other).
+* **Multi-part CMAC.** The engine's CMAC mode takes a whole message in one descriptor chain ([Z]
+  saves and loads engine context only for CTR), so the driver runs SP 800-38B 6.2 itself over one-block ECB calls:
+  C_i = AES_K(C_(i-1) xor M_i), the last block held back until finish, then K1 or K2 (from
+  L = AES_K(0)) and the padding. Its context (key, chaining value, pending block: 66 B) joins
+  PSA's MAC operation union, so a `psa_mac_operation_t` grows only where one is instantiated; the
+  product (no `BT_GATT_CACHING`) links none of it (RAM and flash unchanged, `prj.conf`). One
+  ECB call per 16 octets: about 6.3 us each [F, section 4], so a database hash over a few hundred
+  octets costs well under 0.5 ms, once per database change.
 * **Link layer.** Two OpenISA-LLL contract points that the old software CCM never exercised
   (pairing did not work before): `lll_conn.c` reads a received PDU's SN/NESN before it calls
   `radio_ccm_is_done()`, and only for non-empty PDUs, so `hal/radio.c` now decrypts (or, for an
@@ -75,7 +85,15 @@ Part C 1.1 `HCI_LE_Encrypt`), AES-CMAC (D.1 RFC 4493 examples 1-4, D.2 f4, D.3 f
 D.4 f6, D.5 g2, D.6 h6), AES-CCM (Vol 6 Part C 1 and 1.2: `LL_START_ENC_RSP` both directions and
 `LL_DATA` both directions, encrypt, decrypt, corrupted MIC, wrong direction bit), each directly and
 through PSA, plus round trips (251 octets in place, 20 octets of AAD with a 16-octet tag) and
-unaligned buffers ending at a buffer's end. Silicon: 196/196 pass [F]; QEMU 196/196 [Q].
+unaligned buffers ending at a buffer's end. AES-256 CMAC (NIST SP 800-38B D.3, examples 1-4)
+directly and multi-part. Multi-part CMAC through PSA: D.1 with AES-128 and D.3 with AES-256, each message
+fed in pieces of 1, 7, 15, 16, 17, 33 and 80 octets, verify with the right and a corrupted MAC;
+D.2-D.6 in 5-octet pieces, full and truncated to 8 octets; abort and reuse of an operation.
+Silicon: 196/196 pass [F] (the tests before multi-part CMAC; the 134 added checks still need a
+silicon run); QEMU 330/330 [Q] with RADIOAES and 330/330 with `prj-software.conf`
+(TF-PSA-Crypto's software CMAC). The GATT database hash of `tests/gatt-peripheral-port` (built
+with `-DCONFIG_BT_GATT_CACHING=y -DCONFIG_PSA_CRYPTO=y`) is the same with the driver and with
+software PSA [Q]: `58bc5cbe d75434ed 2837f9b0 f00edde5`.
 
 Times at HCLK 76.8 MHz (DWT, longest of 64, interrupts locked for the direct calls) [F]:
 
@@ -147,8 +165,7 @@ to a turnaround that has about 100 us.
 
 ## 7. Open
 
-* Multi-part PSA AES (GATT database hash) is not accelerated and fails; implementing CMAC
-  streaming over the ECB primitive would need a driver context in PSA's operation union.
+* Silicon run of `tests/crypto-port` with the multi-part CMAC and AES-256 CMAC checks.
 * P-256 on the BA414EP needs its operation codes and memory map, which are not public.
 * `tests/radio-port/prj-hardware.conf` still reserves a 3504-byte libc arena for PSA CMAC; it is
   no longer needed, but changing the stage-3 hardware image wants a silicon run.

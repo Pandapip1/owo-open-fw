@@ -37,7 +37,27 @@ if(CONFIG_EFR32_RADIO_AMATEUR)
   message(FATAL_ERROR "CONFIG_EFR32_RADIO_AMATEUR is not allowed in the OWO product firmware")
 endif()
 
+# Persistent storage (NVS, ZMS, and the settings subsystem on any backend) needs at least two
+# erase pages; the suit's storage partition is one (docs/suit-board.md, "Storage decision").
+if(CONFIG_NVS OR CONFIG_ZMS OR CONFIG_SETTINGS)
+  dt_nodelabel(_storage NODELABEL storage_partition)
+  dt_nodelabel(_flash NODELABEL flash0)
+  if(NOT DEFINED _storage OR NOT DEFINED _flash)
+    message(FATAL_ERROR "Storage options need a storage_partition on flash0")
+  endif()
+  dt_reg_size(_storage_size PATH ${_storage})
+  dt_prop(_page PATH ${_flash} PROPERTY erase-block-size)
+  math(EXPR _pages "${_storage_size} / ${_page}")
+  if(_pages LESS 2)
+    message(FATAL_ERROR "storage_partition on ${BOARD} is ${_pages} erase page(s) of ${_page} B; "
+                        "NVS, ZMS and settings need at least two. See docs/suit-board.md "
+                        "(\"Storage decision\") before enabling them.")
+  endif()
+endif()
+
 rust_cargo_application()
+
+target_sources(app PRIVATE src/serial.c)
 
 if(CONFIG_OWO_GECKO_APP_PROPERTIES)
   target_sources(app PRIVATE src/gecko_app_properties.c)

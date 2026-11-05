@@ -19,13 +19,45 @@ use zephyr::sys::sync::Semaphore;
 use zephyr::time::{Duration, Forever, SYS_FREQUENCY};
 use zephyr_panic as _;
 
-/// Serial string hashed into the pairing passkey (build with `OWO_SERIAL=<yours>`).
-/// Stock units derive the BLE passkey from it; which exact string the official app
-/// hashes is not confirmed, so set it to your unit's serial and compare.
-const SERIAL: &str = match option_env!("OWO_SERIAL") {
+/// Fallback serial (build with `OWO_SERIAL=<yours>`), used when the board describes no
+/// manufacturing record or the record holds no valid serial (see [`serial`]).
+const BUILD_SERIAL: &str = match option_env!("OWO_SERIAL") {
     Some(s) => s,
     None => "000000000000",
 };
+
+/// A serial is twelve characters: what the unit's record holds and src/serial.c writes.
+pub(crate) const SERIAL_LEN: usize = 12;
+const _: () = assert!(BUILD_SERIAL.len() <= SERIAL_LEN, "OWO_SERIAL is at most 12 characters");
+
+extern "C" {
+    fn owo_serial_read(out: *mut u8) -> core::ffi::c_int;
+}
+
+pub(crate) struct Serial {
+    buf: [u8; SERIAL_LEN],
+    len: usize,
+}
+
+impl Serial {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Serial string hashed into the pairing passkey and named in the advertised name ("OWO" and the
+/// serial): the unit's own record when its board describes one holding twelve digits (USERDATA on
+/// the suit, src/serial.c), else `OWO_SERIAL`. Stock units derive the BLE passkey from it; which
+/// exact string the official app hashes is not confirmed, so compare with your unit.
+pub(crate) fn serial() -> Serial {
+    let mut s = Serial { buf: [0; SERIAL_LEN], len: SERIAL_LEN };
+    // SAFETY: the buffer has room for the twelve bytes the function writes.
+    if unsafe { owo_serial_read(s.buf.as_mut_ptr()) } != 0 {
+        s.buf[..BUILD_SERIAL.len()].copy_from_slice(BUILD_SERIAL.as_bytes());
+        s.len = BUILD_SERIAL.len();
+    }
+    s
+}
 
 /// Everything the GATT callbacks and the pump share.
 pub(crate) struct State {
@@ -99,7 +131,7 @@ pub(crate) fn now_us() -> u64 {
 }
 
 pub(crate) fn passkey() -> u32 {
-    proto::pairing_code(SERIAL.as_bytes())
+    proto::pairing_code(serial().as_bytes())
 }
 
 // ---- application hooks called from the GATT layer -------------------------
@@ -247,7 +279,12 @@ extern "C" fn rust_main() {
         return;
     }
     let _ = wdt::feed();
-    info!("pairing passkey for serial '{}': {:06}", SERIAL, passkey());
+    let serial = serial();
+    info!(
+        "pairing passkey for serial '{}': {:06}",
+        core::str::from_utf8(serial.as_bytes()).unwrap_or("?"),
+        passkey()
+    );
 
     // Pump: tickless. Sleep until the engine's next wake-up or a GATT write gives the
     // semaphore, never longer than the watchdog allows (src/wdt.rs). It is the output-safety

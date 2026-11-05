@@ -21,7 +21,9 @@ use core::ptr;
 
 use log::{info, warn};
 use owo_core::proto::{self, Error};
-use zephyr::raw::{bt_conn, bt_data, bt_enable, bt_get_name, bt_le_adv_param, bt_le_adv_start};
+use zephyr::raw::{
+    bt_conn, bt_data, bt_enable, bt_get_name, bt_le_adv_param, bt_le_adv_start, bt_set_name,
+};
 
 use crate::STATE;
 
@@ -593,6 +595,23 @@ pub(crate) fn shutdown() {
     }
 }
 
+/// The device name, advertised and in the GAP service, is "OWO" and the serial, as stock units.
+fn set_name() -> Result<(), c_int> {
+    const PREFIX: &[u8] = b"OWO";
+    let serial = crate::serial();
+    let digits = serial.as_bytes();
+    let mut name = [0u8; PREFIX.len() + crate::SERIAL_LEN + 1];
+    name[..PREFIX.len()].copy_from_slice(PREFIX);
+    name[PREFIX.len()..PREFIX.len() + digits.len()].copy_from_slice(digits);
+    // SAFETY: `name` is NUL-terminated (zero-filled past the serial); Zephyr copies it.
+    let e = unsafe { bt_set_name(name.as_ptr().cast()) };
+    if e == 0 {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
+
 fn adv_start() -> Result<(), c_int> {
     let ad = [bt_data {
         type_: BT_DATA_FLAGS,
@@ -685,5 +704,6 @@ pub(crate) fn start() -> Result<(), c_int> {
             return Err(e);
         }
     }
+    set_name()?;
     adv_start()
 }

@@ -1,8 +1,8 @@
 /*
  * RADIOAES driver tests: known answers from the Bluetooth Core Specification v6.1 (Vol 3 Part H
  * Appendix D: AES-CMAC RFC 4493 vectors, f4, f5, f6, g2, h6, ah; Vol 6 Part C 1: LE encryption
- * sample data, the session key and four encrypted PDUs), through the driver and through PSA
- * Crypto; nested preemption between two callers; execution time and stack per operation; P-256
+ * sample data, the session key and four encrypted PDUs; NIST SP 800-38B D.3 AES-256 CMAC), through
+ * the driver and through PSA Crypto, CMAC also multi-part; nested preemption between two callers; execution time and stack per operation; P-256
  * (software, p256-m) timed for comparison.
  *
  * Results: printk, and crypto_results (read over SWD; docs/crypto.md).
@@ -221,6 +221,14 @@ static const struct {
 	  "2d9ae102 e76dc91c e8d3a9e2 80b16399" },
 };
 
+/* NIST SP 800-38B Appendix D.3, AES-256 (the messages are cmac_m64's first 0, 16, 40, 64). */
+static const char *const cmac256_k = "603deb10 15ca71be 2b73aef0 857d7781 1f352c07 3b6108d7 "
+				     "2d9810a3 0914dff4";
+static const char *const cmac256_mac[] = {
+	"028962f6 1b7bf89e fc6b551f 4667d983", "28a7023f 452e8f82 bd4bf28d 8c37c35c",
+	"aaf3d8f1 de5640c2 32f5b169 b9c911e6", "e1992190 549f6ed5 696a2c05 6c315410",
+};
+
 /* AES-128: D.1 subkey generation AES_128(K, 0), D.7 ah, Vol 6 Part C 1.1 HCI_LE_Encrypt. */
 static const struct {
 	const char *key;
@@ -329,6 +337,15 @@ static void test_cmac(void)
 		n = hex(m, cmac_sc[i].m);
 		hex(ref, cmac_sc[i].mac);
 		CHECK(efr32_radioaes_cmac(k, 16, m, n, mac) == 0);
+		CHECK(memcmp(mac, ref, 16) == 0);
+	}
+	uint8_t k256[32];
+
+	hex(k256, cmac256_k);
+	hex(m, cmac_m64);
+	for (size_t i = 0; i < ARRAY_SIZE(cmac256_mac); i++) {
+		hex(ref, cmac256_mac[i]);
+		CHECK(efr32_radioaes_cmac(k256, 32, m, cmac_d1[i].len, mac) == 0);
 		CHECK(memcmp(mac, ref, 16) == 0);
 	}
 }
@@ -453,6 +470,110 @@ static void test_psa(void)
 		CHECK(psa_aead_decrypt(id, ccm, nonce, 13, &aad, 1, c, n + LL_MIC, o, sizeof(o),
 				       &len) == PSA_ERROR_INVALID_SIGNATURE);
 	}
+	CHECK(psa_destroy_key(id) == PSA_SUCCESS);
+}
+
+/* Multi-part CMAC (psa_mac_sign_setup/update/finish, as the GATT database hash): @p m fed in
+ * pieces of @p chunk octets.
+ */
+static psa_status_t mac_multipart(psa_key_id_t id, psa_algorithm_t alg, const uint8_t *m,
+				  size_t n, size_t chunk, uint8_t *mac, size_t *len)
+{
+	psa_mac_operation_t op = PSA_MAC_OPERATION_INIT;
+	psa_status_t status = psa_mac_sign_setup(&op, id, alg);
+
+	for (size_t at = 0; status == PSA_SUCCESS && at < n; at += chunk) {
+		status = psa_mac_update(&op, m + at, MIN(chunk, n - at));
+	}
+	if (status == PSA_SUCCESS) {
+		return psa_mac_sign_finish(&op, mac, 16, len);
+	}
+	psa_mac_abort(&op);
+	return status;
+}
+
+static psa_status_t mac_verify_multipart(psa_key_id_t id, psa_algorithm_t alg, const uint8_t *m,
+					 size_t n, size_t chunk, const uint8_t *mac, size_t len)
+{
+	psa_mac_operation_t op = PSA_MAC_OPERATION_INIT;
+	psa_status_t status = psa_mac_verify_setup(&op, id, alg);
+
+	for (size_t at = 0; status == PSA_SUCCESS && at < n; at += chunk) {
+		status = psa_mac_update(&op, m + at, MIN(chunk, n - at));
+	}
+	if (status == PSA_SUCCESS) {
+		return psa_mac_verify_finish(&op, mac, len);
+	}
+	psa_mac_abort(&op);
+	return status;
+}
+
+static void test_psa_multipart(void)
+{
+	static const size_t chunks[] = {1, 7, 15, 16, 17, 33, 80};
+	uint8_t k[32], m[80], ref[16], o[16];
+	psa_key_usage_t usage = PSA_KEY_USAGE_SIGN_MESSAGE | PSA_KEY_USAGE_VERIFY_MESSAGE;
+	psa_algorithm_t trunc8 = PSA_ALG_TRUNCATED_MAC(PSA_ALG_CMAC, 8);
+	psa_key_id_t id;
+	size_t len, n;
+
+	/* RFC 4493 (D.1) with AES-128 and SP 800-38B D.3 with AES-256, every split. */
+	hex(m, cmac_m64);
+	for (int bits = 128; bits <= 256; bits += 128) {
+		hex(k, bits == 128 ? cmac_k : cmac256_k);
+		id = import(PSA_KEY_TYPE_AES, PSA_ALG_CMAC, usage, k, bits / 8);
+		CHECK(id != 0);
+		for (size_t i = 0; i < ARRAY_SIZE(cmac_d1); i++) {
+			hex(ref, bits == 128 ? cmac_d1[i].mac : cmac256_mac[i]);
+			for (size_t c = 0; c < ARRAY_SIZE(chunks); c++) {
+				CHECK(mac_multipart(id, PSA_ALG_CMAC, m, cmac_d1[i].len, chunks[c], o,
+						    &len) == PSA_SUCCESS &&
+				      len == 16 && memcmp(o, ref, 16) == 0);
+			}
+			CHECK(mac_verify_multipart(id, PSA_ALG_CMAC, m, cmac_d1[i].len, 7, ref, 16) ==
+			      PSA_SUCCESS);
+			ref[15] ^= 0x01U;
+			CHECK(mac_verify_multipart(id, PSA_ALG_CMAC, m, cmac_d1[i].len, 7, ref, 16) ==
+			      PSA_ERROR_INVALID_SIGNATURE);
+		}
+		CHECK(psa_destroy_key(id) == PSA_SUCCESS);
+	}
+
+	/* D.2-D.6, in 5-octet pieces; a truncated MAC is the full one's prefix. */
+	for (size_t i = 0; i < ARRAY_SIZE(cmac_sc); i++) {
+		hex(k, cmac_sc[i].key);
+		n = hex(m, cmac_sc[i].m);
+		hex(ref, cmac_sc[i].mac);
+		id = import(PSA_KEY_TYPE_AES, PSA_ALG_CMAC, usage, k, 16);
+		CHECK(id != 0);
+		CHECK(mac_multipart(id, PSA_ALG_CMAC, m, n, 5, o, &len) == PSA_SUCCESS && len == 16 &&
+		      memcmp(o, ref, 16) == 0);
+		CHECK(psa_destroy_key(id) == PSA_SUCCESS);
+		id = import(PSA_KEY_TYPE_AES, trunc8, usage, k, 16);
+		CHECK(id != 0);
+		memset(o, 0, sizeof(o));
+		CHECK(mac_multipart(id, trunc8, m, n, 5, o, &len) == PSA_SUCCESS && len == 8 &&
+		      memcmp(o, ref, 8) == 0);
+		CHECK(mac_verify_multipart(id, trunc8, m, n, 5, ref, 8) == PSA_SUCCESS);
+		CHECK(psa_destroy_key(id) == PSA_SUCCESS);
+	}
+
+	/* An aborted operation leaves nothing behind: a new one on the same object is exact. */
+	psa_mac_operation_t op = PSA_MAC_OPERATION_INIT;
+
+	hex(k, cmac_k);
+	hex(m, cmac_m64);
+	hex(ref, cmac_d1[2].mac);
+	id = import(PSA_KEY_TYPE_AES, PSA_ALG_CMAC, usage, k, 16);
+	CHECK(psa_mac_sign_setup(&op, id, PSA_ALG_CMAC) == PSA_SUCCESS);
+	CHECK(psa_mac_update(&op, m + 3, 21) == PSA_SUCCESS);
+	CHECK(psa_mac_abort(&op) == PSA_SUCCESS);
+	CHECK(psa_mac_sign_setup(&op, id, PSA_ALG_CMAC) == PSA_SUCCESS);
+	CHECK(psa_mac_update(&op, m, 40) == PSA_SUCCESS);
+	CHECK(psa_mac_sign_finish(&op, o, sizeof(o), &len) == PSA_SUCCESS && len == 16 &&
+	      memcmp(o, ref, 16) == 0);
+	/* A finished operation takes no more input. */
+	CHECK(psa_mac_update(&op, m, 1) == PSA_ERROR_BAD_STATE);
 	CHECK(psa_destroy_key(id) == PSA_SUCCESS);
 }
 
@@ -698,6 +819,7 @@ int main(void)
 	test_cmac();
 	test_ccm();
 	test_psa();
+	test_psa_multipart();
 	test_preemption();
 	time_ops();
 	for (enum op op = OP_ECB; op <= OP_PSA_CCM_27; op++) {

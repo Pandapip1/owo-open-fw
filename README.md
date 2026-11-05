@@ -24,7 +24,7 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `vendor/zephyr/` | Pinned patched Zephyr submodule: Counter-backed timing backend and read-back verification for `ti,sn74hc595` |
 | `docs/ota.md`, `scripts/make-gbl.py` | Keeping the Silicon Labs OTA update working (flash map and boot-mode request in devicetree, OTA service in `src/ble.rs`) and packaging a GBL |
 | `docs/stock-stim-path.md` | What the stock firmware's output stage does, its interlocks, and the ones it lacks |
-| `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in `OWO_SERIAL` |
+| `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in the fallback `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
 | `vendor/zephyr-lang-rust/` | Pinned patched Rust-for-Zephyr submodule (see above) |
 | `west.yml` | Pins Zephyr + `zephyr-lang-rust` and imports only the modules needed |
@@ -187,7 +187,7 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 - Idle power: nothing was measured.
 - Placeholders: battery level fixed at 100 (Zephyr's BAS default); channel status always "all open";
   the Extra 2 record after 0x25 is from the app decode; the config packet is parsed and stored but
-  has no effect; engine timing is an interpretation, not a copy (channel stagger 1 ms to leave room for bus and pulse time); `OWO_SERIAL` defaults to a dummy
+  has no effect; engine timing is an interpretation, not a copy (channel stagger 1 ms to leave room for bus and pulse time); `OWO_SERIAL` (the fallback on boards without a serial record; `owo_suit` reads the unit's USERDATA) defaults to a dummy
   and which string the official app hashes is unconfirmed (the passkey is logged at boot).
 
 ## Flashing a real suit
