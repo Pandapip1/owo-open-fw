@@ -90,6 +90,11 @@ default one that never touches the output stage again) put
 - PC7 (boost) low, so the converter cannot switch;
 - PA5, PA6 and PC3 high (deselected / latched), as stock.
 
+PC4 is the expander's open-drain /INT, not a button (`stock-stim-path.md`); the board no longer
+describes it as one. `boards/owo_suit_hw.overlay` gives it to the expander driver (`int-gpios`)
+and the power button, expander P0, to the output stage as its stop input (`stop-gpios`,
+`stim-simulation.md` finding 1).
+
 Limits of this:
 - From reset until the hogs run the pins are high impedance (GPIO reset state), through the Gecko
   Bootloader and Zephyr's early init. Whether the gate drivers and the boost stage are pulled off
