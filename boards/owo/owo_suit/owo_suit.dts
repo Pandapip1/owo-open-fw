@@ -35,6 +35,16 @@
 		watchdog0 = &wdog0;
 	};
 
+	/*
+	 * USERDATA (0x0FE00000) holds the unit's manufacturing record; its serial number is twelve
+	 * ASCII digits at offset 0x1C, and the stock advertised name is "OWO" and those digits.
+	 * The stock firmware can rewrite the page; this firmware only reads it.
+	 */
+	serial_record: serial-record@fe0001c {
+		compatible = "owo,serial-record";
+		reg = <0x0fe0001c 12>;
+	};
+
 	buttons {
 		compatible = "gpio-keys";
 

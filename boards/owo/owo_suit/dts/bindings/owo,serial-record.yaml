@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  A unit's serial number in its manufacturing record: twelve ASCII decimal digits at a fixed
+  address of memory-mapped, read-only flash. The firmware reads it at run time (src/serial.c)
+  and never writes it.
+
+compatible: "owo,serial-record"
+
+properties:
+  reg:
+    type: array
+    required: true
+    description: Address and length (12) of the digits.

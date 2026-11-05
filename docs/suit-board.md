@@ -69,12 +69,15 @@ and backed up.
 - The stock firmware copies the first 160 bytes of USERDATA into RAM at start-up and has a routine
   that erases the page and writes the record back. **[F]** The open firmware must never write the
   page (it does not: nothing in the product writes outside its own image).
-- Today the serial is baked in at build time (`OWO_SERIAL`, `build.rs`, `src/lib.rs`) and the
-  name comes from `CONFIG_BT_DEVICE_NAME`. Reading the twelve digits from USERDATA at run time would
-  be better on the suit: one OTA image for every unit, and the name and passkey cannot disagree
-  with the unit's own record. It needs a validity check (twelve ASCII digits, else fall back to
-  `OWO_SERIAL`) and the board should then describe the record's location in devicetree. Not done
-  yet; the `OWO_SERIAL` path is unchanged.
+- The firmware reads the serial from the record at run time: the board describes it in
+  devicetree (`serial_record`, compatible `owo,serial-record`, `reg = <0x0fe0001c 12>`), and
+  `src/serial.c` accepts it only as twelve ASCII digits (an erased page reads 0xFF). The advertised
+  and GAP name (`"OWO"` and the digits, `src/ble.rs`, `CONFIG_BT_DEVICE_NAME_DYNAMIC`: +16 B of
+  RAM) and the passkey (`src/lib.rs`) derive from it, so one OTA image serves every unit and
+  neither can disagree with the unit's record. A board without the node, or a record that fails
+  the check, falls back to the build's `OWO_SERIAL` (`build.rs`). QEMU, `owo_suit` at 0x16000 with
+  `userdata=` the unit's USERDATA dump: the device name in `bt_dev` reads `OWO022529200116`;
+  with the model's erased USERDATA, `OWO000000000000` (the default `OWO_SERIAL`). **[E]**
 
 ## Output stage: safe state from reset
 What the stock firmware does **[F]**: its board initialisation drives PB0-PB3 low (all four

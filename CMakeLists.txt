@@ -39,6 +39,8 @@ endif()
 
 rust_cargo_application()
 
+target_sources(app PRIVATE src/serial.c)
+
 if(CONFIG_OWO_GECKO_APP_PROPERTIES)
   target_sources(app PRIVATE src/gecko_app_properties.c)
 endif()
