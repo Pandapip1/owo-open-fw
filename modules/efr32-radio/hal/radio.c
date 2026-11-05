@@ -32,6 +32,7 @@
 #include "hal/efr32/seq_abi.h"
 #include "hal/efr32/ticker.h"
 #include "hal/efr32/radio_conn.h"
+#include "hal/efr32/radio_shutdown.h"
 #include "lll/lll_vendor.h"
 #include "abort_lifecycle.h"
 #include "completion_dispatch.h"
@@ -5485,6 +5486,27 @@ uint32_t efr32_radio_id_tx_ready_us(void)
 #endif
 #endif /* CONFIG_EFR32_RADIO_AMATEUR */
 
+static atomic_ptr_t efr32_radio_shutdown_cb;
+static atomic_t efr32_radio_shutdown_notified;
+
+static void efr32_radio_shutdown_notify(void)
+{
+	efr32_radio_shutdown_cb_t cb =
+		(efr32_radio_shutdown_cb_t)atomic_ptr_get(&efr32_radio_shutdown_cb);
+
+	if (cb != NULL && atomic_cas(&efr32_radio_shutdown_notified, 0, 1)) {
+		cb();
+	}
+}
+
+void efr32_radio_shutdown_cb_set(efr32_radio_shutdown_cb_t cb)
+{
+	atomic_ptr_set(&efr32_radio_shutdown_cb, (void *)cb);
+	if (atomic_get(&efr32_radio_halted) != 0) {
+		efr32_radio_shutdown_notify();
+	}
+}
+
 #if defined(CONFIG_SCHED_DEADLINE_MISS_CUSTOM)
 /*
  * Safe shutdown on a missed or infeasible deadline (include/zephyr/kernel/deadline_miss.h).
@@ -5493,9 +5515,10 @@ uint32_t efr32_radio_id_tx_ready_us(void)
  * enables, the receive source and both directions are withdrawn, the RAC is forced off and the
  * M0+ reset, so no sequencer handler can restart the PA or a frame. CTRL reads back without
  * SEQRESET on silicon and in QEMU; with the RAC forced off the restarted M0+ gets no state
- * event, and on silicon its TX counters stop. Then the controller stops: its clock events are
- * cancelled, every wake path is closed, its interrupts are masked and its threads are
- * suspended, the current one last. The rest of the system runs on; the Bluetooth host sees a
+ * event, and on silicon its TX counters stop. The application's shutdown function is called
+ * next (radio_shutdown.h), so outputs a link controls stop at once. Then the controller stops:
+ * its clock events are cancelled, every wake path is closed, its interrupts are masked and its
+ * threads are suspended, the current one last. The rest of the system runs on; the Bluetooth host sees a
  * controller that no longer answers.
  */
 #define EFR32_RAC_TX_OFFSET 0x148U
@@ -5607,6 +5630,7 @@ void k_deadline_miss_handler(const struct k_deadline_miss *miss)
 	if (!first) {
 		return;
 	}
+	efr32_radio_shutdown_notify();
 
 	cntr_shutdown();
 	atomic_set(&efr32_radio_launch_active, 0);
