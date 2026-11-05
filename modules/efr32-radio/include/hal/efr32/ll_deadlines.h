@@ -306,14 +306,14 @@ static inline int efr32_dl_completion_tx_rx_start_by(uint32_t post, uint32_t to_
 static inline int efr32_dl_conn_rx_staged_start_by(uint32_t eof, uint32_t to_clear_ns,
 						   uint32_t to_staged_ns)
 {
-	int32_t clear = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US +
-							   BT_LE_1M_EMPTY_PDU_US) -
-				  EFR32_DL_MEAS_CYC(to_clear_ns));
-	int32_t staged = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * (EFR32_DL_CONN_TURN_US +
-								   BT_LE_1M_EMPTY_PDU_US)) -
-				   EFR32_DL_MEAS_CYC(to_staged_ns));
+	uint32_t clear = eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US +
+						  BT_LE_1M_EMPTY_PDU_US) -
+			 EFR32_DL_MEAS_CYC(to_clear_ns);
+	uint32_t staged = eof + EFR32_DL_SPEC_CYC(2U * (EFR32_DL_CONN_TURN_US +
+							 BT_LE_1M_EMPTY_PDU_US)) -
+			  EFR32_DL_MEAS_CYC(to_staged_ns);
 
-	return ((staged - clear) < 0) ? (int)staged : (int)clear;
+	return ((int32_t)(staged - clear) < 0) ? (int)staged : (int)clear;
 }
 
 /*

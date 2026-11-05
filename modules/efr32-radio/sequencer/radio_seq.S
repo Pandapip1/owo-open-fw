@@ -1913,11 +1913,13 @@ efr32_seq_timed_command:
     ldr r4, [r3]
     subs r4, r4, r2
     bmi 1b
-    /* At or past the instant: issue the command only up to LIMIT. */
+    /* At or past the instant: issue the command only up to LIMIT.  Late is
+     * LIMIT - CNT negative, the N flag alone: bgt on CNT - LIMIT also reads
+     * V, which a difference across 0x80000000 sets. */
     ldr r2, [r0, #EFR32_SEQ_TIMED_LIMIT]
     ldr r4, [r3]
-    subs r4, r4, r2
-    bgt 6f
+    subs r4, r2, r4
+    bmi 6f
     movs r2, #EFR32_SEQ_TIMED_OP_MASK
     ands r2, r1
     cmp r2, #EFR32_SEQ_TIMED_OP_TXEN
