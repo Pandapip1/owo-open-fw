@@ -165,13 +165,12 @@
               # zephyr-sys and this crate's build.rs run bindgen, which needs libclang.
               LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-              # Workaround, verified only with Ubuntu's gcc-arm-none-eabi 13.2.1 (not with
-              # this shell's 13.3 toolchain until the build below was run): the Zephyr build passes the GCC include directory to
-              # bindgen's clang with -I, so clang parses GCC's <arm_acle.h> and rejects its
-              # coprocessor intrinsics. Skipping that header leaves __rbit/__clz/__isb
-              # undeclared in clang's view; they are only used inside inline functions that
-              # bindgen does not bind.
-              # Remove this if your toolchain does not hit the error.
+              # Workaround, still needed with this shell's 13.3 toolchain: the Zephyr build passes
+              # the GCC include directory to bindgen's clang with -I, and CMSIS 6's
+              # cmsis_clang.h (what clang selects) includes <arm_acle.h>, so clang parses GCC's
+              # copy and rejects its coprocessor intrinsics (build.rs fails without this).
+              # Skipping that header leaves __rbit/__clz/__isb undeclared in clang's view; they
+              # are only used inside inline functions that bindgen does not bind.
               BINDGEN_EXTRA_CLANG_ARGS = "-D_GCC_ARM_ACLE_H -Wno-error=implicit-function-declaration";
             };
 
@@ -189,9 +188,9 @@
               echo "  QEMU:        mkdir -p build/qemu && (cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp)"
               echo "               ninja -C build/qemu qemu-system-arm"
               echo "  twister:     ZEPHYR_BASE=\$PWD/vendor/zephyr QEMU_BIN_PATH=\$PWD/build/qemu vendor/zephyr/scripts/twister \\"
-              echo "                 -x=ZEPHYR_MODULES=\$PWD/vendor/cmsis_6 -x=EXTRA_LDFLAGS=-Wl,--no-warn-rwx-segments \\"
+              echo "                 -x=ZEPHYR_MODULES=\$PWD/vendor/cmsis_6 \\"
               echo "                 -p native_sim/native/64 -p qemu_cortex_m3 -p mps2/an385 -T vendor/zephyr/tests/kernel/sched/deadline"
-              echo "               (no west workspace; ld from GNU Arm 13 warns about RWX segments, fatal under twister)"
+              echo "               (no west workspace)"
               echo "  host tests:  cargo test --manifest-path crates/owo-core/Cargo.toml"
               echo "               cargo test --manifest-path modules/owo-stim/rust/Cargo.toml"
             '';
