@@ -36,6 +36,7 @@ logs (table C).
 | before this audit | 139 | 48 | 44 | 8 | 1 |
 | after this audit | 152 | 45 | 41 | 1 | 1 |
 | after the model-gaps pass (2026-11-01) | 156 | 45 | 38 | 0 | 1 |
+| after the model-gaps2 pass (2026-11-05) | 159 | 45 | 35 | 0 | 1 |
 
 The model-gaps pass (vendor/qemu `agent/model-gaps`, section "Model-gaps
 pass" below) closed C63 and B71, B79 and B115, and moved B76 and B78 to
@@ -243,6 +244,10 @@ vendor/qemu branch `agent/model-gaps`, one commit per area:
    mode), not at the command; anything depending on sense timing (the
    output-stage safety work) should be re-run.
 
+The model-gaps2 pass (vendor/qemu `agent/model-gaps2`, section
+"Model-gaps2 pass" below) closed B95, B96 and B107 and moved B81 and B97
+to partial.
+
 ### Interconnect calibration: SS7.74 on the model
 
 The unchanged silicon probes (`m0.S`, `m33.c`, `m33flash.S` of SS7.74) run
@@ -304,7 +309,7 @@ Status of each reference-manual chapter in the model after this pass.
 | RM chapter | block | modelled | evidence | gaps |
 |---|---|---|---|---|
 | 3 | System processor (M33, M0+ timing) | partial | Si SS7.75 | M33 one CPI average (B73); M0+ SEQRAM store 2.5 |
-| 4 | Memory and bus system | yes (gaps) | RM, Si SS7.74 | M33 SRAM/flash traffic (B77); LDMA as a manager |
+| 4 | Memory and bus system | yes (gaps) | RM, Si SS7.74 | M33 SRAM/flash traffic (B77); LDMA as a bus manager (B81) |
 | 5 | Radio transceiver | yes (radio-tables) | Si | see tables A and B |
 | 6 | MSC, DEVINFO, USERDATA | yes | RM, Si | erase/write durations (C34); DEVINFO calibration words |
 | 7 | DBG debug interface | yes | Si, docs/debug-port-model.md | AP3 / M0+ debug (A45, C3); DWT watchpoints (A43) |
@@ -312,22 +317,156 @@ Status of each reference-manual chapter in the model after this pass.
 | 9 | Oscillators | yes | Si SS7.73 | HFXO warm restart [P] |
 | 10 | SMU | partial | Si | only the AHBRADIO attribution |
 | 11 | CRYPTOACC | partial (gaps) | RM; Si for RADIOAES | TRNG test mode, health-test failures, IRQ; PK engine; BA413/418/419 |
-| 12 | EMU (incl. DCDC) | partial | RM, Si | RSTCAUSE/RSTCTRL only: no BOD, voltage monitors, DCDC, EM2/EM3/EM4 |
-| 13 | PRS | no | Si (probe routes) | producer/consumer matrix, logic, async/sync channels |
-| 14 | GPCRC | yes (gaps) | RM | DMA requests (no LDMA) |
-| 15 | RTCC | partial | RM | capture, CCV0MATCH, PRECNT |
+| 12 | EMU (incl. DCDC) | partial | RM, Si | RSTCAUSE/RSTCTRL, DCDC REGULATION only: no BOD, voltage monitors, EM2/EM3/EM4 |
+| 13 | PRS | yes (gaps) | RM, Si SS7.71/7.73 (probe routes, gating, timing) | producers CMU/CORE/AGC/BUFC/FRC/PROTIMER/SYNTH/PDM/LFRCO and some USART/EUART signals; RAC, CMU, MODEM, CORE, DTI, USART, WDOG consumers |
+| 14 | GPCRC | yes | RM | - (no LDMAXBAR source; the LDMA feeds INPUTDATA by SWREQ) |
+| 15 | RTCC | partial | RM | CCV0MATCH, PRECNT compare base, LOCK (capture and CCV outputs modelled) |
 | 16 | BURTC | yes | Si SS7.73 | - |
-| 17 | BURAM | no | - | - |
-| 18 | LETIMER | no | - | - |
-| 19 | TIMER | yes | Si SS7.73 | input capture, DTI, PRS inputs |
+| 17 | BURAM | yes | RM | gating [I] |
+| 18 | LETIMER | yes (gaps) | RM, Si SS7.73 (gating) | DEBUGRUN, EM2/EM3 clocks; LFSYNC delay [I] |
+| 19 | TIMER | yes | Si SS7.71/7.73 | DTI, INSEL = PIN, quadrature, up/down count |
 | 20 | PDM | no | - | - |
-| 21 | USART | partial | RM | IrDA, I2S, timer comparators, parity/framing errors |
-| 22 | EUART | no | - | - |
+| 21 | USART | partial | RM | I2S, parity errors, TX sequencer delays, AUTOCS, secondary sync mode |
+| 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input |
 | 23 | I2C | partial | RM | follower mode |
-| 24 | IADC | partial (gaps) | RM [I] timing | TIMER/PRS triggers, 16/20-bit, window compare, SUPPLY inputs |
+| 24 | IADC | yes (gaps) | RM [I] timing | bipolar output, SCALEx calibration, SUPPLY inputs, tailgating |
 | 25 | GPIO | yes | RM | EM4 wake |
-| 26 | LDMA | no | Si (SS7.74 LDMA probes) | - |
+| 26 | LDMA | yes (gaps) | RM, Si SS7.74 (error, EN) | own throughput [I]; not an interconnect manager (B81); DBGHALT |
 | 27 | WDOG | yes | RM, Si | EM2/EM3 run control |
+
+## Model-gaps2 pass (2026-11-05)
+
+vendor/qemu branch `agent/model-gaps2`, one commit per block.  The new
+blocks are devices of their own (`hw/arm/efr32-*.c`) overlaid on the core
+model's peripheral window, like the USART and GPIO; `efr32-soc-link.h`
+gives them the CMU bus-clock gates, the clock-tree rates and the bus-cost
+model.  qtests after the pass: `efr32bg22-test` 122, `efr32bg22-rf-test`
+37, `efr32bg22-dap-test` 13, `efr32bg22-board-test` 7, `test-jlink-swd-io`
+3.
+
+1. **PRS** (RM ch. 13; B95, B96, B97; `efr32-prs.c`): 12 asynchronous
+   channels (SOURCESEL/SIGSEL, AUXSEL, the FNSEL look-up table
+   FNSEL[2A + B], SWLEVEL, SWPULSE), 4 synchronous channels, PEEK, every
+   consumer register (SPRSSEL where the header has one), CLKEN0.PRS
+   gating of reads and writes [Si SS7.71/7.73].  Propagation is immediate
+   [Si SS7.73: SWPULSE and CMD.START within +-1 TIMER1 cycle].  Producers:
+   TIMER0-4 UF/OF/CC (PRSCONF pulse/level), IADC0 done events, RTCC CCV0-2
+   (CMOA), BURTC COMP, GPIO PIN0-7, LETIMER0 CH0/1, EUART0 TXC/RXFL, and
+   the radio: RACL ACTIVE/RX/TX ([I] LNAEN, PAEN), MODEML.FRAMEDET,
+   MODEMH.SYNCSENT/EOF, MODEM.FRAMESENT at the model's measured frame
+   anchors (SS7.71/7.72).  Consumers: TIMER CC0-2 input logic, RTCC
+   capture, IADC triggers, LETIMER0 START/STOP/CLEAR, EUART0 TRIGGER,
+   LDMAXBAR DMAREQ0/1, LDMA SYNCTRIG, GPIO PRS routes.  The TIMER gained
+   input capture (2-entry FIFO, ICOF, ICFOF/ICFUF/ICFWLFULL,
+   ICFEMPTY/CCPOL), INSEL PRSASYNCPULSE / PRSASYNCLEVEL (the RM's 2-clock
+   sampler, 7 with FILT: a producer pulse is never captured, as silicon
+   showed for the MODEM events) / PRSSYNC, CTRL.RISEA/FALLA and the
+   one-shot CFG.OSMEN; debugger reads of CCn_ICF do not pop [Si SS7.71]
+   (the DAP marks its accesses with a requester id).  qtests
+   `prs-logic-table`, `prs-bus-gate`, `prs-swpulse-timer-capture`,
+   `prs-timer-input-qualification`, `prs-timer-reloadstart-oneshot`,
+   `prs-rtcc-capture`, `rf/prs-radio-probe-routes` (the route of
+   `scripts/bg22-tifs-probe.tcl` against a released-sequencer TX:
+   SYNCSENT 40.65 us after TX entry, FRAMESENT the PDU+CRC airtime later).
+2. **IADC triggers** (RM SS24.3.3.3; in the PRS commit): TRIGSEL
+   IMMEDIATE/TIMER (the local timer, TIMEREN/TIMERDIS)/PRSCLKGRP/PRSPOS/
+   PRSNEG (2 CLK_SRC_ADC of synchronisation [I]), ONCE/CONTINUOUS,
+   SINGLESTOP/SCANSTOP, STATUS.xQEN/TIMERACTIVE.  qtest `iadc-triggers`.
+3. **BURAM** (RM ch. 17; `efr32-buram.c`): 32 retention words, byte lanes,
+   SET/CLR/TGL; kept through every reset the machine models; [I]
+   CLKEN0.BURAM gating.  qtest `buram-retention`.
+4. **LETIMER0** (RM ch. 18; `efr32-letimer.c`): the 24-bit counter on
+   EM23GRPACLK / 2^CNTPRESC and the state machines of Figures 18.2-18.5
+   (FREE, ONESHOT, BUFFERED with REP1/TOPBUFF, DOUBLE), UF/COMP/REP flags,
+   TOGGLE/PULSE/PWM outputs with OPOL and CTO to the GPIO route and the
+   PRS, PRS START/STOP/CLEAR with PRSMODE, LFSYNC writes landing at the
+   third LF edge with SYNCBUSY ([I] 3 edges, as the BURTC measured,
+   SS7.73), gated reads fault [Si SS7.73].  qtests
+   `letimer-free-running-toggle`, `letimer-oneshot-pwm`.
+5. **USART frame time fix**: `usart_frame_ns` divided by 2 x 256 x fPCLK,
+   which `muldiv64` takes as 32 bits; above 8.4 MHz PCLK (16.8 MHz in
+   synchronous mode) the divisor wrapped and frames were far too long:
+   6.5x at the reset clock (FSRCO, PCLK 19.8 MHz), 7.9x at PCLK 38.4 MHz.
+   qtest `usart-frame-time`.
+6. **EUART0** (RM ch. 22; `efr32-eusart.c`): a chardev-backed UART like the
+   USART ("<soc>.euart0"): 4-entry FIFOs with TXFIW/RXFIW, frame timing at
+   f / (ovs (1 + CLKDIV/256)) on CMU_EUART0CLKCTRL's clock, TXDATA's
+   per-frame controls, a chardev break as a framing error, RXBLOCK, start
+   and signal frames, multi-processor addresses, loopback, TXDELAY, INTFLAG
+   IF with the level flags re-set while true, CONFIG registers faulting
+   when written enabled, LFSYNC CLKDIV/TRIGCTRL/CMD with SYNCBUSY [I 3
+   cycles], PRS TRIGGER, DMA requests.  qtests `euart-loopback`,
+   `euart-chardev`.
+7. **LDMA and LDMAXBAR** (RM ch. 26; B81; `efr32-ldma.c`): 8 channels,
+   XFER/SYNC/WRI descriptors, absolute and relative addressing, LINKLOAD,
+   looping, SIZE/increments/signs, BYTESWAP, BLOCKSIZE, REQMODE, fixed and
+   ARBSLOTS round-robin arbitration, SWREQ/REQDIS/REQCLEAR/REQPEND,
+   CHDONE/IF/ERROR, SYNCTRIG from software, descriptors and PRS; a radio
+   register source ends with IF.ERROR and clearing EN does not stop a
+   channel [Si SS7.74].  Requests from PRS, EUART0, USART0/1 and the TIMERs.
+   Timing [I]: 2 HCLK per unit, 4 per descriptor, 1 per arbitration; not
+   an interconnect manager (B81's contention is not reproduced).  The
+   USART and EUART0 take byte and half-word accesses (the LDMA writes
+   TXDATA a byte at a time).  qtests `ldma-memory-copy`,
+   `ldma-peripheral-request`.
+8. **RADIOAES clock gate** (B107): CLKEN0.RADIOAES and RADIOCLKCTRL.EN
+   (RM 8.5/8.5.25; set by sli_radioaes_acquire and by the open firmware's
+   radioaes_init); [I] the fault rule.  qtest `radioaes-clock-gate`.
+9. **IADC resolution and window compare** (RM SS24.3.7-24.3.8): output
+   resolution 11 + log2(OSR x DIGAVG), RIGHT/LEFT 12/16/20 alignment
+   (LEFT12 moved from bits 15:4 to 31:20 per Figure 24.17), DIGAVG
+   back-to-back conversions, the CMPTHR window with SINGLECMP/SCANCMP.
+   qtest `iadc-resolution-and-window`.
+10. **USART timer** (RM SS21.3.10): the bit-time counter and three
+    comparators with TSTART/TSTOP/RESTARTEN, as Zephyr's async driver uses
+    them; a chardev break as a framing error (IF.FERR, RXDATAX.FERR); IrDA
+    passes the chardev's bytes unchanged.  qtest `usart-timer-and-break`.
+
+Regressions: `tests/debug-port/run-e2e.sh` over remote_bitbang passes its
+14 checks; dual `scratch/sched/dual.sh b-adv b-scan 3 60` on the gaps2
+binary: 0 late/unsat/shutdown lines, 62.3 virtual seconds in 60 s wall
+(the pre-pass binary: 11.5), ADV 1872, SCAN_REQ 687, SCAN_RSP 683.  Both
+differences come from the USART frame-time fix alone (item 5): the
+pre-pass model with only that commit on top gives 706 / 702 and the same
+speed-up (the firmware no longer spins ~8x too long on each VCOM byte),
+while the pre-pass model gives 551 / 551 over 55 virtual seconds.  With
+UART logging at its real speed 4 of ~700 scan requests go unanswered; and
+past 64 virtual seconds (2^31 ticks of the 33.55 MHz scheduler clock) the
+advertiser logs "deadline late start ... deadline -2139858319" and makes a
+safe shutdown: apparently a signed 32-bit wrap in the firmware's deadline
+arithmetic (the deadline prints negative once the clock passes 2^31),
+reachable now that 60 s of wall time runs past 64 virtual seconds.  Both
+are firmware findings, not model ones.
+
+Behaviour changes a firmware can see:
+
+- USART frames now take their programmed time (item 5): at the reset clock
+  a byte is 6.5x shorter on the wire than before, at 38.4 MHz PCLK 7.9x.
+- TIMER CCn_CTRL keeps bits 25:24 (ICEDGE) instead of masking them to the
+  counter width; TIMER STATUS reports ICFEMPTYn for enabled capture
+  channels; a one-shot timer (CFG.OSMEN) now stops at TOP on overflow.
+- RADIOAES faults while CLKEN0.RADIOAES or RADIOCLKCTRL.EN is clear.
+- PRS, LDMA, LETIMER0, EUART0 and BURAM registers are now the devices'
+  (they used to be the catch-all register store, reading back what was
+  written); their gated accesses fault.
+- USART byte and half-word accesses act on the word (they were decode
+  errors).
+- IADC: LEFT12 alignment and SHOWID placement as above; with OSR > 2 or
+  averaging a 12-bit result is the truncated top of the finer result (it
+  was rounded at 12 bits); DIGAVG multiplies the conversion time.
+- CMU_EUART0CLKCTRL reads its reset value 1.
+- The radio's PRS TX pulses arm a timer only while a PRS channel selects
+  MODEMH.SYNCSENT or MODEM.FRAMESENT.
+
+Remaining gaps after the pass: PRS producers CMU CLKOUT, CORE CTIOUT, AGC,
+BUFC, FRC, PROTIMER, SYNTH, PDM, LFRCO, USART CS/IRTX/RTS/TX, EUART0
+IRDATX/RTS/TX, BURTC OVERFLOW; consumers CMU CALUP/CALDN, MODEM DIN, RAC
+(CLR, CTIIN, FORCETX, RXDIS, RXEN, SEQ, TXEN), CORE CTIIN/M33RXEV, TIMER
+DTI/DTIFS, USART CLK/IR/RX/TRIGGER, EUART0 RX, WDOG0 SRC; TIMER INSEL = PIN
+and the quadrature decoder; LETIMER DEBUGRUN; EUART0 parity errors, IrDA,
+auto-baud, flow control; LDMA as a bus manager and its own throughput on
+silicon; USART I2S and parity errors; I2C follower mode; EMU BOD, voltage
+monitors, DCDC beyond REGULATION; EM2/EM3/EM4.
 
 ## Tables
 
@@ -471,7 +610,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B78 | Peripheral-bus (TIMER1/CMU) mutual contention +9 % .. 3.5x; M0+ +0.5 cycle/peripheral access while M33 does SRAM traffic or WFI | §7.74 silicon | partial (gaps) | efr32-interconnect.c HF APB port. M0+ side: TIMER/TIMER 21.0 (23.3), CMU/CMU 9.2 (9.1), CMU/TIMER 17.7 (19.3), TIMER/CMU 13.3 (13.3) | M33 side low (TIMER/TIMER +1.2 vs +4.2 cycles); the +0.5 under M33 SRAM traffic as B77 |
 | B79 | M0+ IRQ entry 16 -> 23-59 cycles (median 45-51) while the M33 streams SEQRAM | §7.74 silicon | yes (gaps) | efr32_ic_seq_exception_millicycles: 14 + 31 x the M33's SEQRAM utilization in the last round. Probe: 16 alone, 48 busy (47), 38 from WFI (45, range 23-51) | - |
 | B80 | Peripheral access latency follows HCLK (HCLKPRESC DIV4: TIMER1-bracketed M0+ chunk 484 -> 520 ticks) | §7.74 silicon | no | bus extras are fixed core cycles | - |
-| B81 | LDMA into SEQRAM slows M0+ like M33 streaming (ALU 1.66x, SEQRAM ld 1.87x); LDMA.EN clear does not stop a busy self-linked channel | §7.74 silicon | no | no LDMA model | - |
+| B81 | LDMA into SEQRAM slows M0+ like M33 streaming (ALU 1.66x, SEQRAM ld 1.87x); LDMA.EN clear does not stop a busy self-linked channel | §7.74 silicon | partial (gaps2) | efr32-ldma.c: EN is not a run gate, CHDIS stops; LDMA error on a radio register | LDMA is not an interconnect manager: the contention is not reproduced |
 | B82 | M0+ address map: SEQRAM at 0, radio at 0xA8.., BUFC 0xAA.., NS aliases 0xB8/0xBA/0xB0/0xA0 HardFault, SRAM shared at 0x2000_0000, 0x5xxx periph OK, 0x4004C024 no fault but constant | §7.74 silicon | yes | bg22.c:efr32_soc_realize seq_memory (~6788), efr32_seq_periph_s_read returns 0 | Secure-window writes dropped [U] |
 | B83 | efr32_seq_delay pass costs 7 or 8 cycles depending on SEQRAM alignment (delay(n) ~1.18n or 1.35n us) | §7.75 silicon | partial | Armv6-M per-class cycle counting | Alignment-dependent fetch cost not modelled (always 7) |
 | B84 | M0+ SysTick CALIB = NOREF+SKEW+RAC.STCTRL.STCAL (0xC0061A7F) [I] | §7.75 [I] | no | T: rac-stctrl-mask only | CALIB does not follow RAC.STCTRL |
@@ -485,9 +624,9 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B92 | TIMER OC=CNT fires at end of current tick; OC=CNT+1 one tick later; START with CNT==OC after one tick; OC=CNT-1 waits for wrap; no arming lead (fires iff d>=19 within a 26-tick window) | §7.73 silicon | yes | efr32_timer_schedule (~3291); T: timer0-compare-equal-fires-next-tick | - |
 | B93 | TIMER EN rules: EN=0 writes to CTRL/CMD/TOP/TOPB/CNT/CCn_CTRL/OC/OCB/DTCTRL bus-error, reads 0, values kept; EN=1 writes to CFG/CCn_CFG/DTCFG bus-error | §7.73 silicon | yes | efr32_timer_write_rejected (~3221), efr32_timer_read; T: timer-sync-registers-read-zero-when-disabled, timer-bus-faults | - |
 | B94 | TIMER keeps counting with its CLKEN cleared; gated access bus-errors (read, and write sticky) | §7.73 silicon | yes | efr32_timer_clock_gated | - |
-| B95 | Gated read errors also for RTCC, PRS, PROTIMER, LETIMER0; PRS SWLEVEL gated write errors | §7.73 silicon | partial (audit) | PROTIMER via CLKEN1 (B40) | **RTCC closed** (CLKEN0 bit 30, RM 8.5.10; reads fault, writes [I]); qtest `timer-bus-faults`. PRS and LETIMER0 are not modelled at all |
-| B96 | TIMER/PRS registers fault while CMU.CLKEN0 bit clear (probe finding) | §7.71 silicon | partial | TIMER yes | PRS no |
-| B97 | PRS async MODEM events need INSEL=PRSASYNCPULSE; CCn.ICF debugger reads don't pop FIFO (ICOF); TIMER input capture; consecutive SWPULSE stores 10 TIMER1 ticks apart | §7.71/7.73 silicon | no | - | PRS and TIMER input capture not modelled |
+| B95 | Gated read errors also for RTCC, PRS, PROTIMER, LETIMER0; PRS SWLEVEL gated write errors | §7.73 silicon | yes (gaps2) | PROTIMER via CLKEN1 (B40); RTCC CLKEN0 bit 30; efr32-prs.c prs_gated, efr32-letimer.c lt_gated; T: timer-bus-faults, prs-bus-gate, letimer-oneshot-pwm | LETIMER0 gated writes [I] |
+| B96 | TIMER/PRS registers fault while CMU.CLKEN0 bit clear (probe finding) | §7.71 silicon | yes (gaps2) | TIMER; efr32-prs.c; T: prs-bus-gate | - |
+| B97 | PRS async MODEM events need INSEL=PRSASYNCPULSE; CCn.ICF debugger reads don't pop FIFO (ICOF); TIMER input capture; consecutive SWPULSE stores 10 TIMER1 ticks apart | §7.71/7.73 silicon | partial (gaps2) | efr32_timer_ic_* (2-clock sampler rejects pulses, debugger reads by requester id); T: prs-timer-input-qualification, prs-swpulse-timer-capture, rf/prs-radio-probe-routes | the 10-tick store spacing is the interconnect's PRS store cost, not checked on the model |
 | B98 | FSRCO 19.804-19.811 MHz | §7.73 silicon | yes (audit) | EFR32_FSRCO_MEASURED_HZ 19807000 for SYSCLK/HFXO timing; efr32_em01grpa_hz (~2331) uses EFR32_FSRCO_HZ 20000000 | **Closed:** EM01GRPACLK on FSRCO counts at 19.807 MHz. qtest `timer0-follows-em01grpaclk-dpll` |
 | B99 | HFXO cold start: ENS 25, RDY 5455-5480, COREBIASOPTRDY 5663-5665 FSRCO cycles; STATUS 0x40000000 -> 0x40010003 (FORCEEN), 0x40030003 with HWREQ | §7.73 silicon | yes | EFR32_HFXO_*_FSRCO_CYCLES, efr32_hfxo_status (~2586); T: hfxo-ready-status | Warm restart [P] |
 | B100 | DPLL relock 11588 HFXO cycles (301.8 us); disable ENS clear 38-41 cycles; STATUS bit31 = 0 | §7.73 silicon | yes | EFR32_DPLL_LOCK_HFXO_CYCLES, efr32_dpll_status; T: dpll-lock | ENS-after-EN, LFXO-ref lock [P] |
@@ -497,7 +636,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B104 | RADIOAES hardware run = start + per-block: ECB/CMAC 80+55 cycles/block, CCM 105+56 (ECB 1 blk 133 = 1.73 us; CCM 27 oct 495/496 = 6.4 us; 251 oct 2063 = 26.9 us) | §7.81 / crypto.md §4 silicon | yes | efr32-radioaes.c RADIOAES_START_NS 1042, BLOCK_NS 716, CCM_START_NS 1367, CCM_BLOCK_NS 729 (~104) | Fixed ns at 76.8 MHz; not scaled if the clock differs ([I] which clock); qtest radioaes-ecb-and-key-sizes pins the ECB run time (gaps) |
 | B105 | RADIOAES idle STATUS 0; INCL_IPS_HW_CFG reads 0x00000001 (header says 0x11) | crypto.md silicon | yes | efr32-radioaes.c INCL_IPS_HW_CFG_RESET, STATUS_IDLE | - |
 | B106 | RADIOAES CCM with empty payload: hardware tag is not SP 800-38C's and decryption of its own output fails | crypto.md silicon | no | efr32-radioaes.c:do_ccm | Model presumably computes the standard result; not reproduced |
-| B107 | RADIOAES bus clock CMU_CLKEN0.RADIOAES / RADIOCLKCTRL.EN gating | crypto.md [D] RM 8.5 | no | efr32_bus_error does not cover 0x44000000 | RM-only evidence |
+| B107 | RADIOAES bus clock CMU_CLKEN0.RADIOAES / RADIOCLKCTRL.EN gating | crypto.md [D] RM 8.5 | yes (gaps2) | efr32_bus_error; T: radioaes-clock-gate | RM-only evidence; fault rule [I] |
 | B108 | TIMER0.CNT read by M33 0.156 us | §7.77 silicon | yes | M33 TIMER extra 10.875 -> 11.875 cycles = 0.155 us | - |
 | B109 | RAC_RSM/RAC_SEQ M33 IRQs (37/38) come from RAC.IF & RAC.IEN (bits 0-3 / 16-23), not SEQIF & SEQIEN | §7.78 [D] public fields + stock behaviour | yes | efr32_rac_update_irqs | - |
 | B110 | RDMAILBOX IF/IEN latch: mailbox 0 -> M33 IRQ 39, mailbox 1 -> M0+ IRQ 23 | §7.78 [I]/stock behaviour | yes | efr32_rdmailbox_update_irqs (~1473); T: rfmailbox-flags-latch | - |
@@ -505,7 +644,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B112 | MSC programming (WREN, ADDRB/INVADDR, ERASEPAGE, WDATA clears bits, PAGELOCK, MSC_LOCK) | §7.78 RM | yes | efr32_msc_* (~4732) | Erase/write durations and read stall [U] |
 | B113 | RTCC counts at RTCCCLKCTRL/CNTPRESC, writes immediate, IF.CCn when CNT becomes OCVALUE [I] | §7.78 RM/[I] | yes | efr32_rtcc_* (~3688); T: rtcc-counts-and-compares | Edge timing unmeasured |
 | B114 | EMU.RSTCAUSE: POR after power-up, SYSREQ on AIRCR.SYSRESETREQ, kept until RSTCAUSECLR | §7.78 RM/[I] | yes | T: emu-rstcause | - |
-| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK [I]; T: iadc-single-conversion | silicon timing unmeasured; triggers, 16/20-bit, window compare not modelled |
+| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK [I]; T: iadc-single-conversion | silicon timing unmeasured (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
 | B116 | Unidentified SEQRAM 0x4000 user (reads 0xe5ecc0de, 0x01010201, 0xaabbccdd) | §7.72 silicon | no | - | Owner unknown; nothing to model yet |
 | B117 | CMU gates RDMAILBOX/RDSCRATCHPAD/PRORTC/SYSCFG stop the stock M0+ lockups (§7.59 via §7.70) | §7.70 silicon (mechanism unknown) | partial | gate map B40 now covers them | Which access faulted for stock not identified |
 
@@ -559,7 +698,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C42 | EM2RUN/EM3RUN freeze in EM2/EM3; WDOG does not run in EM4 (RM 27.3.3); warning is an EM2 wake source | watchdog.md, RM | partial | comment ~l.3955: model always runs in sleep (EM2RUN=EM3RUN=1), LOG_UNIMP otherwise | EM depth not modelled |
 | C43 | Stock firmware: WDOG0 PERSEL 8 on 32.768 kHz LFRCO = 62.5 ms | stim-simulation.md finding 4, Dump | yes | same WDOG model (stock reproduces 62.3 ms in E) | - |
 | C44 | Radio block EN needs CMU.RADIOCLKCTRL.EN and the block's CLKEN1 first | hardware-bringup.md, Si | yes | efr32bg22.c:efr32_bus_error ~l.5626; radio-enable-requires-bus-clocks | - |
-| C45 | Gated radio read = bus error, gated write dropped; CLKEN1.BUFC gates nothing visible; holes 0xa8008000, 0xa8030000-0xa80fffff always bus error (§7.72) | efr32bg22.c comment ~l.5609, Si | yes | efr32_bus_error; gated-bus-clock-faults-and-drops, rf/radio-block-clock-gates | TODO: timers/PRS bus-fault on gated writes (debugger sees it on next transaction); re-measure radio writes |
+| C45 | Gated radio read = bus error, gated write dropped; CLKEN1.BUFC gates nothing visible; holes 0xa8008000, 0xa8030000-0xa80fffff always bus error (§7.72) | efr32bg22.c comment ~l.5609, Si | yes | efr32_bus_error; gated-bus-clock-faults-and-drops, rf/radio-block-clock-gates | timers and (gaps2) PRS fault on gated writes; TODO: re-measure radio writes |
 | C46 | RAC in SHUTDOWN (13): FORCEDISABLE leaves it in SHUTDOWN | hardware-bringup.md, Si | yes | efr32bg22.c:efr32_rac_force_disabled ~l.1541; rac-force-disable | - |
 | C47 | Enabling RAC before BUFC/PROTIMER latches SHUTDOWN (vendor-sequencer path) - **but** §7.71: the open image works with PROTIMER.EN never set (9 SCAN_RSPs received), only RAC.STATUS bit 28 differs | hardware-bringup.md; radio-tables.md §7.71 ~l.5884; TODO "Radio prerequisites", Si | yes (audit) | efr32bg22.c RAC_EN write ~l.5442 latches SHUTDOWN whenever PROTIMER.EN=0, unconditionally; qtest rac-enable-requires-dependency-order | **Closed:** as B37 |
 | C48 | CPUWAITDIS re-write does not restart the M0+; only held->released starts it | hardware-bringup.md, Si | yes | radio-sequencer-release-is-idempotent, radio-sequencer-executes-open-code | - |
@@ -587,5 +726,5 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C70 | Sense on PD2, battery on PD3 via 33/133, IADC 0xB2/0xB3, VDDX ref 3300 mV, OSR 2x | stock-stim-path.md (corrected), Dump | yes | owo-suit.c battery-div-num/den ~l.1006; board/iadc-scan-board-battery | (gaps) IADC conversion/warm-up time from the RM [I] (B115) |
 | C71 | Boost PWM TIMER1 CC0 on PC7, 4 kHz 50 % | stock-stim-path.md, Dump | yes | board/timer-pwm-pin | rail physics [U] |
 | C72 | External DAC/expander keep state across MCU reset | stim-simulation.md (E), physics [I] | yes | owo-suit.c (parts not reset with SoC) | - |
-| C73 | USART frames take real time at the programmed baud; full RX buffer -> RXOF "as on silicon" | sim/README.md, RM | partial | efr32-usart.c ~l.40; usart-tx-polling | TODO: IRQ-line flag split / IF level semantics to calibrate on silicon; sync mode SPI exists for board |
+| C73 | USART frames take real time at the programmed baud; full RX buffer -> RXOF "as on silicon" | sim/README.md, RM | partial | efr32-usart.c ~l.40; usart-tx-polling, usart-frame-time | TODO: IRQ-line flag split / IF level semantics to calibrate on silicon; sync mode SPI exists for board; (gaps2) frame time no longer overflows above 8.4 MHz PCLK |
 | C74 | LFRCO precision mode about +-500 ppm on the suit (no LFXO); BURTC timings were measured on the kit's LFXO | suit-board.md, DS | n/a | - | re-measure on LFRCO |
