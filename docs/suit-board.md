@@ -56,10 +56,26 @@ never touches stock data: the stock NVM3 (settings, and possibly calibration) st
 stock firmware reinstalled by OTA, and an OTA image cannot reach it (the AppLoader only rewrites
 the pages the image covers; the 216 KiB application partition ends where the NVM3 starts and the
 link fails beyond it). The product does not use storage today (`CONFIG_BT_SETTINGS=n`). One page
-is enough for a raw record but not for NVS or ZMS, which need at least two sectors; if bonds are
-ever stored, take a second page from the top of the application partition (0x4A000) rather than
-the stock NVM3. Taking over the NVM3 would only be acceptable after its contents are understood
-and backed up.
+is enough for a raw record but not for NVS or ZMS, which need at least two sectors (they keep one
+erased for garbage collection), nor for the settings subsystem on them. The build enforces it:
+with `CONFIG_NVS`, `CONFIG_ZMS` or `CONFIG_SETTINGS` (which `CONFIG_BT_SETTINGS` needs) and a
+`storage_partition` of fewer than two erase pages, the configure step fails and points here
+(`CMakeLists.txt`).
+
+Decision path if the product is to store bonds (a product decision; nothing is moved today):
+1. A backend needs two contiguous pages, and only one is free: the application partition ends
+   where the stock NVM3 starts (0x4C000), and 0x56000 is the last page.
+2. Preferred: the top two pages of the application partition, 0x48000-0x4C000, become
+   `storage_partition` (the application partition shrinks from 216 to 200 KiB; the images today
+   use 135 to 155 KiB of it), and 0x56000 stays unused. The stock NVM3 stays intact. A stock
+   application reinstalled by OTA (it ends at 0x4AA6E) overwrites those pages, which only loses
+   the open firmware's bonds; an open-firmware OTA image cannot reach them (the link fails past
+   its partition).
+3. Not without more work: pages of the stock NVM3 (0x4C000-0x56000) joined to 0x56000. Taking
+   over the NVM3 is acceptable only after its contents are understood and backed up, since a
+   stock firmware reinstalled later would find it changed.
+4. Not recommended: a raw record in the single page without a Zephyr backend; erasing its only
+   page loses the bond on a power failure.
 
 ## Serial number and USERDATA
 - USERDATA holds the unit's record: the serial `022529200116` as twelve ASCII digits at offset
