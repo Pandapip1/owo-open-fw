@@ -223,7 +223,10 @@ struct efr32_amateur_id_timing {
 	uint32_t spacing_us;
 	/* Air time of one data-identification PDU. */
 	uint32_t data_pdu_us;
-	/* Air time of the Morse frame (its sync included). */
+	/*
+	 * The Morse frame from its TXEN to the end of its completion: its air time (sync
+	 * included) and the measured tail (Kconfig EFR32_RADIO_AMATEUR_CW_TAIL_NS).
+	 */
 	uint32_t cw_us;
 };
 

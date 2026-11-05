@@ -997,6 +997,23 @@ config EFR32_RADIO_WCET_AMATEUR_ID_NS
 	  the CW-only job does not do: silicon 89.7 us (wall time with the
 	  radio jobs that preempt it 967 us), QEMU 63.5 us.
 
+config EFR32_RADIO_AMATEUR_CW_TAIL_NS
+	int "Morse identification: TXEN to its end beyond the frame's air time (ns)"
+	depends on EFR32_RADIO_AMATEUR_ID_CW
+	default 363000 if EFR32_RADIO_TIMING_QEMU
+	default 7261000
+	help
+	  From the Morse frame's TXEN to the end of its completion callback,
+	  less the frame's nominal air time (its sync and octets at the
+	  symbol rate): TX ready, the modem's end of the on-off keyed frame
+	  and the completion. The identification's slot and its latest start
+	  reserve the frame's air time plus this. Measured
+	  (EFR32_RADIO_AMATEUR_ID_PROBE, tests/tx-power-port, docs/radio-tables.md
+	  7.89), longest of 10 on silicon: 4327.261 ms for a 4320 ms frame;
+	  QEMU 4320.363 ms.
+	  Without it a CW-only identification overran its slot on silicon and
+	  the frame timer stopped the radio.
+
 config EFR32_RADIO_AMATEUR_SYNTH_PROBE
 	bool "Test only: receive-only synthesizer probe, 2290-2500 MHz"
 	help
