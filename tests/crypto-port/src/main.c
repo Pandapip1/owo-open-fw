@@ -33,6 +33,8 @@ enum op {
 	OP_PSA_ECB,      /* import, cipher_encrypt, destroy: as bt_encrypt_le() */
 	OP_PSA_CMAC_65,  /* import, mac_compute, destroy: as bt_crypto_aes_cmac() */
 	OP_PSA_CCM_27,   /* import, aead_encrypt, destroy */
+	OP_PSA_CMAC_MP_65,  /* import, sign_setup, 3 updates (16 + 33 + 16), finish, destroy */
+	OP_PSA_CMAC_MP_256, /* the same over 256 octets in 16-octet updates (a GATT database) */
 	OP_P256_KEYGEN,  /* generate + export public: as the host's generate_pub_key() */
 	OP_P256_ECDH,    /* import private + raw agreement: as generate_dh_key() */
 	OP_COUNT,
@@ -40,7 +42,8 @@ enum op {
 
 static const char *const op_name[OP_COUNT] = {
 	"ecb", "cmac16", "cmac65", "ccm_enc1", "ccm_enc27", "ccm_dec27", "ccm_enc251",
-	"ccm_dec251", "psa_ecb", "psa_cmac65", "psa_ccm27", "p256_keygen", "p256_ecdh",
+	"ccm_dec251", "psa_ecb", "psa_cmac65", "psa_ccm27", "psa_cmacmp65", "psa_cmacmp256",
+	"p256_keygen", "p256_ecdh",
 };
 
 struct op_stats {
@@ -588,6 +591,8 @@ static void time_ops(void)
 	size_t n65, len;
 	psa_key_id_t id;
 	psa_algorithm_t ccm = PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, LL_MIC);
+	psa_mac_operation_t mp = PSA_MAC_OPERATION_INIT;
+	static uint8_t big[256];
 	struct t0 t;
 
 	hex(k, ll_sk);
@@ -637,6 +642,24 @@ static void time_ops(void)
 		(void)psa_aead_encrypt(id, ccm, nonce, 13, &aad, 1, buf_a, 27, o, sizeof(o), &len);
 		(void)psa_destroy_key(id);
 		t_stop(OP_PSA_CCM_27, t);
+		t = t_start();
+		id = import(PSA_KEY_TYPE_AES, PSA_ALG_CMAC, PSA_KEY_USAGE_SIGN_MESSAGE, k, 16);
+		(void)psa_mac_sign_setup(&mp, id, PSA_ALG_CMAC);
+		(void)psa_mac_update(&mp, m, 16);
+		(void)psa_mac_update(&mp, m + 16, 33);
+		(void)psa_mac_update(&mp, m + 49, n65 - 49);
+		(void)psa_mac_sign_finish(&mp, mac, 16, &len);
+		(void)psa_destroy_key(id);
+		t_stop(OP_PSA_CMAC_MP_65, t);
+		t = t_start();
+		id = import(PSA_KEY_TYPE_AES, PSA_ALG_CMAC, PSA_KEY_USAGE_SIGN_MESSAGE, k, 16);
+		(void)psa_mac_sign_setup(&mp, id, PSA_ALG_CMAC);
+		for (size_t i = 0; i < sizeof(big); i += 16) {
+			(void)psa_mac_update(&mp, big + i, 16);
+		}
+		(void)psa_mac_sign_finish(&mp, mac, 16, &len);
+		(void)psa_destroy_key(id);
+		t_stop(OP_PSA_CMAC_MP_256, t);
 	}
 
 	/* P-256 (software), twice: keep the run short. */
