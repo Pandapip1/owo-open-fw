@@ -958,6 +958,9 @@ static void efr32_packet_stage_reset(void)
 #define EFR32_FRC_IF_TXDONE (1U << 0)
 #define EFR32_FRC_IF_RXDONE (1U << 4)
 #define EFR32_FRC_IF_COMPLETION (EFR32_FRC_IF_TXDONE | EFR32_FRC_IF_RXDONE)
+/* FRC.IF.RXOF, bit 8 (public register model FRC_S_field.py): a received frame overflowed BUFC. */
+#define EFR32_FRC_IF_RXOF (1U << 8)
+#define EFR32_FRC_IF_EVENTS (EFR32_FRC_IF_COMPLETION | EFR32_FRC_IF_RXOF)
 #define EFR32_FRC_TRAILRXDATA_CRCOK (1U << 1)
 #define EFR32_FRC_RXCTRL_ACCEPTCRCERRORS (1U << 1)
 /*
@@ -1430,7 +1433,7 @@ static void efr32_packet_stage_arm_keep(enum efr32_radio_packet_direction direct
 	 * before the operation is armed—not from the ISR itself. */
 	if (clear_latches) {
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 	}
 	efr32_rx_delivery_invalid = false;
 	efr32_packet_lifecycle_arm(&efr32_packet_stage.lifecycle, direction);
@@ -2757,7 +2760,7 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		} else {
 			/* A queued RXDONE/TXDONE is still visible until the LLL consumes it. */
 			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
-				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 		}
 		EFR32_PROBE_MAX(completion_run[probe_conn ? 1 : 0][probe_kind],
 				k_cycle_get_32() - efr32_radio_probe_job_start);
@@ -2834,6 +2837,61 @@ static void efr32_hw_rx_deliver(void)
 }
 #endif
 
+/*
+ * RX FIFO overflow [F] (docs/radio-tables.md 7.80, 7.89): a frame that does not fit BUFC's RX
+ * channel raises BUFC.IF.BUF1OF and FRC.IF.RXOF, and the RAC holds RXOVERFLOW with no state
+ * event; RXDIS, SWRXEN withdrawn, BUFC CLEAR and FRC.CMD.RXABORT each leave it there.
+ * FORCEDISABLE takes it to OFF through SHUTDOWN. The software source is withdrawn first, so the
+ * RAC does not start receiving again when FORCEDISABLE is released; the channel is CLEARed and
+ * both flags dropped. True when the RAC was in RXOVERFLOW.
+ */
+#define EFR32_RAC_STATE_RXOVERFLOW 6U
+#define EFR32_BUFC_IF_BUF1OF (1U << 8)
+
+static void efr32_hw_rx_fifo_reset(void);
+
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+/*
+ * Diagnostics: overflows recovered, the longest recovery in scheduler-clock cycles, and the
+ * receives ended on FRC.IF.RXOF.
+ */
+volatile uint32_t efr32_radio_rx_overflows[3];
+#endif
+
+static bool efr32_radio_rx_overflow_recover(void)
+{
+	uint32_t state = (*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+			  EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK;
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+	uint32_t start = k_cycle_get_32();
+#endif
+
+	if (state != EFR32_RAC_STATE_RXOVERFLOW) {
+		return false;
+	}
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+	while (!radio_is_idle()) {
+	}
+	*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+		     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET + EFR32_BUFC_CMD_OFFSET) =
+		EFR32_BUFC_CMD_CLEAR;
+	*radio_reg32(EFR32_BUFC_BASE + EFR32_REGISTER_CLEAR_OFFSET + EFR32_BUFC_IF_OFFSET) =
+		EFR32_BUFC_IF_BUF1OF;
+	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET + EFR32_FRC_IF_OFFSET) =
+		EFR32_FRC_IF_RXOF;
+	efr32_packet_stage.rx_fifo_configured = false;
+	efr32_hw_rx_fifo_reset();
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+	efr32_radio_rx_overflows[0]++;
+	efr32_radio_rx_overflows[1] = MAX(efr32_radio_rx_overflows[1], k_cycle_get_32() - start);
+#endif
+	return true;
+}
+
 void isr_radio(void *arg)
 {
 	uint32_t pending;
@@ -2859,8 +2917,33 @@ void isr_radio(void *arg)
 		 * re-enter the same callback and make an aborted PDU look completed.
 		 */
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 		efr32_radio_completion_publish(abort_callback, abort_param, true);
+		return;
+	}
+
+	/*
+	 * A receive that overflowed the FIFO ends without RXDONE: recover the RAC and complete the
+	 * receive as one that received nothing (radio_is_done() false), which every role's LLL ends
+	 * or re-arms (a scanner's isr_done() restarts the window).
+	 */
+	if ((*radio_reg32(EFR32_FRC_BASE + EFR32_FRC_IF_OFFSET) & EFR32_FRC_IF_RXOF) != 0U) {
+#if defined(CONFIG_EFR32_RADIO_RX_CHANNEL_STATS)
+		efr32_radio_rx_overflows[2]++;
+#endif
+		(void)efr32_radio_rx_overflow_recover();
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET + EFR32_FRC_IF_OFFSET) =
+			EFR32_FRC_IF_EVENTS;
+		efr32_rx_delivery_invalid = true;
+		if (efr32_radio_abort.callback &&
+		    efr32_packet_stage.lifecycle.active_direction == EFR32_RADIO_PACKET_RX) {
+			LL_ASSERT(efr32_packet_lifecycle_latch_completion(
+				&efr32_packet_stage.lifecycle, EFR32_RADIO_PACKET_RX));
+			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
+			efr32_radio_completion_publish(efr32_radio_abort.callback,
+						       efr32_radio_abort.param, false);
+		}
 		return;
 	}
 
@@ -2936,7 +3019,7 @@ void isr_radio(void *arg)
 			&efr32_packet_stage.lifecycle, completion_direction));
 		/* Do not run an LLL state machine on the hardware interrupt stack. */
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-			     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+			     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 		efr32_radio_completion_publish(efr32_radio_abort.callback,
 					       efr32_radio_abort.param, false);
 	}
@@ -2958,10 +3041,10 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 	efr32_radio_abort_replace(&efr32_radio_abort, cb, param);
 	efr32_packet_lifecycle_forget_completion(&efr32_packet_stage.lifecycle);
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 	/* Replacement also cancels a deferred callback that had masked this line. */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
-		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 	/* FRC's line can remain pended after its source was acknowledged. */
 	k_irq_clear_pending(LL_RADIO_IRQn);
 
@@ -2983,7 +3066,7 @@ static void efr32_radio_completion_quiesce(void)
 	efr32_radio_completion_work.callback = NULL;
 	efr32_radio_completion_work.param = NULL;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 	k_irq_clear_pending(LL_RADIO_IRQn);
 	#if defined(CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR)
 	efr32_radio_qemu_rx_descriptor_quiesce();
@@ -3426,13 +3509,14 @@ void radio_setup(void)
 	 * or an unrelated FRC condition as an OpenISA radio completion.
 	 * lll_init() enables FRC_IRQn before calling radio_setup(), so discard a
 	 * retained completion before exposing either source through IEN.  This is
-	 * intentionally limited to TXDONE/RXDONE: other FRC pending sources are
+	 * intentionally limited to TXDONE/RXDONE and RXOF, the receive overflow that
+	 * ends a receive without RXDONE (isr_radio()): other FRC pending sources are
 	 * outside the OpenISA completion contract and must retain their state.
 	 */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
-		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 
 	/* Load and start the private core here, once, as stock RAIL does at
 	 * initialization. Otherwise the first LLL prepare's radio_reset() pays
@@ -4231,7 +4315,7 @@ static void efr32_radio_qemu_rx_descriptor_job(void *a, void *b, void *c)
 			EFR32_BUFC_IEN_OFFSET) = EFR32_BUFC_DESCRIPTOR_PENDING;
 		/* Only now may a retained FRC.RXDONE wake the completion ISR. */
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
-			EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_COMPLETION;
+			EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 	}
 }
 
@@ -4673,7 +4757,7 @@ void radio_disable(void)
 	efr32_packet_stage.tx_fifo_configured = false;
 	/* An abort is not a TXDONE or RXDONE; discard any pre-abort completion. */
 	*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
-		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+		     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_EVENTS;
 	/*
 	 * [I] Withdraw the software RX source first: on hardware, RXDIS with
 	 * RXENSRCEN.SWRXEN still asserted left the RAC in RXSEARCH, and the next
@@ -4683,6 +4767,8 @@ void radio_disable(void)
 		     EFR32_RAC_RXENSRCEN_OFFSET) = EFR32_RAC_RXENSRCEN_SWRXEN;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
+	/* Neither command ends RXOVERFLOW (efr32_radio_rx_overflow_recover()). */
+	(void)efr32_radio_rx_overflow_recover();
 	/*
 	 * RXDIS does not end RXFRAME: the RAC finishes the frame first, up to its full air time,
 	 * and the next launch would wait for it (docs/radio-tables.md 7.80, 7.89). FORCEDISABLE
