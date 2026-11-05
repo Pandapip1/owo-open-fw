@@ -12,11 +12,12 @@ import json
 import os
 import sys
 
+FRAME = "1400000000000000000032003232000000010027"
 BASE = [
     {"t": 3400, "do": "prep"},
     {"t": 3500, "do": "cmd", "name": "widths", "hex": "49494949494949494949"},
     {"t": 3600, "do": "cmd", "name": "run", "hex": "25"},
-    {"t": 4000, "do": "cmd", "name": "frame", "hex": "1400000000000000000032003232000000010027"},
+    {"t": 4000, "do": "cmd", "name": "frame", "hex": FRAME},
 ]
 FAULT_T = 5000
 END = 7500
@@ -58,8 +59,21 @@ SCENARIOS = {
     # Session started with the pack already below the start threshold (board property).
     "battery-start-low": [],
     "button-power": [fault(SUIT, "expander-ext-low", "0x1")],
+    # Released 0.3 s later; Start at 5.5 s and a new frame at 5.6 s stimulate again.
+    "button-release-start": [fault(SUIT, "expander-ext-low", "0x1"),
+                             fault(SUIT, "expander-ext-low", "0x0", 5300),
+                             {"t": 5500, "do": "cmd", "name": "run", "hex": "25"},
+                             {"t": 5600, "do": "cmd", "name": "frame", "hex": FRAME}],
+    # Still held at the Start and the new frame: refused.
+    "button-held-start": [fault(SUIT, "expander-ext-low", "0x1"),
+                          {"t": 5500, "do": "cmd", "name": "run", "hex": "25"},
+                          {"t": 5600, "do": "cmd", "name": "frame", "hex": FRAME}],
+    # Pressed and released before the frame arrives: the frame does not start a session.
+    "button-before-frame": [fault(SUIT, "expander-ext-low", "0x1", 3800),
+                            fault(SUIT, "expander-ext-low", "0x0", 3900)],
     "disconnect": [{"t": FAULT_T, "do": "disconnect"}],
     "radio-shutdown": [{"t": FAULT_T, "do": "radio_shutdown"}],
+    "radio-shutdown-mid-pulse": [{"t": FAULT_T, "do": "radio_shutdown", "kind": "mid-pulse"}],
     # Inside the open firmware's active window in the model (4.05-4.15 s), see the doc.
     "early-hang-mid-pulse": [{"t": 4040, "do": "hang", "kind": "mid-pulse"}],
     "early-stop": [{"t": 4100, "do": "cmd", "name": "run", "hex": "00"}],

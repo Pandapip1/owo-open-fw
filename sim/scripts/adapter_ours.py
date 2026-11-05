@@ -148,13 +148,20 @@ def poke(addr, size, value):
                 f"{addr} = {value}")
 
 
-def radio_shutdown():
+def radio_shutdown(kind=None):
     # The radio's deadline-miss safe shutdown with its (empty) miss record, through the kernel's
     # report as a missed deadline reaches it (modules/efr32-radio/hal/radio.c
     # k_deadline_miss_handler, inlined into z_deadline_miss_report under LTO). Needs an image
     # whose miss policy is the radio's handler (CONFIG_SCHED_DEADLINE_MISS_CUSTOM: the hardware
-    # timing; sim/product-qemu.conf only counts misses).
+    # timing; sim/product-qemu.conf only counts misses). "mid-pulse": called inside a positive
+    # phase on the pump thread, as a failure detected in an interrupt during a pulse would be.
+    if kind == "mid-pulse":
+        mid_phase_break()
+        gdb.execute("continue")
+        gdb.execute("thread 1", to_string=True)
+    # LTO may or may not give the static miss record a ".lto_priv.N" name.
     for call in ("call (void)k_deadline_miss_handler(&efr32_radio_miss)",
+                 "call (void)z_deadline_miss_report(&efr32_radio_miss)",
                  "call (void)z_deadline_miss_report(&'efr32_radio_miss.lto_priv.0')"):
         try:
             gdb.execute(call)
@@ -180,7 +187,8 @@ def outcomes():
 
 def status():
     out = {}
-    for expr in ("*(int *)((unsigned int)&owo_sim_mailbox + 16)", "efr32_radio_halted"):
+    for expr in ("*(int *)((unsigned int)&owo_sim_mailbox + 16)", "efr32_radio_halted",
+                 "'efr32_radio_halted.lto_priv.0'"):
         try:
             out[expr] = int(gdb.parse_and_eval(expr))
         except gdb.error:
