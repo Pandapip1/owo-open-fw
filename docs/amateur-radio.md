@@ -279,10 +279,15 @@ operator's. The current 97.311 has no power limit (eCFR, amended 80 FR 53753, 20
 
 Power: 97.313(b) caps a station at 1.5 kW PEP (61.8 dBm); the module's maximum output is 8.2 dBm
 typical [D BGM220P datasheet Table 4.5, POUTMAX], so the cap cannot be reached, and
-`efr32_amateur_enable()` checks the radio's maximum against the table's ceiling. The radio
-driver has one PA setting (the stage-2 preset, dBm not characterized); 97.313(a)'s "minimum
-transmitter power necessary" is the operator's to judge, and a lower setting would first need
-the PA characterized (section 8).
+`efr32_amateur_enable()` checks the radio's maximum against the table's ceiling. 97.313(a)'s
+"minimum transmitter power necessary" is the operator's, and now operator-controllable:
+amateur operation selects `EFR32_RADIO_TX_POWER`, and `efr32_amateur_tx_power_set(dbm)` caps
+every transmission under amateur rules, the identifications included, at the highest power
+amplifier level whose published output does not exceed `dbm` (-27.5 to 8.5 dBm); each Bluetooth
+role keeps its own lower level (`BT_CTLR_TX_PWR`, the vendor Write Tx Power Level command). Until
+set there is no ceiling and the identifications use the highest level. The dBm are Silicon Labs'
+figures for their reference design, not measured on these boards, and whether the Morse
+identification's on-off keying follows the level is unverified (docs/tx-power.md sections 3-5).
 
 ## 7. Hardware: what the synthesizer reaches
 
@@ -335,6 +340,8 @@ Unverifiable here without RF test equipment, so **not claimed**:
   guard;
 * the OOK waveform: that the carrier is keyed at all (only the TX state, the frame's duration and
   the synthesizer lock were observed), key-down power, on/off ratio, keying edges and clicks;
+* the output power of each level `efr32_amateur_tx_power_set()` selects, and whether the keyed
+  carrier follows it (docs/tx-power.md section 5);
 * receive sensitivity off the Bluetooth channels;
 * how often a stock receiver picks up the data identification: BlueZ reports a device once, so
   the laptop's scan shows that frames were decoded, not how many (7.85).
@@ -382,6 +389,9 @@ distance; the same capture on a Bluetooth channel as the reference):
   shutdown.
 * Product: `owo_suit` and the `-DOWO_HW=ON` RAM probe build byte-identical images before and
   after; `scripts/check-hardware-ram.sh` 30916 B <= 31000 B.
+* Transmitter power (`tests/tx-power-port`, QEMU, docs/tx-power.md section 6): with a 0 dBm
+  ceiling a +4 dBm advertiser is programmed at the 0 dBm level, a -10 dBm one at its own, and
+  the closing Morse identification at the ceiling; no ceiling again under Part 15.
 
 Data identification (5.2):
 

@@ -156,6 +156,12 @@ recorded); the time from boot to the wedge.
 
 ## Remaining gaps, and why
 
+Transmit power (docs/tx-power.md): MODEM.RAMPCTRL and RAMPLEV have their
+public reset values and masks (qtest modem-pa-ramp-registers), but the
+medium carries no power, so the PA level the firmware programs changes
+nothing else in the model; there is no silicon measurement to model it
+from.
+
 Measured and modelable, not done in this audit:
 
 - **Bus contention and per-target access costs** (B71, B76-B79): done in

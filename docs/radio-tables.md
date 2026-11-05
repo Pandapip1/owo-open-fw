@@ -87,7 +87,7 @@ The OpenISA call order makes the public BLE baseline's dynamic defaults safe to 
 | T4 | SYNTH channel/frequency registers | **[F] advertising frequencies implemented; a complete working `RAIL_StartTx` trace proves the physical 2 MHz index is written to `FRC.WCNTCMP2` and `SYNTH.CHSP` while `SYNTH.CHCTRL` remains zero; the HAL and QEMU medium now use that contract** | `radio_freq_chan_set` |
 | T5 | FRC descriptors: sync word, CRC poly/init, whitening, length/header | **[F] RFCRC and BLE whitening seed implemented; `radio_pkt_configure()` clears the named FCD0..3 `SKIPWHITE` field and hardware readback matches stock for that field; remaining length/header and sequencer handoff behavior is incomplete. §7 adds a static decomp of the stock IRQ8/IRQ9 handlers and a hardware-observed `FRC.STATUS.ACTIVETXFCD` divergence that sharpens, but does not yet close, the open fault-boundary question from `docs/hardware-bringup.md`.** | `radio_aa_set`, `radio_crc_configure`, `radio_whiten_iv_set`, `radio_pkt_configure`, `radio_crc_is_valid` |
 | T6 | BUFC RX/TX buffer setup | **[F] TX channel-0 and RX channel-1 staging setup implemented; a dormant normalized-PDU RX copy helper enforces controller bounds, but FRC/BUFC handoff remains incomplete** | `radio_pkt_rx_set`, `radio_pkt_tx_set` |
-| T7 | PA power registers | **[F] RAIL routes raw and dBm requests through configuration-dependent helpers; a board-safe PA setting remains unresolved** | `radio_tx_power_*` |
+| T7 | PA power registers | **[F] the 6 dBm PA's level is MODEM.RAMPLEV (level + 32 in each field; reset = level 127); `EFR32_RADIO_TX_POWER` maps dBm to it by Silicon Labs' published outputs, unmeasured on these boards (docs/tx-power.md). The fixed RAC preset stays; without the option RAMPLEV keeps its reset value** | `radio_tx_power_*` |
 | T8 | PROTIMER timebase/compare/capture, 32 kHz RTC sync | **[F] base, command offset, counter/period and compare-bank access observed; field semantics incomplete** | `radio_tmr_*`, `radio_tmr_tifs_*` |
 | T9 | AGC RSSI read | **[F] live/frame value registers and fixed-point fields known; readiness/measurement policy unknown** | `radio_rssi_*` |
 
@@ -217,6 +217,13 @@ public conversion code returns one of those settings without performing a
 visible MMIO write (`pa_conversions_efr32.c:260-310`). Thus even a board-matched
 public PA table is not a documented PA-register decoder; it is not evidence
 for adding a guessed HAL write or QEMU register model.
+
+**Update (docs/tx-power.md).** The decoder this section looked for is not an MMIO write in the
+conversion code: the power setting is the PA's level, and the level is what the radio's PA ramp
+is programmed with, MODEM.RAMPLEV (public register model: three 8-bit fields, reset 0x9F9F9F).
+The stock RAIL's PA configuration writes the 6 dBm PA's level plus 32 into all three fields for
+FSK; 0x9F is its highest level, 127, plus 32. `EFR32_RADIO_TX_POWER` writes it; the dBm are
+Silicon Labs' published outputs, unverified here, with the measurements listed there.
 
 ### 3.3 Initialization does not recover reset sequencing [F]
 

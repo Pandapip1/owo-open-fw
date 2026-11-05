@@ -90,7 +90,7 @@ Status of every function (all in `modules/efr32-radio/hal/radio.c`, each comment
 | TIFS/switch | `radio_switch_complete_*`, `radio_tmr_tifs_set`, `radio_tmr_tifs_base_get` | regs | T2, T8 |
 | Timer | `radio_tmr_*` (17) | regs | T8 |
 | RSSI | `radio_rssi_*` | regs | T9 |
-| Power | `radio_tx_power_set/max_set` | regs | T7 |
+| Power | `radio_tx_power_set/max_set`, `lll_radio_tx_pwr_*` | regs (MODEM.RAMPLEV, `EFR32_RADIO_TX_POWER`) | T7: dBm per level unmeasured (docs/tx-power.md) |
 | Delays | `radio_*_ready_delay_get`, `radio_*_chain_delay_get` | measured constants | hardware timing capture |
 | Software | `radio_pkt_empty/scratch_get`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*` (implemented and compile-checked); `radio_filter_*`, `radio_bc_*`, `radio_ar_*` remain | software | nothing |
 
