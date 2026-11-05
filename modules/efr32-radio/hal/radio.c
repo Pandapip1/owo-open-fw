@@ -47,6 +47,9 @@
 #include "qemu_tifs_state.h"
 #endif
 #include "timer_state.h"
+#if defined(CONFIG_EFR32_RADIO_TX_POWER)
+#include "tx_power.h"
+#endif
 #if defined(CONFIG_EFR32_RADIO_AMATEUR)
 #include "amateur_radio.h"
 #endif
@@ -3525,10 +3528,44 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 	efr32_modem_channel_rates_set();
 }
 
-/* [hardware] Fixed working-board PA characterization; dBm mapping remains T7. */
+#if defined(CONFIG_EFR32_RADIO_TX_POWER)
+/*
+ * MODEM.RAMPLEV (public register model MODEM_S_register.py: offset 0x0CC, reset 0x009F9F9F;
+ * MODEM_S_field.py: RAMPLEV0..2, 8 bits each at bits 0, 8 and 16): the level the PA ramps to.
+ * With an FSK modulation the 6 dBm PA's power level goes into all three fields, offset by
+ * EFR32_PA6_RAMPLEV_OFFSET: the reset value's 0x9F is the highest level, 127, plus the offset
+ * (docs/tx-power.md 2).
+ */
+#define EFR32_MODEM_RAMPLEV_OFFSET 0x0CCU
+#define EFR32_MODEM_RAMPLEV_FIELDS 3U
+#define EFR32_MODEM_RAMPLEV_FIELD_BITS 8U
+#define EFR32_PA6_RAMPLEV_OFFSET 32U
+
+static void efr32_radio_pa_level_set(uint8_t level)
+{
+	uint32_t ramplev = 0U;
+
+	__ASSERT_NO_MSG(level <= EFR32_PA6_LEVEL_MAX);
+	for (uint32_t field = 0U; field < EFR32_MODEM_RAMPLEV_FIELDS; field++) {
+		ramplev |= ((uint32_t)level + EFR32_PA6_RAMPLEV_OFFSET)
+			   << (field * EFR32_MODEM_RAMPLEV_FIELD_BITS);
+	}
+	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_RAMPLEV_OFFSET) = ramplev;
+}
+#endif
+
+/*
+ * [hardware] Fixed working-board PA characterization. The power in dBm: OpenISA's
+ * RADIO_TXP_DEFAULT, or the role's level with BT_CTLR_TX_PWR_DYNAMIC_CONTROL. Without
+ * EFR32_RADIO_TX_POWER, MODEM.RAMPLEV keeps its reset value, the 6 dBm PA's highest level.
+ */
 void radio_tx_power_set(uint32_t power)
 {
+#if defined(CONFIG_EFR32_RADIO_TX_POWER)
+	efr32_radio_pa_level_set(efr32_tx_power_level((int8_t)power));
+#else
 	ARG_UNUSED(power);
+#endif
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PAENCTRL_OFFSET) =
 		EFR32_RAC_STAGE2_PAENCTRL;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_PATRIM1_OFFSET) =
@@ -3539,11 +3576,32 @@ void radio_tx_power_set(uint32_t power)
 		EFR32_RAC_STAGE2_PACTRL;
 }
 
-/* [hardware] The only characterized preset is also the temporary maximum. */
+/* The highest level, or the amateur station's ceiling (efr32_tx_power_limit_set()). */
 void radio_tx_power_max_set(void)
 {
 	radio_tx_power_set(0U);
+#if defined(CONFIG_EFR32_RADIO_TX_POWER)
+	efr32_radio_pa_level_set(efr32_tx_power_max_level());
+#endif
 }
+
+#if defined(CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL)
+/* The controller's per-role levels (ll_sw/ll_tx_pwr.c), in the dBm the steps report. */
+int8_t lll_radio_tx_pwr_min_get(void)
+{
+	return efr32_tx_power_min_dbm();
+}
+
+int8_t lll_radio_tx_pwr_max_get(void)
+{
+	return efr32_tx_power_max_dbm();
+}
+
+int8_t lll_radio_tx_pwr_floor(int8_t tx_pwr_lvl)
+{
+	return efr32_tx_power_floor_dbm(tx_pwr_lvl);
+}
+#endif
 
 #if defined(CONFIG_EFR32_RADIO_AMATEUR)
 /* SYNTH.FREQ for a carrier in kHz, rounded to nearest as the captured words are. */

@@ -14,8 +14,9 @@ tifs_switch_bin="$build_dir/tifs_switch_prereq_test"
 hcto_state_bin="$build_dir/hcto_state_test"
 qemu_tifs_state_bin="$build_dir/qemu_tifs_state_test"
 amateur_rules_bin="$build_dir/amateur_rules_test"
+tx_power_bin="$build_dir/tx_power_test"
 mkdir -p "$build_dir"
-trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$stage_bin" "$dispatch_bin" "$tifs_switch_bin" "$hcto_state_bin" "$qemu_tifs_state_bin" "$amateur_rules_bin"; rmdir "$build_dir" 2>/dev/null || :' EXIT HUP INT TERM
+trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$stage_bin" "$dispatch_bin" "$tifs_switch_bin" "$hcto_state_bin" "$qemu_tifs_state_bin" "$amateur_rules_bin" "$tx_power_bin"; rmdir "$build_dir" 2>/dev/null || :' EXIT HUP INT TERM
 
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
 	-I"$test_dir/../../modules/efr32-radio/hal" \
@@ -70,3 +71,9 @@ trap 'rm -f "$abort_bin" "$timer_bin" "$rx_pdu_bin" "$rx_descriptor_bin" "$stage
 	"$test_dir/amateur_rules_test.c" \
 	"$test_dir/../../modules/efr32-radio/hal/amateur_rules.c" -lm -o "$amateur_rules_bin"
 "$amateur_rules_bin"
+
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+	-I"$test_dir/../../modules/efr32-radio/hal" \
+	"$test_dir/tx_power_test.c" \
+	"$test_dir/../../modules/efr32-radio/hal/tx_power.c" -o "$tx_power_bin"
+"$tx_power_bin"

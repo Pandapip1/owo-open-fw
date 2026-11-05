@@ -91,6 +91,23 @@ int efr32_amateur_end_of_communication(void);
 /** @brief Number of identifications sent since boot. */
 uint32_t efr32_amateur_id_count(void);
 
+/* efr32_amateur_tx_power_set(): no ceiling, the radio's highest power level. */
+#define EFR32_AMATEUR_TX_POWER_MAX INT8_MAX
+
+/**
+ * @brief Set the station's transmitter power for amateur operation (47 CFR 97.313(a)).
+ * While amateur rules are in force, every transmission from the radio's next event is capped
+ * at it: each Bluetooth role's own level (BT_CTLR_TX_PWR, the vendor Write Tx Power Level
+ * command) and the identifications, which otherwise use the radio's highest level. Kept across
+ * efr32_amateur_disable() and efr32_amateur_enable(); EFR32_AMATEUR_TX_POWER_MAX until set.
+ * The dBm are Silicon Labs' published outputs of the power amplifier's levels, not measured on
+ * this hardware (docs/tx-power.md).
+ * @param dbm Highest output in dBm, or EFR32_AMATEUR_TX_POWER_MAX.
+ * @return The output of the level selected: the highest not above @p dbm (the lowest level if
+ *         none is), or EFR32_AMATEUR_TX_POWER_MAX.
+ */
+int8_t efr32_amateur_tx_power_set(int8_t dbm);
+
 #ifdef __cplusplus
 }
 #endif

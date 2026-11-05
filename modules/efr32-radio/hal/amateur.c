@@ -42,6 +42,7 @@
 #include "hal/efr32/ll_threads.h"
 #include "hal/efr32/ll_deadlines.h"
 #include "amateur_radio.h"
+#include "tx_power.h"
 
 /* ull_conn_internal.h needs most of the controller's headers; only this is used. */
 struct ll_conn;
@@ -202,6 +203,9 @@ static bool efr32_amateur_id_final;
 /* efr32_amateur_end_of_communication() asked for it. */
 static bool efr32_amateur_eoc_requested;
 static atomic_t efr32_amateur_enc_refusals;
+/* The operator's transmitter power (efr32_amateur_tx_power_set()). */
+static int8_t efr32_amateur_power_dbm = EFR32_AMATEUR_TX_POWER_MAX;
+BUILD_ASSERT(EFR32_AMATEUR_TX_POWER_MAX == EFR32_TX_POWER_NO_LIMIT);
 
 K_DEADLINE_EVENT_DEFINE(efr32_amateur_id_event);
 static K_SEM_DEFINE(efr32_amateur_id_sem, 0, 1);
@@ -411,6 +415,7 @@ static void efr32_amateur_id_end(void)
 		 * reserved slot, so nothing is transmitted under amateur rules after it.
 		 */
 		atomic_set(&efr32_amateur_on, 0);
+		(void)efr32_tx_power_limit_set(EFR32_TX_POWER_NO_LIMIT);
 	}
 	k_spin_unlock(&efr32_amateur_lock, key);
 	efr32_amateur_post(EFR32_AMATEUR_LEAD_MS);
@@ -962,6 +967,7 @@ int efr32_amateur_enable(const struct efr32_amateur_config *config)
 	efr32_amateur_slot_requested = false;
 	efr32_amateur_id_now = false;
 	efr32_amateur_tx_khz = plan[EFR32_AMATEUR_ADV_CHANNEL_FIRST];
+	(void)efr32_tx_power_limit_set(efr32_amateur_power_dbm);
 	atomic_set(&efr32_amateur_on, 1);
 	k_spin_unlock(&efr32_amateur_lock, key);
 	if ((EFR32_AMATEUR_ID_METHODS & EFR32_AMATEUR_ID_METHOD_CW) != 0U) {
@@ -986,6 +992,22 @@ int efr32_amateur_enable(const struct efr32_amateur_config *config)
 	       efr32_amateur_data_pdu[EFR32_AMATEUR_ADV_PDU_HEADER_OCTETS]);
 #endif
 	return 0;
+}
+
+int8_t efr32_amateur_tx_power_set(int8_t dbm)
+{
+	k_spinlock_key_t key = k_spin_lock(&efr32_amateur_lock);
+	int8_t selected;
+
+	efr32_amateur_power_dbm = dbm;
+	if (atomic_get(&efr32_amateur_on) != 0) {
+		selected = efr32_tx_power_limit_set(dbm);
+	} else {
+		selected = dbm == EFR32_AMATEUR_TX_POWER_MAX ? dbm : efr32_tx_power_floor_dbm(dbm);
+	}
+	k_spin_unlock(&efr32_amateur_lock, key);
+
+	return selected;
 }
 
 int efr32_amateur_end_of_communication(void)

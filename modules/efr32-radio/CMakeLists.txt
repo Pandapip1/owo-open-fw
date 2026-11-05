@@ -224,6 +224,24 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     efr32_radio_derive(${OI}/hal/RV32M1/${n} ${GEN}/hal/efr32/${n})
   endforeach()
   efr32_radio_derive(${OI}/hci/hci_vendor.h ${GEN}/hci_vendor.h)
+
+  # Transmit power (hal/tx_power.c, docs/tx-power.md): OpenISA's fixed 0 dBm default becomes the
+  # BT_CTLR_TX_PWR choice, and with dynamic control each role's own level.
+  if(CONFIG_EFR32_RADIO_TX_POWER)
+    efr32_radio_patch(hal/efr32/radio/radio.h "#define RADIO_TXP_DEFAULT 0\n"
+              "#define RADIO_TXP_DEFAULT CONFIG_BT_CTLR_TX_PWR_DBM\n"
+              "default transmit power from Kconfig")
+  endif()
+  if(CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL)
+    if(NOT CONFIG_EFR32_RADIO_TX_POWER)
+      message(FATAL_ERROR "BT_CTLR_TX_PWR_DYNAMIC_CONTROL needs EFR32_RADIO_TX_POWER")
+    endif()
+    foreach(n lll_adv lll_scan lll_central lll_peripheral)
+      efr32_radio_patch(lll/${n}.c "\tradio_tx_power_set(RADIO_TXP_DEFAULT);\n"
+                "\tradio_tx_power_set(lll->tx_pwr_lvl);\n"
+                "per-role transmit power")
+    endforeach()
+  endif()
   efr32_radio_derive(${OI}/hal/RV32M1/ticker.c ${GEN}/hal/efr32/ticker.c)
 
   zephyr_library_named(efr32_radio)
@@ -257,6 +275,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
     hal/radio.c
     hal/timer_state.c
   )
+  zephyr_library_sources_ifdef(CONFIG_EFR32_RADIO_TX_POWER hal/tx_power.c)
 
   # Amateur operation (docs/amateur-radio.md): never in a build without the option.
   if(CONFIG_EFR32_RADIO_AMATEUR)

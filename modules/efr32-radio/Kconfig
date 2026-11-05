@@ -743,11 +743,75 @@ config EFR32_RADIO_TEST_OVERRUN_AFTER_MS
 	default 2000
 	depends on EFR32_RADIO_TEST_OVERRUN_US > 0
 
+config EFR32_RADIO_TX_POWER
+	bool "Selectable transmit power"
+	default y if BT_CTLR_TX_PWR_DYNAMIC_CONTROL
+	help
+	  Maps the controller's transmit power in dBm to the 6 dBm power
+	  amplifier's level (MODEM.RAMPLEV, hal/tx_power.c): the default
+	  from the BT_CTLR_TX_PWR choice, and with
+	  BT_CTLR_TX_PWR_DYNAMIC_CONTROL each advertiser's, scanner's and
+	  connection's own level (the vendor HCI Write/Read Tx Power Level
+	  commands) and LE Read Transmit Power's range. A request gets the
+	  highest level whose output, as Silicon Labs publishes it for its
+	  reference design, does not exceed it: -27.5 to 8.5 dBm,
+	  reported rounded up (-27 to 9). These outputs
+	  are not measured on this firmware's boards (docs/tx-power.md).
+
+	  Off, the power amplifier stays at its reset level, its highest
+	  (level 127), whatever the controller asks for: the OWO product's
+	  setting.
+
+# The levels above 0 dBm the 6 dBm PA reaches by the published outputs (docs/tx-power.md). Zephyr
+# offers 0, -4, -8, -12, -16 and -20 dBm to every SoC. Each depends on the option itself: Kconfig
+# gives a choice's symbols the choice's dependencies, not those of an enclosing "if".
+choice BT_CTLR_TX_PWR
+
+config BT_CTLR_TX_PWR_PLUS_9
+	bool "+9 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_8
+	bool "+8 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_7
+	bool "+7 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_6
+	bool "+6 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_5
+	bool "+5 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_4
+	bool "+4 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_3
+	bool "+3 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_2
+	bool "+2 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+config BT_CTLR_TX_PWR_PLUS_1
+	bool "+1 dBm"
+	depends on EFR32_RADIO_TX_POWER
+
+endchoice
+
 menuconfig EFR32_RADIO_AMATEUR
 	bool "Amateur-radio operation at run time (US 47 CFR Part 97)"
 	depends on SCHED_DEADLINE_MISS_CUSTOM
 	depends on BT_CTLR_ADVANCED_FEATURES
 	select BT_CTLR_USER_EXT
+	# 47 CFR 97.313(a): the operator sets the station's power (efr32_amateur_tx_power_set()).
+	select EFR32_RADIO_TX_POWER
 	select BT_CTLR_LE_ENC_POLICY if BT_CTLR_LE_ENC
 	help
 	  Lets the application switch the radio, at run time and with a
