@@ -8466,7 +8466,7 @@ TRNG (CRYPTOACC RNGCTRL):
 **5. RX FIFO overflow recovery [F].** Reproduced as in 7.80 (hardware scanner, the M33 halted 2 s):
 `FRC.IF.RXOF` (bit 8) latches with `BUFC.IF.BUF1OF`, RXDONE does not, the RAC holds RXOVERFLOW
 (STATUS 0x86400002); master's image stays there (3 of 4 runs: state 6 one second after resuming).
-A recovery (branch `sil-rxof`, not merged: see Open below) takes RXOF on FRC_IRQn: SWRXEN withdrawn, FORCEDISABLE until OFF/SHUTDOWN, released,
+The HAL now takes RXOF on FRC_IRQn: SWRXEN withdrawn, FORCEDISABLE until OFF/SHUTDOWN, released,
 BUFC channel 1 CLEARed, both flags dropped, and the receive completes as one that received nothing
 (the scanner's `isr_done()` re-arms); `radio_disable()` recovers too. On silicon, 6 halts and 2 runs with FRC.IEN cleared over SWD: back in
 RXSEARCH within 20 ms of resuming, reception continuing (1 143 frames in the next 3 s), recovery
@@ -8475,7 +8475,13 @@ released-rx-fifo-overflow).
 Open: with the rebased tree the hardware scanner crashed in 2 of 6 halt runs ("Invalid buf type"
 from `bt_hci_core`, a bus fault in `net_buf_ref`), and in 6 of 18 boots across three
 builds with this change, one of them with RXOF masked so that the recovery never ran (its counters
-read 0); master's `radio.c` gave no crash in 15 boots (4 with halts). The cause is not found.
+read 0); master's `radio.c` gave no crash in 15 boots (4 with halts). On top of the
+abandoned-frame fix (6, close/abort budget) the same recovery gave **10 of 10 clean boots** and
+recovered **4 of 4 halts** (back in RXSEARCH, 4 956-5 050 frames per 30 s run, recovery 6.9 us).
+Master never ran a full boot without its own safe shutdown cutting it short, while master with
+that fix ran 10 full boots clean: the crashes came with the abandoned-frame wait, not the recovery
+[I]: a frame RXDIS leaves running ends after the abort, and its RXDONE and FIFO contents can reach
+the next receive. The mechanism is not traced.
 
 **5a. The PA and the power range [F unless tagged].** The module (DEVINFO.MODULENAME read over
 SWD: "BGM220PC22HNA2") is an EFR32BG22 with its two integrated 2.4 GHz PAs, the "6 dBm" (RAIL
