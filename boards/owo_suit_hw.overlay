@@ -49,7 +49,11 @@
 	};
 };
 
-/* PCF8575-class expander (8-bit write address 0x40 => 7-bit 0x20). */
+/*
+ * PCF8575-class expander (8-bit write address 0x40 => 7-bit 0x20). Its open-drain /INT is PC4:
+ * the stock firmware sets PC4 to input with pull-up and a falling-edge interrupt whose only
+ * action is to request a read of the expander's inputs (docs/stock-stim-path.md).
+ */
 &i2c0 {
 	status = "okay";
 
@@ -59,6 +63,7 @@
 		gpio-controller;
 		#gpio-cells = <2>;
 		ngpios = <16>;
+		int-gpios = <&gpioc 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 	};
 };
 
@@ -152,5 +157,11 @@
 		max-level = <126>;
 		sense-uv-per-level = <19150>;
 		sense-offset = <3>;
+		/*
+		 * Power button: expander P0, an input (written 1, pulled high), low while pressed.
+		 * The stock firmware samples P0 at 10 Hz and powers down on the first low sample,
+		 * stimulating or not (docs/stock-stim-path.md).
+		 */
+		stop-gpios = <&suit_expander 0 GPIO_ACTIVE_LOW>;
 	};
 };

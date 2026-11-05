@@ -49,12 +49,15 @@ mod real {
         hw: Option<Suit>,
         sup: Stimulator,
         poll_every_us: u64,
+        /// When the stop input is read next while the output is armed.
+        stop_input_at: u64,
     }
 
     /// What the stock firmware's width table unit means in microseconds is unconfirmed
     /// (its sequencer ticks at 50 us and divides the table value by 25, which would make
     /// 2x). Default 100 % (shorter, weaker); set after measuring on a scope.
     const WIDTH_PERCENT: u32 = k::CONFIG_OWO_STIM_WIDTH_SCALE_PERCENT as u32;
+    const STOP_INPUT_POLL_US: u64 = k::CONFIG_OWO_STIM_STOP_INPUT_POLL_MS as u64 * 1000;
 
     fn config() -> Config {
         let mut c = Config::conservative();
@@ -83,6 +86,7 @@ mod real {
                 // keeps output shutdown out of IRQ context and avoids a
                 // second monitor thread competing for the output mutex.
                 poll_every_us: k::CONFIG_OWO_STIM_MONITOR_INTERVAL_MS as u64 * 1_000,
+                stop_input_at: 0,
             }
         }
 
@@ -96,6 +100,10 @@ mod real {
                 warn!("output-stage shutdown baseline failed ({:?})", e);
             })?;
             self.hw = Some(hw);
+            owo_suit::set_stop_listener(crate::stop_requested);
+            if owo_suit::stop_requested() {
+                crate::stop_requested();
+            }
             Ok(())
         }
 
@@ -106,14 +114,32 @@ mod real {
             self.sup.feed(now_us, covers_us);
         }
 
-        /// Explicit user Start/Restart: clears fault latches and the lockout.
+        /// Explicit user Start/Restart: clears fault latches and the lockout, unless the stop
+        /// input (the power button) still asks for a stop.
         pub fn user_start(&mut self, now_us: u64) {
+            if owo_suit::stop_input_demands_stop() {
+                warn!("start refused: the power button is pressed (or cannot be read)");
+                return;
+            }
             self.sup.reset();
             self.sup.restart_window(now_us);
         }
 
+        /// A stop was requested: stop now (ordered safe-off) and stay stopped until Start.
+        pub fn lock_out(&mut self) {
+            // Taken before the safe-off: a request arriving after it is seen on the next pass.
+            owo_suit::take_stop_request();
+            if let Some(hw) = self.hw.as_mut() {
+                self.sup.lock_out(hw);
+            }
+            info!("output stopped on request; locked until Start");
+        }
+
         pub fn pulse(&mut self, p: &Pulse, now_us: u64) {
             let Some(hw) = self.hw.as_mut() else { return };
+            if owo_suit::stop_requested() {
+                return;
+            }
             // Hold a resource lease for the whole bounded pulse. A monitor
             // failure revokes this lease; `Stimulator::fire` observes that at
             // its checkpoints and executes the electrical safe-off path.
@@ -158,6 +184,9 @@ mod real {
                      sense); output stopped until Start",
                     p.channel, measured, commanded
                 ),
+                Outcome::Faulted(Fault::Cancelled) => {
+                    info!("ch{} pulse ended: stop requested", p.channel)
+                }
                 Outcome::Faulted(Fault::BatteryLow { mv }) => {
                     warn!("battery {} mV too low; output stopped until Start", mv)
                 }
@@ -168,6 +197,16 @@ mod real {
         pub fn poll(&mut self, now_us: u64) {
             if let Some(hw) = self.hw.as_mut() {
                 self.sup.poll(hw, now_us);
+            }
+            // The expander's /INT edge is the prompt path; this bounds a lost one. It reads the
+            // expander only while /INT is asserted: an expander transfer holds interrupts off for
+            // its whole length (the vendor's blocking I2C transfer), which radio deadlines feel.
+            if self.sup.is_armed() && now_us >= self.stop_input_at {
+                self.stop_input_at = now_us + STOP_INPUT_POLL_US;
+                if owo_suit::stop_input_backstop_demands_stop() {
+                    owo_suit::request_stop();
+                    crate::stop_requested();
+                }
             }
         }
 
@@ -231,6 +270,13 @@ impl Output {
     pub fn user_start(&mut self, _now_us: u64) {
         #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
         self.real.user_start(_now_us);
+    }
+
+    /// Stop now on an external request and stay stopped until the user starts again.
+    pub fn lock_out(&mut self) {
+        #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+        self.real.lock_out();
+        self.dry.all_off();
     }
 
     pub fn pulse(&mut self, p: &Pulse, _now_us: u64) {

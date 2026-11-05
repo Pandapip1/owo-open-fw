@@ -3,8 +3,10 @@
 // Test code: every unsafe call is a plain read or write of the test peripherals in src/test_hw.c.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
-use owo_stim::stim::{Config, Fault, Outcome, PulseCmd, Stimulator};
-use owo_stim::hw::HwError;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use owo_stim::stim::{Config, Fault, Outcome, PulseCmd, Skip, Stimulator};
+use owo_stim::hw::{Hw, HwError};
 use owo_suit::Suit;
 use zephyr::printkln;
 use zephyr::time::SYS_FREQUENCY;
@@ -24,16 +26,36 @@ extern "C" {
     fn t_trace_len() -> u32;
     fn t_trace(i: u32) -> u32;
     fn t_set_gain_percent(g: u32);
+    fn t_set_battery_mv(mv: u32);
+    fn t_set_stop_pressed(pressed: i32);
+    fn t_stop_in_us(us: u32);
     fn t_set_corrupt_readback(on: i32);
     fn t_set_adc_hang(on: i32);
     fn t_reset_observations();
     fn t_exit(code: i32) -> !;
 }
 
-static FAILS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static FAILS: AtomicU32 = AtomicU32::new(0);
+static STOP_NOTIFIED: AtomicU32 = AtomicU32::new(0);
 
 fn fail() {
-    FAILS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    FAILS.fetch_add(1, Ordering::SeqCst);
+}
+
+fn stop_listener() {
+    STOP_NOTIFIED.fetch_add(1, Ordering::SeqCst);
+}
+
+static REVOKE_ON_STOP: AtomicU32 = AtomicU32::new(0);
+
+/// A stop requested from an interrupt (src/test_hw.c timer); a revocation once armed for it.
+#[no_mangle]
+extern "C" fn t_stop_from_isr() {
+    if REVOKE_ON_STOP.load(Ordering::SeqCst) != 0 {
+        owo_suit::revoke();
+    } else {
+        owo_suit::request_stop();
+    }
 }
 
 macro_rules! check {
@@ -101,13 +123,15 @@ extern "C" fn rust_main() {
     printkln!("owo-stim native_sim test");
 
     printkln!("init");
-    let mut hw = match Suit::new() {
+    let mut hw = match Suit::post_and_shutdown() {
         Ok(h) => h,
         Err(e) => {
-            printkln!("  FAIL Suit::new: {:?}", e);
+            printkln!("  FAIL Suit::post_and_shutdown: {:?}", e);
             unsafe { t_exit(1) }
         }
     };
+    owo_suit::set_stop_listener(stop_listener);
+    check!(!owo_suit::stop_requested(), "no stop requested with the button released");
     // SAFETY: plain reads.
     unsafe {
         check!(t_bridge_state() == 0, "bridge off after init");
@@ -115,14 +139,18 @@ extern "C" fn rust_main() {
         check!(t_pwm_percent() == 0 && t_supply_on() == 0, "supply and boost off after init");
     }
 
-    printkln!("sampler smoke");
+    printkln!("one conversion, bridge off");
     {
-        use owo_stim::hw::Hw;
-        let r = hw.supply(true);
-        zephyr::time::sleep(zephyr::time::Duration::millis_at_least(5));
-        let l = hw.sense_latest();
-        printkln!("  supply(true)={:?} conversions={} latest={:?}", r, unsafe { t_conversions() }, l);
-        let _ = hw.supply(false);
+        let r = hw.sense_start();
+        let mut v = None;
+        for _ in 0..100 {
+            v = hw.sense_poll();
+            if v.is_some() {
+                break;
+            }
+            hw.delay_us(10);
+        }
+        check!(r.is_ok() && v == Some(0), "started {:?}, read {:?}", r, v);
     }
 
     printkln!("normal biphasic pulse on channel 3, level 20");
@@ -131,8 +159,7 @@ extern "C" fn rust_main() {
     let r = sup.fire(&mut hw, now_us(), &pulse(3, 20));
     let tr = trace();
     match r {
-        Outcome::Fired { measured, open_circuit } => {
-            check!(!open_circuit, "no open circuit reported");
+        Outcome::Fired { measured } => {
             check!((18..=22).contains(&measured), "measured level {} is near 20", measured);
         }
         other => check!(false, "fired, got {:?}", other),
@@ -147,7 +174,7 @@ extern "C" fn rust_main() {
         check!(t_bridge_state() == 0, "bridge off after the pulse");
         check!(t_switch_word() == 0, "switch cleared after the pulse");
         check!(t_dac_code() == 0, "DAC back at zero after the pulse");
-        check!(t_conversions() > 4, "ADC kept converting while the stage was live ({})", t_conversions());
+        check!(t_conversions() > 4, "zero check and in-phase conversions ({})", t_conversions());
     }
 
     printkln!("dead-man");
@@ -192,7 +219,61 @@ extern "C" fn rust_main() {
     check!(!saw_closed(&tr), "bridge never closed: {:?}", &tr.0[..tr.1]);
     check!(all_off(), "everything off, switch cleared");
 
-    let fails = FAILS.load(core::sync::atomic::Ordering::SeqCst);
+    printkln!("battery below the start threshold: no session");
+    unsafe { t_reset_observations() };
+    let mut sup = armed();
+    unsafe { t_set_battery_mv(config().battery_start_mv - 1) };
+    let r = sup.fire(&mut hw, now_us(), &pulse(7, 20));
+    unsafe { t_set_battery_mv(7600) };
+    let tr = trace();
+    check!(matches!(r, Outcome::Faulted(Fault::BatteryLow { .. })), "battery low, got {:?}", r);
+    check!(!saw_closed(&tr), "bridge never closed: {:?}", &tr.0[..tr.1]);
+    check!(all_off(), "everything off");
+
+    printkln!("power button pressed: stop requested, no pulse, locked until Start");
+    unsafe { t_reset_observations() };
+    let mut sup = armed();
+    unsafe { t_set_stop_pressed(1) };
+    check!(owo_suit::stop_requested(), "stop requested by the input's callback");
+    check!(STOP_NOTIFIED.load(Ordering::SeqCst) == 1, "listener told once");
+    check!(owo_suit::stop_input_demands_stop(), "input reads pressed");
+    check!(owo_suit::take_stop_request(), "request taken");
+    sup.lock_out(&mut hw);
+    check!(sup.is_locked() && !sup.is_armed() && all_off(), "locked out, everything off");
+    sup.feed(now_us(), 10_000_000);
+    check!(
+        sup.fire(&mut hw, now_us(), &pulse(8, 20)) == Outcome::Skipped(Skip::Locked),
+        "a new frame does not restart it"
+    );
+    unsafe { t_set_stop_pressed(0) };
+    check!(!owo_suit::stop_requested(), "release requests nothing");
+    check!(!owo_suit::stop_input_demands_stop(), "input reads released");
+
+    printkln!("stop requested from an interrupt inside a phase: the pulse completes balanced");
+    unsafe { t_reset_observations() };
+    let mut sup = armed();
+    let long = PulseCmd { channel: 9, level: 20, width_us: 400, gap_us: 50 };
+    unsafe { t_stop_in_us(150) };
+    let r = sup.fire(&mut hw, now_us(), &long);
+    let tr = trace();
+    check!(matches!(r, Outcome::Fired { .. }), "fired, got {:?}", r);
+    check!(tr.0[..tr.1].contains(&1) && tr.0[..tr.1].contains(&2), "both phases: {:?}", &tr.0[..tr.1]);
+    check!(owo_suit::take_stop_request(), "request pending after the pulse, taken");
+    sup.lock_out(&mut hw);
+    check!(sup.is_locked() && all_off(), "locked out, everything off");
+
+    printkln!("revoked resource inside a phase: the pulse ends at once");
+    unsafe { t_reset_observations() };
+    let mut sup = armed();
+    unsafe { t_stop_in_us(150) };
+    REVOKE_ON_STOP.store(1, Ordering::SeqCst);
+    let r = sup.fire(&mut hw, now_us(), &long);
+    let tr = trace();
+    check!(matches!(r, Outcome::Faulted(Fault::Cancelled)), "cancelled, got {:?}", r);
+    check!(saw_closed(&tr) && !tr.0[..tr.1].contains(&2), "ended in the positive phase: {:?}", &tr.0[..tr.1]);
+    check!(all_off() && sup.is_locked(), "everything off, output locked");
+
+    let fails = FAILS.load(Ordering::SeqCst);
     printkln!("{}", if fails == 0 { "ALL PASSED" } else { "FAILED" });
     unsafe { t_exit(if fails == 0 { 0 } else { 1 }) }
 }

@@ -33,6 +33,9 @@ extern "C" {
     fn owo_suit_handle(kind: c_int) -> *const c_void;
     fn owo_suit_param(kind: c_int) -> u32;
     fn owo_suit_switch_routes() -> *const u32;
+    fn owo_suit_stop_input_setup() -> c_int;
+    fn owo_suit_stop_input_get() -> c_int;
+    fn owo_suit_stop_input_pending() -> c_int;
 }
 
 /// Non-energising POST for every driver named by the `owo,suit-output` node.
@@ -83,6 +86,7 @@ pub enum SuitParam {
     SwitchRouteCount = 9,
     BatteryDividerNum = 10,
     BatteryDividerDen = 11,
+    HasStopInput = 12,
 }
 
 /// The suit's devicetree node, if the board describes one. Null when the node is absent or its
@@ -101,6 +105,27 @@ pub fn suit_supply_handle(index: u32) -> *const c_void {
 pub fn suit_param(kind: SuitParam) -> u32 {
     // SAFETY: pure lookup of a devicetree constant.
     unsafe { owo_suit_param(kind as c_int) }
+}
+
+/// Configure the board's stop input (`stop-gpios`) and its change callback, which calls
+/// `owo_suit_stop_input_changed`. `Err(-ENOTSUP)` when the board has none.
+pub fn suit_stop_input_setup() -> Result<(), Errno> {
+    // SAFETY: plain driver calls on a static devicetree spec.
+    check(unsafe { owo_suit_stop_input_setup() })
+}
+
+/// Whether the stop input is active now (reads its controller).
+pub fn suit_stop_input() -> Result<bool, Errno> {
+    // SAFETY: as above.
+    let r = unsafe { owo_suit_stop_input_get() };
+    check(r).map(|_| r != 0)
+}
+
+/// Whether the stop input's controller signals an unread change on its interrupt line (always
+/// true for a controller without one). A GPIO read only: nothing is transferred to the controller.
+pub fn suit_stop_input_pending() -> bool {
+    // SAFETY: as above.
+    unsafe { owo_suit_stop_input_pending() != 0 }
 }
 
 /// Per-channel switch pin masks from devicetree (`switch-routes`); static for the program's life.

@@ -106,3 +106,10 @@ properties:
     type: int
     default: 0
     description: Levels subtracted from the converted reading (stock firmware uses 3).
+
+  stop-gpios:
+    type: phandle-array
+    description: |
+      Input that requests an immediate stop of the output while active (the suit's power
+      button). Read by the supervisor; its controller must deliver a GPIO callback when the
+      input changes (for a PCF857x expander: its int-gpios).

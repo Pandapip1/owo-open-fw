@@ -112,6 +112,37 @@ pub(crate) fn resetting() -> bool {
     RESETTING.load(Ordering::Acquire)
 }
 
+// A stop requested from outside the pump (power button, loss of the control link): the pump
+// locks the output out on its next pass.
+static STOP_PENDING: AtomicBool = AtomicBool::new(false);
+// The control link is gone for good (the radio shut down): no frame or Start is accepted again.
+static LINK_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Wake the pump to lock the output out. Lock-free and non-blocking: callable from interrupts.
+pub(crate) fn stop_requested() {
+    STOP_PENDING.store(true, Ordering::Release);
+    WAKE.give();
+}
+
+/// The radio shut down (modules/efr32-radio `radio_shutdown.h`): called once, in the context
+/// that detected the failure, which may be an interrupt.
+#[cfg(CONFIG_BT_LLL_VENDOR_EFR32)]
+extern "C" fn control_link_lost() {
+    LINK_DOWN.store(true, Ordering::Release);
+    #[cfg(CONFIG_OWO_STIM_UNVALIDATED_HARDWARE)]
+    owo_suit::request_stop();
+    stop_requested();
+}
+
+#[cfg(CONFIG_BT_LLL_VENDOR_EFR32)]
+extern "C" {
+    fn efr32_radio_shutdown_cb_set(cb: Option<extern "C" fn()>);
+}
+
+fn link_down() -> bool {
+    LINK_DOWN.load(Ordering::Acquire)
+}
+
 /*
  * This is the admission and feed condition for a live stimulation session.
  * Its lifecycle owns the stricter output invariant: the monitor drops the
@@ -137,7 +168,7 @@ pub(crate) fn passkey() -> u32 {
 // ---- application hooks called from the GATT layer -------------------------
 
 pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
-    if resetting() {
+    if resetting() || link_down() {
         return Err(proto::Error::Range);
     }
     let f = Frame::parse(buf)?;
@@ -182,7 +213,7 @@ pub(crate) fn on_widths(buf: &[u8]) -> Result<(), proto::Error> {
 
 /// `Err(())` for an unknown command.
 pub(crate) fn on_run(cmd: u8) -> Result<(), ()> {
-    if resetting() {
+    if resetting() || link_down() {
         return Err(());
     }
     match cmd {
@@ -274,6 +305,12 @@ extern "C" fn rust_main() {
     }
     // Boot checkpoint: the baseline pass just left the output safe.
     let _ = wdt::feed();
+    // Before the link can exist: a radio shutdown stops the output it controls.
+    // SAFETY: registers a function that is safe in any context.
+    #[cfg(CONFIG_BT_LLL_VENDOR_EFR32)]
+    unsafe {
+        efr32_radio_shutdown_cb_set(Some(control_link_lost))
+    };
     if let Err(e) = ble::start() {
         error!("BLE start failed: {}", e);
         return;
@@ -294,6 +331,10 @@ extern "C" fn rust_main() {
         let (wake, poll, watchdog) = {
             let mut s = STATE.lock().unwrap();
             let wake = loop {
+                if STOP_PENDING.swap(false, Ordering::AcqRel) {
+                    s.engine.stop();
+                    s.out.lock_out();
+                }
                 let now = now_us();
                 match s.engine.next(now) {
                     Next::Pulse(p) => s.out.pulse(&p, now),

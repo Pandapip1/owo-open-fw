@@ -39,9 +39,16 @@ struct Mock {
     stall_each_closure: u32,
     /// An interrupt this long right after the next sense poll that finds nothing.
     stall_after_poll: u32,
+    /// An interrupt this long between the next bridge-closing call and the closure.
+    stall_before_closure: u32,
+    /// Every delay takes this much longer than asked.
+    delay_overshoot: u32,
     fail_select: bool,
     fail_bridge_on: Option<Bridge>,
     cancel_at: Option<u64>,
+    /// A conversion samples the output at its end instead of its start (the IADC converts after
+    /// its warm-up, so a conversion that ends after the bridge opened reads the open bridge).
+    sample_at_end: bool,
     cur_dac: u8,
     energised_us: u64,
     battery: u32,
@@ -65,10 +72,13 @@ impl Mock {
             over: None,
             stall_energised: 0,
             stall_after_poll: 0,
+            stall_before_closure: 0,
+            delay_overshoot: 0,
             stall_each_closure: 0,
             fail_select: false,
             fail_bridge_on: None,
             cancel_at: None,
+            sample_at_end: false,
             cur_dac: 0,
             energised_us: 0,
             battery: 7_600,
@@ -84,6 +94,9 @@ impl Mock {
     }
     fn bridge_now(&self) -> Bridge {
         self.bridge_log.last().unwrap().1
+    }
+    fn bridge_at(&self, t: u64) -> Bridge {
+        self.bridge_log.iter().rev().find(|(at, _)| *at <= t).unwrap().1
     }
     fn set_bridge(&mut self, b: Bridge) {
         self.phase_start = if b == Bridge::Off { None } else { Some(self.clock) };
@@ -121,6 +134,9 @@ impl Hw for Mock {
             self.ev.push(Ev::Bridge(Bridge::Off));
             self.set_bridge(Bridge::Off);
             return Err(HwError::Bus);
+        }
+        if s != Bridge::Off {
+            self.clock += core::mem::take(&mut self.stall_before_closure) as u64;
         }
         self.ev.push(Ev::Bridge(s));
         self.set_bridge(s);
@@ -168,6 +184,9 @@ impl Hw for Mock {
             return None;
         }
         self.conv = None;
+        if self.sample_at_end && self.bridge_at(at + self.conv_us) == Bridge::Off {
+            return Some(0);
+        }
         Some(v)
     }
     fn battery_start(&mut self) -> Result<(), HwError> {
@@ -186,6 +205,7 @@ impl Hw for Mock {
     fn delay_us(&mut self, us: u32) {
         let live = self.bridge_now() != Bridge::Off;
         let step = us as u64
+            + self.delay_overshoot as u64
             + if live { core::mem::take(&mut self.stall_energised) as u64 } else { 0 };
         if live {
             self.energised_us += step;
@@ -280,6 +300,40 @@ fn phase_ends_at_its_width_and_conversions_keep_clear_of_the_end() {
     }
 }
 
+/// A converter that answers at once (no conversion time) cannot keep the loop from reaching the
+/// end of the width.
+#[test]
+fn an_instant_converter_still_ends_the_phase_at_its_width() {
+    let (mut s, mut m) = armed();
+    m.conv_us = 0;
+    let c = PulseCmd { channel: 1, level: 20, width_us: 300, gap_us: 0 };
+    assert!(matches!(s.fire(&mut m, T0, &c), Outcome::Fired { .. }));
+    assert_eq!(m.energised_us, 2 * 300);
+}
+
+/// An interrupt between the start of a phase and the bridge closing does not shorten the time
+/// the bridge is closed.
+#[test]
+fn an_interrupt_before_the_closure_does_not_shorten_the_phase() {
+    let (mut s, mut m) = armed();
+    m.stall_before_closure = 40;
+    let c = PulseCmd { channel: 1, level: 20, width_us: 50, gap_us: 50 };
+    assert!(matches!(s.fire(&mut m, T0, &c), Outcome::Fired { .. }));
+    assert_eq!(m.energised_us, 2 * 50);
+}
+
+/// Delays that run long do not push the first conversion a whole poll step past `settle_us`.
+#[test]
+fn the_first_conversion_starts_at_the_settle_point_when_delays_run_long() {
+    let (mut s, mut m) = armed();
+    m.delay_overshoot = 6;
+    let c = PulseCmd { channel: 1, level: 20, width_us: 50, gap_us: 50 };
+    assert!(matches!(s.fire(&mut m, T0, &c), Outcome::Fired { .. }));
+    let settle = cfg().settle_us as u64;
+    let first = m.in_phase_starts[0];
+    assert!(first >= settle && first <= settle + m.delay_overshoot as u64, "{first}");
+}
+
 #[test]
 fn phases_too_short_to_measure_are_not_delivered() {
     let (mut s, mut m) = armed();
@@ -331,6 +385,19 @@ fn one_phase_preempted_past_its_width_is_measured_by_the_other() {
     assert_eq!(s.fire(&mut m, T0, &cmd(0, 20)), Outcome::Fired { measured: 20 });
     assert_eq!(m.count(&Ev::Sense(Bridge::Positive)), 0);
     assert!(m.count(&Ev::Sense(Bridge::Negative)) >= 1);
+}
+
+/// The loop is late to the positive phase's conversion, which ends after the bridge opened and
+/// reads the open bridge: not an under-delivery, the negative phase measures the pulse.
+#[test]
+fn a_conversion_ending_after_the_phase_is_judged_for_over_delivery_only() {
+    let (mut s, mut m) = armed();
+    m.sample_at_end = true;
+    m.conv_us = 20;
+    m.stall_energised = 22; // the positive phase's conversion starts at 32 us, ends at 52 us
+    let c = PulseCmd { channel: 1, level: 20, width_us: 50, gap_us: 50 };
+    assert_eq!(s.fire(&mut m, T0, &c), Outcome::Fired { measured: 20 });
+    assert!(!s.is_locked() && !s.channel_latched(1));
 }
 
 #[test]
@@ -584,6 +651,28 @@ fn revoked_resource_interrupts_phase_and_shuts_down() {
     assert_eq!(o, Outcome::Faulted(Fault::Cancelled));
     assert_eq!(*m.bridge_trace().last().unwrap(), Bridge::Off);
     assert!(m.ev.contains(&Ev::Supply(false)));
+    assert!(s.is_locked() && !s.is_armed());
+}
+
+#[test]
+fn lock_out_stops_in_order_and_holds_until_reset() {
+    let (mut s, mut m) = armed();
+    assert!(matches!(s.fire(&mut m, T0, &cmd(0, 20)), Outcome::Fired { .. }));
+    m.ev.clear();
+    s.lock_out(&mut m);
+    assert_eq!(
+        m.ev,
+        vec![Ev::Bridge(Bridge::Off), Ev::Dac(0), Ev::Select(None), Ev::Supply(false)]
+    );
+    assert!(s.is_locked() && !s.is_armed());
+    s.feed(T0 + 10, 60_000_000);
+    assert!(!s.is_armed());
+    m.ev.clear();
+    assert_eq!(s.fire(&mut m, T0 + 20, &cmd(0, 20)), Outcome::Skipped(Skip::Locked));
+    assert!(m.ev.is_empty());
+    s.reset();
+    s.feed(T0 + 30, 60_000_000);
+    assert!(matches!(s.fire(&mut m, T0 + 40, &cmd(0, 20)), Outcome::Fired { .. }));
 }
 
 #[test]

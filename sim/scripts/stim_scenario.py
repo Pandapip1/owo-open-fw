@@ -2,7 +2,7 @@
 """Run one stimulation scenario on the QEMU suit board and summarise the recording.
 
     stim_scenario.py SCENARIO.json --adapter ADAPTER.py --flash FLASH.bin --out DIR
-                     [--devinfo F --userdata F] [--elf ELF] [--qemu BIN]
+                     [--devinfo F --userdata F] [--elf ELF] [--qemu BIN] [--qemu-arg A]...
 
 SCENARIO: {"duration_ms": N, "board": {prop: value, ...},
            "steps": [{"t": ms, "do": "cmd", "name": "frame", "hex": "..."},
@@ -50,6 +50,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--qemu", default=os.path.join(ROOT, "build/qemu/qemu-system-arm"))
     ap.add_argument("--trace", default="efr32_wdog,efr32_i2c_event")
+    ap.add_argument("--qemu-arg", action="append", default=[],
+                    help="extra QEMU argument (repeatable), e.g. a TCG plugin")
     a = ap.parse_args()
     sc = json.load(open(a.scenario))
     os.makedirs(a.out, exist_ok=True)
@@ -79,6 +81,7 @@ def main():
         args += ["-trace", ev]
     for k, v in sc.get("board", {}).items():
         args += ["-global", f"owo-suit.{k}={v}"]
+    args += a.qemu_arg
     open(f"{a.out}/cmdline.txt", "w").write(" ".join(args) + "\n")
 
     def limits():

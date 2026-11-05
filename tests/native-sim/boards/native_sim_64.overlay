@@ -4,12 +4,12 @@
 /*
  * The output stage on emulated parts. Same owo,suit-output node shape as boards/<board>_hw.overlay
  * of a real board; only the controllers behind it differ. gpio0 pins: 0-3 bridge gates, 4-5 supply
- * enables, 6-7 SPI chip selects.
+ * enables, 6-7 SPI chip selects, 8 the stop input (power button, low while pressed).
  */
 / {
 	test_adc: adc {
 		compatible = "zephyr,adc-emul";
-		nchannels = <1>;
+		nchannels = <2>;
 		ref-vdd-mv = <3300>;
 		#io-channel-cells = <1>;
 		#address-cells = <1>;
@@ -18,6 +18,15 @@
 
 		channel@0 {
 			reg = <0>;
+			zephyr,gain = "ADC_GAIN_1";
+			zephyr,reference = "ADC_REF_VDD_1";
+			zephyr,vref-mv = <3300>;
+			zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+			zephyr,resolution = <12>;
+		};
+
+		channel@1 {
+			reg = <1>;
 			zephyr,gain = "ADC_GAIN_1";
 			zephyr,reference = "ADC_REF_VDD_1";
 			zephyr,vref-mv = <3300>;
@@ -79,13 +88,15 @@
 				 0x00020002 0x00080008 0x00200020 0x02000200 0x04000400>;
 		pwms = <&test_pwm 0 250000 0>;
 		boost-duty-percent = <50>;
-		io-channels = <&test_dac 15>, <&test_adc 0>;
-		io-channel-names = "amplitude", "sense";
+		io-channels = <&test_dac 15>, <&test_adc 0>, <&test_adc 1>;
+		io-channel-names = "amplitude", "sense", "battery";
+		battery-divider = <133 33>;
 		amplitude-resolution = <12>;
 		amplitude-scale = <0x12FED 0x9C4>;
 		max-level = <126>;
 		sense-uv-per-level = <19150>;
 		sense-offset = <3>;
+		stop-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
 	};
 };
 

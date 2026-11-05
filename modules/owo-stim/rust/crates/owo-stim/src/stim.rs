@@ -26,7 +26,9 @@
 //!     `over_margin`): a dead or stuck-high sense path never gets the bridge closed. Every phase
 //!     starts a conversion `settle_us` in; one that does not complete within `sense_timeout_us`
 //!     is an ADC stall. A phase that an interrupt carried past its width before its conversion
-//!     could start ends unmeasured; a pulse needs at least one measured phase.
+//!     could start ends unmeasured; a pulse needs at least one measured phase. Only a conversion
+//!     that completed while the bridge was closed measures the phase: one still running when the
+//!     bridge opened may have sampled after it, so it is judged for over-delivery only.
 //! 13. **[new]** Overrun check: a phase that took longer than `width + overrun_slack_us` (the
 //!     thread was preempted) is a fault, which latches the channel.
 //! 14. **[new]** Under-delivery stops the output: an in-phase conversion more than
@@ -38,6 +40,10 @@
 //! 15. **[new]** Battery: a session only starts with the pack at or above `battery_start_mv`,
 //!     and stops below `battery_stop_mv` (read at least every `battery_interval_us` while
 //!     pulses fire); either needs an explicit user start to try again.
+//! 16. **[new]** Stop requests from outside the pulse loop (power button, loss of the control
+//!     link): [`Stimulator::lock_out`] turns the output off in order and keeps it off until the
+//!     user starts again. The caller lets a pulse in progress complete first (its charge stays
+//!     balanced); [`Hw::cancelled`] (a revoked resource) is what ends a pulse mid-phase.
 
 use crate::hw::{Bridge, Hw, HwError};
 
@@ -125,7 +131,7 @@ pub struct PulseCmd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
-    /// The resource lease was revoked; all output must be shut down.
+    /// The resource lease was revoked; all output must be shut down. Locks the output.
     Cancelled,
     Hw(HwError),
     /// Measured output exceeded the commanded level by more than the margin.
@@ -148,11 +154,13 @@ pub enum Fault {
 }
 
 impl Fault {
-    /// Faults of the shared sense path or ADC: no channel can be supervised after them.
+    /// Faults of the shared sense path or ADC (no channel can be supervised after them), and a
+    /// revoked resource.
     fn locks_output(&self) -> bool {
         matches!(
             self,
-            Fault::UnderDelivery { .. }
+            Fault::Cancelled
+                | Fault::UnderDelivery { .. }
                 | Fault::SenseNotZero { .. }
                 | Fault::SenseTimeout
                 | Fault::Hw(HwError::Adc)
@@ -239,6 +247,13 @@ impl Stimulator {
     pub fn disarm<H: Hw>(&mut self, hw: &mut H) {
         self.armed = false;
         self.safe_off(hw);
+    }
+
+    /// Stop now and stay stopped until [`Stimulator::reset`]: a stop requested from outside the
+    /// pulse loop (the power button, loss of the control link). Ordered as [`Stimulator::disarm`].
+    pub fn lock_out<H: Hw>(&mut self, hw: &mut H) {
+        self.locked = true;
+        self.disarm(hw);
     }
 
     /// Output stage off but still armed (use when the pulse engine goes idle).
@@ -467,11 +482,14 @@ impl Stimulator {
     }
 
     /// One phase: close the bridge, measure the output while the width elapses, open the bridge.
-    /// Returns the last in-phase reading, `None` if the width had elapsed before the first
-    /// conversion could start (the loop was preempted across `settle_us`).
+    /// Returns the last reading of a conversion that completed inside the phase, `None` if none
+    /// did (the loop was preempted across `settle_us`, or the conversion was still running at the
+    /// end of the width).
     ///
-    /// Timing: the phase's clock starts before the bridge closes, so the measured length is never
-    /// shorter than the time the bridge was closed. The first conversion starts `settle_us` in;
+    /// Timing: the width is timed from after the bridge closed, so the bridge is closed for at
+    /// least the width whatever interrupts arrive around the closure; the overrun check times from
+    /// before it closed, so it is never shorter than the time the bridge was closed. The first
+    /// conversion starts `settle_us` in;
     /// later ones only while `sense_guard_us` of the width remains, so when the width allows one
     /// conversion plus the guard the end of the phase never waits for a conversion's interrupt:
     /// the bridge opens within one poll step of the width, plus whatever unrelated interrupts
@@ -489,13 +507,18 @@ impl Stimulator {
             let _ = hw.bridge(Bridge::Off);
             return Err(Fault::Hw(e));
         }
+        let closed = hw.fine_mark();
         let mut pending = false;
         let mut measured = None;
         let mut fail = None;
         loop {
+            // A result was collected in this pass: the next conversion starts after a poll step,
+            // so the loop reaches the end of the width however fast the converter is.
+            let mut collected = false;
             if pending {
                 if let Some(v) = hw.sense_poll() {
                     pending = false;
+                    collected = true;
                     measured = Some(v);
                     if let Err(f) = self.judge(v, level) {
                         fail = Some(f);
@@ -507,12 +530,13 @@ impl Stimulator {
                 fail = Some(Fault::Cancelled);
                 break;
             }
-            let elapsed = hw.fine_since_us(f0);
+            let elapsed = hw.fine_since_us(closed);
             if elapsed >= width {
                 break;
             }
             let remaining = width - elapsed;
             if !pending
+                && !collected
                 && elapsed >= self.cfg.settle_us
                 && (measured.is_none() || remaining >= self.cfg.sense_guard_us)
             {
@@ -523,18 +547,25 @@ impl Stimulator {
                 pending = true;
                 continue;
             }
-            hw.delay_us(self.cfg.poll_step_us.min(remaining));
+            // Before the first conversion, wait only up to `settle_us`: a delay can run long, and
+            // a conversion started a step late ends near the end of a short phase.
+            let mut wait = self.cfg.poll_step_us.min(remaining);
+            if measured.is_none() && !pending && elapsed < self.cfg.settle_us {
+                wait = wait.min(self.cfg.settle_us - elapsed);
+            }
+            hw.delay_us(wait);
         }
         let off = hw.bridge(Bridge::Off);
         let elapsed = hw.fine_since_us(f0) as u64;
-        // A conversion started inside the phase sampled the output there: wait for it and judge
-        // it, even after a fault (the next conversion must find the converter free).
+        // A conversion still running when the bridge opened may have sampled past the end of the
+        // phase, so it can read low: wait for it (the next conversion must find the converter
+        // free) and judge it for over-delivery only, which a partial sample cannot fake. It does
+        // not count as a measurement of the phase.
         if pending {
             match self.wait_for(hw, H::sense_poll) {
                 Ok(v) => {
-                    measured = Some(v);
-                    if fail.is_none() {
-                        fail = self.judge(v, level).err();
+                    if fail.is_none() && v > level as u16 + self.cfg.over_margin {
+                        fail = Some(Fault::Overdrive { measured: v, commanded: level });
                     }
                 }
                 Err(f) => fail = fail.or(Some(f)),

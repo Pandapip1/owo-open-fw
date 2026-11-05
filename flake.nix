@@ -28,10 +28,12 @@
         let
           # Cortex-M33 with FPU (thumbv8m.main-none-eabihf) is what zephyr-lang-rust picks
           # for the Series 2 boards; the soft-float target is listed for configs without FPU.
+          # native_sim (tests/native-sim) builds for the host's own bare-metal target.
           rustToolchain = pkgs.rust-bin.stable.latest.default.override {
             targets = [
               "thumbv8m.main-none-eabihf"
               "thumbv8m.main-none-eabi"
+              "${pkgs.stdenv.hostPlatform.parsed.cpu.name}-unknown-none"
             ];
             extensions = [
               "rust-src"

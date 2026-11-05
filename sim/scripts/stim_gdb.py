@@ -42,7 +42,7 @@ def apply(action):
     elif kind == "prep":
         r = ADAPTER["prep"]()
     elif kind == "radio_shutdown":
-        r = ADAPTER["radio_shutdown"]()
+        r = ADAPTER["radio_shutdown"](action.get("kind"))
     elif kind == "status":
         r = None
     elif kind == "eval":

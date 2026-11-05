@@ -16,7 +16,6 @@
 /dts-v1/;
 #include <silabs/xg22/bgm220pc22wga.dtsi>
 #include <zephyr/dt-bindings/gpio/gpio.h>
-#include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/regulator/silabs_dcdc.h>
 #include "owo_suit-pinctrl.dtsi"
 
@@ -31,7 +30,6 @@
 	};
 
 	aliases {
-		sw0 = &button0;
 		watchdog0 = &wdog0;
 	};
 
@@ -45,15 +43,6 @@
 		reg = <0x0fe0001c 12>;
 	};
 
-	buttons {
-		compatible = "gpio-keys";
-
-		/* Input with pull-up, both edges (stock board initialisation). */
-		button0: button_0 {
-			gpios = <&gpioc 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
-			zephyr,code = <INPUT_KEY_0>;
-		};
-	};
 };
 
 &cpu0 {
