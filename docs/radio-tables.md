@@ -8466,7 +8466,7 @@ TRNG (CRYPTOACC RNGCTRL):
 **5. RX FIFO overflow recovery [F].** Reproduced as in 7.80 (hardware scanner, the M33 halted 2 s):
 `FRC.IF.RXOF` (bit 8) latches with `BUFC.IF.BUF1OF`, RXDONE does not, the RAC holds RXOVERFLOW
 (STATUS 0x86400002); master's image stays there (3 of 4 runs: state 6 one second after resuming).
-The HAL now takes RXOF on FRC_IRQn: SWRXEN withdrawn, FORCEDISABLE until OFF/SHUTDOWN, released,
+A recovery (branch `sil-rxof`, not merged: see Open below) takes RXOF on FRC_IRQn: SWRXEN withdrawn, FORCEDISABLE until OFF/SHUTDOWN, released,
 BUFC channel 1 CLEARed, both flags dropped, and the receive completes as one that received nothing
 (the scanner's `isr_done()` re-arms); `radio_disable()` recovers too. On silicon, 6 halts and 2 runs with FRC.IEN cleared over SWD: back in
 RXSEARCH within 20 ms of resuming, reception continuing (1 143 frames in the next 3 s), recovery
@@ -8477,6 +8477,62 @@ from `bt_hci_core`, a bus fault in `net_buf_ref`), and in 6 of 18 boots across t
 builds with this change, one of them with RXOF masked so that the recovery never ran (its counters
 read 0); master's `radio.c` gave no crash in 15 boots (4 with halts). The cause is not found.
 
+**5a. The PA and the power range [F unless tagged].** The module (DEVINFO.MODULENAME read over
+SWD: "BGM220PC22HNA2") is an EFR32BG22 with its two integrated 2.4 GHz PAs, the "6 dBm" (RAIL
+HP, levels 0-127) and the "0 dBm" (LP, 0-15) one (`rail_chip_specific.h`, Series 2 config 2);
+nothing external. DEVINFO.MODULEINFO reads 0x00570100: PADCDC (bit 29) = 0, **PAVDD is fed from
+the DCDC output** (RM 6.4.2.25; module schematic, datasheet fig. 3.2: VREGSW, 2.2 uH, DVDD, RFVDD
+and PAVDD), and RF2G4_IO goes through the module's matching network to its built-in antenna
+behind the shield. Ratings (BGM220P datasheet rev 1.3): VDD absolute maximum 3.8 V, 200 mA total
+into VDD (table 4.1; no RF-pin or mismatch rating is given for the module); POUTMAX 8.2 dBm typ for
+the 8 dBm OPN, POUTMIN -27 dBm (6 dBm PA) and -28 dBm (0 dBm PA) (table 4.5); 10.6 mA TX at 8 dBm.
+RM 12.3.7: PAVDD >= RFVDD. EFR32BG22 SoC datasheet rev 1.3: any supply pin, PAVDD included,
+absolute maximum 3.8 V, PAVDD operating 1.71-3.8 V; RF2G4_IO input level +10 dBm maximum and
+-0.3 V to VPAVDD + 0.3 V (tables 4.1, 4.2); POUTMAX 6 dBm for the 6 dBm PA and 0 dBm for the 0 dBm
+PA, POUTMIN -27 and -28 dBm, specified with PAVDD 1.8 V from the DCDC (table 4.13), with note 3:
+the PA can deliver more than 6 dBm but characteristics and application circuits are specified at
+6 dBm, and above it harmonics may exceed regulatory limits. **Figure 4.9** plots the 6 dBm PA's
+output against RAIL power settings **0-127** (about -27 dBm at 0, 0 dBm near 16, about 8.5 dBm at
+127, flattening: under 0.1 dB per setting above about 100) and the 0 dBm PA's against 0-15 (about
+-29 to 0.5 dBm); its note adds that current rises above 6 dBm. The module is rated 8 dBm (BGM220P
+ordering table, its own certification) on this same PA, so levels 0-127 are the documented range
+for this OPN.
+- Lower: Silicon Labs' 0 dBm PA table bottoms at -28.7 dBm against the 6 dBm PA's -27.5 dBm at
+  level 0 (`sl_rail_util_pa_dbm_powersetting_mapping_table_{0,6}dbm.h`): 1.2 dB, and using it needs
+  the sequencer's PA start to enable the TX0DBM path, whose enable/bias sequence is in no open
+  source. Not done.
+- Higher: level 127 (RAMPLEV 0x9F, the reset value) is the top of the documented range and is
+  already the product's level. No other documented mode exists on this part (no 10/20 dBm PA;
+  `SL_RAIL_UTIL_PA_VOLTAGE_MV` describes the board's PA_VDD to pick a curve, it sets nothing).
+  RAMPLEV 0xA0-0xFF (the field is 8 bits) was **not tried**. Its voltage stress is bounded [I]:
+  PAVDD stays at the DCDC's 1.8 V whatever the level, the same PA is rated for PAVDD up to 3.8 V,
+  and the RF pin's own limit is PAVDD + 0.3 V, so no ramp level can raise the supply the PA sees.
+  But Figure 4.9 shows the output already saturating at 127 (a few tenths of a dB at most to
+  gain), the map from ramp level to PA slices is undocumented, and the one thing a higher level
+  could raise, the PA's current, cannot be watched without an ammeter in series with the kit's VDD
+  (the explorer kit has no current sensing). Little to gain, not observable: not worth the risk.
+  RAMPLEV below 0x20 (below level 0) is undocumented too, and would gain nothing documented over
+  level 0's -27 dBm. Not tried.
+- Within range: the sweep image (`scratch/sil-batch/pwr-sweep`) selected levels 0, 1, 2, 3, 4, 5,
+  8, 14, 26 and 121 as requested (RAMPLEV read back each step), advertising non-connectable on
+  channels 37-39, 4 s per level, 3 cycles. Laptop RSSI (BlueZ 5.87 `bluetoothctl`, duplicate data
+  on, kit on the desk about 1 m away; a sanity check only, not a power measurement), mean (n):
+
+  | PA level | 0 | 1 | 2 | 3 | 4 | 5 | 8 | 14 | 26 | 121 | 127 (reset, no TX_POWER) |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | published dBm | -27.5 | -21.2 | -16.0 | -12.7 | -10.4 | -8.6 | -4.8 | -0.6 | 3.4 | 8.5 | - |
+  | RSSI dBm | -82.6 (5) | -74.9 (11) | -68.2 (4) | -66.5 (8) | -63.1 (11) | -60.6 (5) | -59.8 (12) | -53.8 (5) | -49.7 (7) | -42.8 (13) | -43.3 (30) |
+
+  Monotonic from 0 to 121 within the 2-5 dB scatter; 39.8 dB from level 0 to 121 against the
+  table's 36.0; 127 is indistinguishable from 121, as Figure 4.9's saturation predicts. The lowest
+  documented level is still received about 10 dB above the laptop's weakest reports (-93 dBm) at
+  this range: the usable range is the documented one, -27.5 to about 8.5 dBm.
+- Out-of-range levels in firmware: none added, as none was tried. Should one be justified later
+  (an ammeter on VDD and an SDR or meter on the output), it belongs behind its own Kconfig option,
+  default n, depending on `EFR32_RADIO_TX_POWER`, with help text stating the risk and this
+  evidence, and refused for the product the way amateur operation is (a FATAL_ERROR in the
+  top-level CMakeLists.txt).
+
 **6. §7.84 items.**
 - *Frame-detect PRS signal [F]*: MODEML is PRS source **0x2A** (`efr32bg22_prs_signals.h`); 7.84
   used 0x2D, which is FRC. MODEML.FRAMEDET = signal 7, captured as a pulse or a level by TIMER1:
@@ -8484,11 +8540,15 @@ read 0); master's `radio.c` gave no crash in 15 boots (4 with halts). The cause 
   cluster is 42-octet ADV_INDs, 336 us of header, payload and CRC): it marks the access address.
   `prs.tcl` carries the corrected table.
 - *Close/abort budget [F, from failures]*: master's hardware scanner (`radio-rx-port`
-  `prj-hardware.conf`) safe-shut down in 7 of 11 boots of 40-45 s (and in some of this change's): `deadline late start: ull worker
+  `prj-hardware.conf`) safe-shut down in 7 of 11 boots of 40-45 s: `deadline late start: ull worker
   context`, released while `efr32_radio_completion_job` ran; the completion event started 41.8 us
   after that release and the ULL worker only 1 226-1 319 us after it, so the completion ran at least
-  1.18-1.28 ms (n = 7) against the 241.7 us close budget: 7.80's wait for an abandoned frame. Not
-  fixed here.
+  1.18-1.28 ms (n = 7) against the 241.7 us close budget: 7.80's wait for an abandoned frame.
+  **Fixed**: `radio_disable()` now ends an RXFRAME the RXDIS leaves running with a FORCEDISABLE
+  pulse (set, wait for OFF/SHUTDOWN, release; the abandoned frame never reaches BUFC, 7.80), so
+  the next launch finds the RAC idle. Silicon: 10 of 10 boots of 45 s clean (7 197-7 716 frames
+  each), tests/tx-power-port 43/43. A connection event closing on a frame in reception takes the
+  same path; not exercised on silicon here.
 - Not done in this batch: the 2M PHY connection with the laptop, the laptop's 21.5 us early
   arrival, data channels 11-21.
 

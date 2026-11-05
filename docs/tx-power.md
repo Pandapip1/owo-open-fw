@@ -135,7 +135,9 @@ every transmission used level 127.
    with the kit at a fixed distance and a fixed SDR gain (relative) or into a power meter or
    spectrum analyzer through a coupler or the kit's RF test point if fitted (absolute). Pass:
    monotonic in the level, and within the datasheet's tolerance of the published figure at
-   least at 0 dBm and the top. Repeat on the suit (BGM220PC22WGA, its supply).
+   least at 0 dBm and the top. Repeat on the suit (BGM220PC22WGA, its supply). Relative sanity
+   check done [F, 7.89]: laptop RSSI monotonic over levels 0-121 (-82.6 to -42.8 dBm, 39.8 dB
+   against the table's 36.0), 127 equal to 121; the absolute figures still need an instrument.
 3. **Ramp**: with RAMPCTRL at its reset rates, the PA's ramp-up and ramp-down at low and high
    levels (SDR envelope around TXEN and TXPD) and the MODEM.SEQIF.TXRAMPDONE time against the
    sequencer's bounded wait (radio_seq.S `efr32_seq_pa_stop`); the transmit spectrum mask
