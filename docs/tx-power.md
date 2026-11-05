@@ -6,8 +6,9 @@ level, its highest; that is the OWO product's configuration and its images are b
 with and without this code (section 6).
 
 Evidence tags as in docs/radio-tables.md: [F] found in a public source or measured, [I] inferred,
-[U] unknown. No figure in this document was measured on silicon: there was no hardware for this
-work. Section 5 lists the measurements.
+[U] unknown. No output power in this document was measured: no RF instrument was used. The
+register readbacks and ramp times of section 5 were measured on silicon (docs/radio-tables.md
+7.89); section 5 lists what remains.
 
 ## 1. What the controller gets
 
@@ -127,9 +128,9 @@ every transmission used level 127.
 
 ## 5. Measurements needed (silicon, SDR or power meter)
 
-1. **RAMPLEV on silicon**: read MODEM.RAMPLEV (0xB80140CC) with the debugger after reset
-   (expected 0x009F9F9F) and during advertising with `tests/tx-power-port` on the explorer kit
-   (expected the section 3 field for the role's level).
+1. **RAMPLEV on silicon** [F, done]: 0x009F9F9F after a system reset, and the section 3 field for
+   each role's level and ceiling while `tests/tx-power-port` (`prj-hardware.conf`) runs on the
+   explorer kit, 43/43 (docs/radio-tables.md 7.89).
 2. **Output power per level**: each level of section 3 and level 127, advertising on channel 38
    with the kit at a fixed distance and a fixed SDR gain (relative) or into a power meter or
    spectrum analyzer through a coupler or the kit's RF test point if fitted (absolute). Pass:
@@ -138,9 +139,14 @@ every transmission used level 127.
 3. **Ramp**: with RAMPCTRL at its reset rates, the PA's ramp-up and ramp-down at low and high
    levels (SDR envelope around TXEN and TXPD) and the MODEM.SEQIF.TXRAMPDONE time against the
    sequencer's bounded wait (radio_seq.S `efr32_seq_pa_stop`); the transmit spectrum mask
-   (Core Vol 6 Part A 3.2.2) at the highest level.
+   (Core Vol 6 Part A 3.2.2) at the highest level. Measured without RF [F, 7.89]: TXRAMPDONE
+   after PARAMP clear about 24 ns per RAMPLEV step (1.17 us at 0x3A, 3.46 us at 0x99), far
+   inside the bounded wait; the frame does not wait for the ramp-up (TX to SYNCSENT 40.6-40.7 us
+   at every level). The envelope and the mask still need an SDR.
 4. **OOK**: the Morse identification's key-down power at a ceiling of 0 dBm and at no ceiling,
-   to see whether RAMPLEV sets it; if not, APC.AMPCONTROLLIMITSW per section 2.
+   to see whether RAMPLEV sets it; if not, APC.AMPCONTROLLIMITSW per section 2. Register
+   readback [F, 7.89]: during the identification RAMPLEV holds the ceiling's level and APC reads
+   0xFF000000 (ENAPCSW clear); the output itself is unmeasured.
 5. **Reported against measured**: the HCI LE Read Transmit Power range and every selected level
    against item 2; replace "published" by "measured" in section 3 where they agree.
 

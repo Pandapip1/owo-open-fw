@@ -8368,3 +8368,128 @@ format string, a header-only rewrite).
 
 **QEMU dual run** (`dual.sh`, icount shift 3): fixed images 455.5 s virtual, 0 misses (8 crossings
 of TIMER0 = 2^31, logical 2^31, 2^32 and 2^32 + 2^31 all passed); unfixed images 451.4 s, 0.
+
+### 7.89 A silicon batch: multi-part CMAC, transmit power registers, IADC and TRNG timing, RX FIFO overflow, frame detect
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548), HFRCODPLL 76.8 MHz. Every
+transmission was on a standard Bluetooth carrier at the kit's normal levels; the on-off keyed
+identifications were on 2402 MHz only (below). Tooling and logs: `scratch/sil-batch/` of the
+worktree (`hw.sh`, `run.sh`, `txwatch.tcl`, `prs.tcl`, `ovf.sh`, `stab.sh`, `fit-iadc.awk`,
+`cmp.awk`, `ramp-probe.patch`). Timebase: the M33 DWT, calibrated in `tests/periph-timing-port`
+against the system timer on the LFXO over 65536 LFXO cycles: 76 791 476-76 791 496 Hz (nominal
+76.8 MHz, -110 ppm); TIMER1 on EM01GRPACLK (HFRCODPLL, `EM01GRPACLKCTRL` 1) for PRS captures; the
+M0+ SysTick at HCLKRADIO 38.4 MHz.
+
+**1. `tests/crypto-port` [F].** RADIOAES PSA build: **330/330 pass** (`crypto_results` over SWD:
+magic 0xC0FFEE01, pass 0x14A, fail 0), the 134 multi-part CMAC checks of 2fb0973 included; software
+PSA build (`prj-software.conf`) 330/330. New timed operations, n = 64, DWT cycles (us):
+
+| operation | RADIOAES PSA | software PSA |
+|---|---|---|
+| multi-part CMAC, 65 octets in 3 updates (import, setup, updates, finish, destroy) | 9 564-9 586 (124.5-124.8) | 32 352-36 365 (421-473) |
+| multi-part CMAC, 256 octets in 16-octet updates | 16 891-16 894 (219.9-220.0) | 61 751-65 976 (804-859) |
+
+The other figures repeat docs/crypto.md 4 within a few cycles (ECB 437-475, CCM 27 octets
+1 195-1 212, P-256 key generation 27 060 001 cycles); one PSA CCM call reached 7 893 cycles with a
+system-timer interrupt in it (the PSA calls run with interrupts enabled).
+
+**2. Transmit power registers [F]** (`tests/tx-power-port` with the new `prj-hardware.conf`, the
+explorer kit overlay, and an amateur plan with every channel on 2402 MHz, so the Morse
+identifications are sent there: 43/43 on silicon and in QEMU).
+- `MODEM.RAMPLEV` reads **0x9F9F9F** after a system reset, before the first event (the test's own
+  check and the SWD sampler). Each phase then reads the level of docs/tx-power.md 3: 0x3A3A3A
+  (+4 dBm), 0x242424, 0x202020, 0x2E2E2E under the 0 dBm ceiling, 0x202020 under -27 dBm, 0x999999
+  (+9 dBm). `RAMPCTRL` stays 0x555; its RAMPVAL field read 0 in every sample, in TX too.
+- **On-off keying**: during both identifications (`MODEM.CTRL0.MODFORMAT` 6, RAC in TX, SYNTH.FREQ
+  0x01F46AAB = 2402 MHz) `RAMPLEV` held the ceiling's level (0x2E2E2E, then 0x202020) and `RAC.APC`
+  read 0xFF000000 (ENAPCSW clear, AMPCONTROLLIMITSW 0xFF): the sequencer's PA start sets ENAPCSW and
+  clears it again once PARAMP is set, so the key-down power is set by the ramp level and not by APC.
+  Whether the PA's output follows RAMPLEV under OOK (stock uses APC for it, docs/tx-power.md 2) needs
+  an RF measurement [U].
+- **Ramp** (`ramp-probe.patch`, measurement build only: SysTick at PARAMP set/clear and at
+  `MODEM.SEQIF.TXRAMPDONE`, n = 43 transmissions): ramp-down from PARAMP clear to TXRAMPDONE is
+  below the probe's 0.89 us floor at levels 0x20-0x2E, 45 counts (1.17 us) at 0x3A and 133 counts
+  (3.46 us) at 0x99: about 24 ns per RAMPLEV step, so about 4 us at the reset level 0x9F, far inside
+  the sequencer's bounded wait. TXRAMPDONE already reads 1 at the first poll after PARAMP is set in
+  TXWARM, at every level, and the frame does not wait for a ramp: PRS RACL.TX rise to MODEMH.SYNCSENT
+  is 40.61-40.72 us at every level (n = 55, 3119-3127 TIMER1 ticks), the preamble and access address
+  plus 0.6 us. Ramp-up timing is therefore not observable this way.
+- Not done: relative output per level from the laptop's RSSI (no image holds a level long enough
+  for BlueZ's reports); output power, ramp shape and the spectrum mask need an SDR or meter.
+
+**3. A defect found on the way: the CW identification overran its slot [F].** In this image the
+closing identification shut the radio down every time (`deadline unsat: efr32_amateur_id_event ...
+5.3 us past the deadline`): its slot and frame timer reserved the Morse frame's nominal air time,
+4320 ms, but on silicon first TXEN to the end of its completion is **4327.26 ms** (ID probe, 10
+identifications, spread under 2 us; QEMU 4320.36 ms), so the frame timer (slot + 1.87 ms of event
+overheads) expired 5.6 ms before the completion, counted the frame as cut and posted a retry with a
+zero start-by. The data identification's span had hidden it. `EFR32_RADIO_AMATEUR_CW_TAIL_NS`
+(silicon 7 261 000, QEMU 363 000) now adds the measured tail to the CW part's span; where the 7 ms
+lie (TX ready, the modem's end of an OOK frame at 200 Bd, the completion) is not yet split, and the
+QEMU model's OOK frame end is 6.9 ms shorter than silicon's.
+
+**4. IADC and TRNG timing (`tests/periph-timing-port`) [F]**, the same image in QEMU for
+comparison (`cmp.awk`). Each figure is a command write to a status poll (poll period 0.27 us), 32
+conversions with the start dithered over 211 CPU cycles, or 8 TRNG fills.
+
+IADC, CLK_CMU_ADC = EM01GRPACLK 76.8 MHz:
+- Warm-up: five TIMEBASE intervals from power-down (NORMAL, every request: 8.37 us total at TIMEBASE
+  38, 13.48 us at 77), one from standby (4.32 us), and again after EN is set; the RM's formula holds
+  within 0.36 us. STATUS.ADCWARM rises 0.55-0.7 us after the five intervals.
+- A conversion: the OSR slope is exactly 4 ADC_CLK per OSR step (OSR 2-64 at 9.6 MHz: 3.11, 3.84,
+  5.68, 8.96, 15.52, 29.00 us), but a request's first result comes later than (4 OSR + 2) ADC_CLK:
+  a fit over 15 configurations (ADC_CLK 2.4-9.6 MHz, CLK_SRC_ADC 19.2-38.4 MHz, OSR 2-64) gives
+  **(4 OSR + 2 + 9) ADC_CLK + 18 CLK_SRC_ADC + 0.71 us**, residual within 0.18 us (the 0.71 us
+  includes the measuring loop). A scan's first entry takes 7 ADC_CLK more; later entries follow about
+  (4 OSR + 2) ADC_CLK apart. Changing the input between conversions costs nothing measurable (the
+  model's 2-cycle switch cost is gone).
+- The product's read path (Zephyr's driver, the sense channel of `boards/owo_suit_hw.overlay`:
+  NORMAL, TIMEBASE 76, 9.6 MHz, OSR 2): `adc_read_async()` to its callback **24.5-24.8 us** (QEMU
+  21.5: the model's CPU), `adc_read()` 42.8-53.1 us.
+
+TRNG (CRYPTOACC RNGCTRL):
+- After a system reset the TRNG is already running when `main()` starts, RNGCTRL 0x00040671 (ENABLE
+  and five interrupt enables) and INITWAITVAL 0x200, although nothing in the image writes it (the
+  boot ROM is the likely writer [I]); the RM's reset values are 0x00040000 and 0xFFFF.
+- The rings are sampled at **HCLK** / (CLKDIV + 1), not PCLK (PCLK is HCLK / 2 here); INITWAITVAL
+  counts HCLK cycles (16 to 16384: 13.0 ns per count). After the wait the NIST start-up test takes
+  512 samples (BYPNIST skips it) and the first block 512 samples whatever NB128BITBLOCKS; its first
+  word is in the FIFO 1.41 us later (NB 1 and 8 come up to 1.0 us earlier). Later blocks take
+  NB128BITBLOCKS x 128 samples + 0.55 us (0.13 us at CLKDIV 1 and 3, 0.95 us at NB 1). A block's four
+  words reach FIFOLEVEL over 1.0-2.1 us. Default settings from ENABLE: first word 21.8 us, FIFO full
+  (64 words) 130.0 us.
+- QEMU (vendor/qemu): the model now follows all of this; against silicon it is within 0.43 us over
+  50 IADC configurations except a 32-times oversampled scan's second entry (0.8 us), and within
+  0.27 us for TRNG fills with INITWAITVAL set (CLKDIV 1: 6.4 us late over a fill). It keeps the RM's
+  reset values for the TRNG, not the post-ROM state.
+
+**5. RX FIFO overflow recovery [F].** Reproduced as in 7.80 (hardware scanner, the M33 halted 2 s):
+`FRC.IF.RXOF` (bit 8) latches with `BUFC.IF.BUF1OF`, RXDONE does not, the RAC holds RXOVERFLOW
+(STATUS 0x86400002); master's image stays there (3 of 4 runs: state 6 one second after resuming).
+The HAL now takes RXOF on FRC_IRQn: SWRXEN withdrawn, FORCEDISABLE until OFF/SHUTDOWN, released,
+BUFC channel 1 CLEARed, both flags dropped, and the receive completes as one that received nothing
+(the scanner's `isr_done()` re-arms); `radio_disable()` recovers too. On silicon, 6 halts and 2 runs with FRC.IEN cleared over SWD: back in
+RXSEARCH within 20 ms of resuming, reception continuing (1 143 frames in the next 3 s), recovery
+**6.8-7.0 us** (227-236 cycles of the 33.55 MHz scheduler clock). QEMU raises RXOF too (qtest
+released-rx-fifo-overflow).
+Open: with the rebased tree the hardware scanner crashed in 2 of 6 halt runs ("Invalid buf type"
+from `bt_hci_core`, a bus fault in `net_buf_ref`), and in 6 of 18 boots across three
+builds with this change, one of them with RXOF masked so that the recovery never ran (its counters
+read 0); master's `radio.c` gave no crash in 15 boots (4 with halts). The cause is not found.
+
+**6. §7.84 items.**
+- *Frame-detect PRS signal [F]*: MODEML is PRS source **0x2A** (`efr32bg22_prs_signals.h`); 7.84
+  used 0x2D, which is FRC. MODEML.FRAMEDET = signal 7, captured as a pulse or a level by TIMER1:
+  RACL.RX rise to FRAMEDET 42-720 us, FRAMEDET to MODEMH.EOF 80-360 us (n = 893; the 320-360 us
+  cluster is 42-octet ADV_INDs, 336 us of header, payload and CRC): it marks the access address.
+  `prs.tcl` carries the corrected table.
+- *Close/abort budget [F, from failures]*: master's hardware scanner (`radio-rx-port`
+  `prj-hardware.conf`) safe-shut down in 7 of 11 boots of 40-45 s (and in some of this change's): `deadline late start: ull worker
+  context`, released while `efr32_radio_completion_job` ran; the completion event started 41.8 us
+  after that release and the ULL worker only 1 226-1 319 us after it, so the completion ran at least
+  1.18-1.28 ms (n = 7) against the 241.7 us close budget: 7.80's wait for an abandoned frame. Not
+  fixed here.
+- Not done in this batch: the 2M PHY connection with the laptop, the laptop's 21.5 us early
+  arrival, data channels 11-21.
+
+**7. BLE-ASI reception gap (7.85).** Not investigated in this batch.

@@ -229,8 +229,9 @@ vendor/qemu branch `agent/model-gaps`, one commit per area:
    `rf/wdog-resets-one-soc`.
 4. **CRYPTOACC TRNG** (RM SS11.5): registers, 64-word FIFO popped by reads,
    FIFOFULLOFF/FORCERUN, SOFTRESET; CLKEN1.CRYPTOACC gating; host entropy
-   (reproducible under `-seed`); fill timing from the RM's sample clock and
-   NIST start-up test [I].  qtest `trng-fifo`.
+   (reproducible under `-seed`); fill timing measured on silicon (HCLK sample clock,
+   start-up and block times, radio-tables.md 7.89) [F]; the post-ROM reset state (RNGCTRL
+   0x00040671, INITWAITVAL 0x200) is not modelled.  qtest `trng-fifo`.
 5. **GPCRC** (RM ch. 14): the LSB-first engine, fixed CRC-32 and
    programmable reversed 16-bit POLY, byte/half-word/word input, BYTEMODE,
    BYTEREVERSE, BITREVERSE, DATA/DATAREV/DATABYTEREV, INIT/AUTOINIT,
@@ -238,7 +239,7 @@ vendor/qemu branch `agent/model-gaps`, one commit per area:
    0xCBF43926, CRC-16/CCITT-FALSE 0x29B1, KERMIT 0x2189).
 6. **Structural interconnect** (B71, B75-B79; `hw/arm/efr32-interconnect.c`):
    see the calibration below.
-7. **IADC timing** (B115, C70): RM SS24.3 warm-up and conversion time [I].
+7. **IADC timing** (B115, C70): RM SS24.3 warm-up and conversion time, measured on silicon and fitted (radio-tables.md 7.89) [F].
    Sense-sampler timing changes: a conversion now completes 5 TIMEBASE
    intervals + ((4 OSR)+2) ADC_CLK cycles after the trigger (NORMAL warm-up
    mode), not at the command; anything depending on sense timing (the
@@ -644,7 +645,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B112 | MSC programming (WREN, ADDRB/INVADDR, ERASEPAGE, WDATA clears bits, PAGELOCK, MSC_LOCK) | §7.78 RM | yes | efr32_msc_* (~4732) | Erase/write durations and read stall [U] |
 | B113 | RTCC counts at RTCCCLKCTRL/CNTPRESC, writes immediate, IF.CCn when CNT becomes OCVALUE [I] | §7.78 RM/[I] | yes | efr32_rtcc_* (~3688); T: rtcc-counts-and-compares | Edge timing unmeasured |
 | B114 | EMU.RSTCAUSE: POR after power-up, SYSREQ on AIRCR.SYSRESETREQ, kept until RSTCAUSECLR | §7.78 RM/[I] | yes | T: emu-rstcause | - |
-| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK [I]; T: iadc-single-conversion | silicon timing unmeasured (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
+| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK plus the measured first-result latency [F, 7.89]; T: iadc-single-conversion | silicon timing unmeasured (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
 | B116 | Unidentified SEQRAM 0x4000 user (reads 0xe5ecc0de, 0x01010201, 0xaabbccdd) | §7.72 silicon | no | - | Owner unknown; nothing to model yet |
 | B117 | CMU gates RDMAILBOX/RDSCRATCHPAD/PRORTC/SYSCFG stop the stock M0+ lockups (§7.59 via §7.70) | §7.70 silicon (mechanism unknown) | partial | gate map B40 now covers them | Which access faulted for stock not identified |
 

@@ -89,8 +89,9 @@ unaligned buffers ending at a buffer's end. AES-256 CMAC (NIST SP 800-38B D.3, e
 directly and multi-part. Multi-part CMAC through PSA: D.1 with AES-128 and D.3 with AES-256, each message
 fed in pieces of 1, 7, 15, 16, 17, 33 and 80 octets, verify with the right and a corrupted MAC;
 D.2-D.6 in 5-octet pieces, full and truncated to 8 octets; abort and reuse of an operation.
-Silicon: 196/196 pass [F] (the tests before multi-part CMAC; the 134 added checks still need a
-silicon run); QEMU 330/330 [Q] with RADIOAES and 330/330 with `prj-software.conf`
+Silicon: 330/330 pass [F] with RADIOAES and 330/330 with `prj-software.conf` (docs/radio-tables.md
+7.89; multi-part CMAC through PSA, import to destroy: 65 octets in 3 updates 124.5 us, 256 octets in
+16-octet updates 220.0 us, software 421 and 804 us); QEMU 330/330 [Q] with RADIOAES and 330/330 with `prj-software.conf`
 (TF-PSA-Crypto's software CMAC). The GATT database hash of `tests/gatt-peripheral-port` (built
 with `-DCONFIG_BT_GATT_CACHING=y -DCONFIG_PSA_CRYPTO=y`) is the same with the driver and with
 software PSA [Q]: `58bc5cbe d75434ed 2837f9b0 f00edde5`.
@@ -165,7 +166,6 @@ to a turnaround that has about 100 us.
 
 ## 7. Open
 
-* Silicon run of `tests/crypto-port` with the multi-part CMAC and AES-256 CMAC checks.
 * P-256 on the BA414EP needs its operation codes and memory map, which are not public.
 * `tests/radio-port/prj-hardware.conf` still reserves a 3504-byte libc arena for PSA CMAC; it is
   no longer needed, but changing the stage-3 hardware image wants a silicon run.
