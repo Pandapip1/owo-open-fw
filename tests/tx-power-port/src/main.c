@@ -40,6 +40,23 @@
 
 #define HANDLE_TYPE_UNKNOWN 0x05U
 
+/*
+ * The amateur plan: every channel on channel 37's carrier (Core v6.1 Vol 6 Part B 1.4.1:
+ * 2402 MHz), so the test, run on silicon too, sends its frames and its on-off keyed
+ * identifications only there.
+ */
+#define CH37_KHZ 2402000U
+
+static const uint32_t *ch37_plan(void)
+{
+	static uint32_t plan[EFR32_AMATEUR_PLAN_CHANNELS];
+
+	for (uint32_t ch = 0U; ch < EFR32_AMATEUR_PLAN_CHANNELS; ch++) {
+		plan[ch] = CH37_KHZ;
+	}
+	return plan;
+}
+
 static int checks;
 static int failures;
 
@@ -139,7 +156,8 @@ int main(void)
 {
 	static const struct bt_le_adv_param adv_param = BT_LE_ADV_PARAM_INIT(
 		0, BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
-	struct efr32_amateur_config amateur = { .callsign = "KD3APL" };
+	struct efr32_amateur_config amateur = { .callsign = "KD3APL",
+						.plan_khz = ch37_plan() };
 	int8_t min = 0;
 	int8_t max = 0;
 	int8_t dbm = 0;
@@ -219,6 +237,20 @@ int main(void)
 	ramplev = sys_read32(MODEM_RAMPLEV);
 	report_ramplev("identification", ramplev);
 	CHECK(ramplev == RAMPLEV(LEVEL_ZERO));
+
+	/* Again at the lowest ceiling: the advertiser and the identification at level 0. */
+	CHECK(efr32_amateur_tx_power_set(-27) == -27);
+	CHECK(efr32_amateur_enable(&amateur) == 0);
+	CHECK(bt_le_adv_start(&adv_param, NULL, 0, NULL, 0) == 0);
+	ramplev = ramplev_after_events();
+	report_ramplev("amateur -10 dBm, ceiling -27 dBm", ramplev);
+	CHECK(ramplev == RAMPLEV(LEVEL_LOWEST));
+	CHECK(bt_le_adv_stop() == 0);
+	CHECK(efr32_amateur_disable() == 0);
+	CHECK(efr32_amateur_id_count() == 2U);
+	ramplev = sys_read32(MODEM_RAMPLEV);
+	report_ramplev("identification, ceiling -27 dBm", ramplev);
+	CHECK(ramplev == RAMPLEV(LEVEL_LOWEST));
 
 	/* Part 15 again: no ceiling. */
 	CHECK(vs_write(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0U, 9, &dbm) == 0 && dbm == 9);
