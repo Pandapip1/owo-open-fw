@@ -4684,6 +4684,23 @@ void radio_disable(void)
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_RXDIS;
 	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CMD_OFFSET) = EFR32_RAC_CMD_TXDIS;
 	/*
+	 * RXDIS does not end RXFRAME: the RAC finishes the frame first, up to its full air time,
+	 * and the next launch would wait for it (docs/radio-tables.md 7.80, 7.89). FORCEDISABLE
+	 * ends it at once and the abandoned frame never reaches BUFC.
+	 */
+	if (((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
+	      EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
+	    EFR32_RAC_STATE_RXFRAME) {
+		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
+			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+		while (!radio_is_idle()) {
+		}
+		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
+		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
+			     EFR32_FRC_IF_OFFSET) = EFR32_FRC_IF_COMPLETION;
+	}
+	/*
 	 * OpenISA relies on radio_disable() to enter the installed abort/cleanup
 	 * callback.  FRC has no disable-complete latch, so pend its already-owned
 	 * IRQ as a software event and make isr_radio() distinguish it from a PDU
