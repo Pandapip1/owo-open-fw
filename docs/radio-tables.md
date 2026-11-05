@@ -8123,3 +8123,184 @@ output stage's interrupts): only its QEMU figures exist; the silicon figures are
 image's. The configuration as committed was run in QEMU at the tighter sizes of the first pass
 (long work queue 768, TX launch 464: (a) 510 rounds and 52 stimulation cycles, (b) 23
 scenarios, no fault); the silicon figures then raised those two.
+### 7.87 Scanner and initiator replies staged: SCAN_REQ and CONNECT_IND at T_IFS without the M33
+
+Tags as in 7.79 ([Q] QEMU, `build/qemu-new`, per-core clocks; [S] Core v6.1; [D] derived here;
+nothing here is measured on silicon: no hardware was available). Code: `sequencer/radio_seq.S`
+(`efr32_seq_conn_decide`'s SCAN branch, `efr32_seq_scan_match`, `efr32_seq_rx_addr_eq`,
+`efr32_seq_init_in_slot`, `efr32_seq_umod`), `include/hal/efr32/seq_abi.h` (`EFR32_SEQ_CONN_SCAN`
+and the words after it), `hal/radio.c` (`efr32_radio_scan_stage()`, the commit check, the
+completion windows), `include/hal/efr32/radio_conn.h`, `include/hal/efr32/ll_deadlines.h` (SCAN_REQ
+and CONNECT_IND air times, `EFR32_DL_CONNECT_IND_WIN_OFFSET`, `efr32_dl_rx_staged_start_by()`,
+`efr32_dl_init_*`), `lll/lll_scan_stage.c` (built into the derived `lll_scan.c`), `CMakeLists.txt`
+(the lll_scan.c hooks), `Kconfig` (three new figures). No kernel or QEMU change. Tooling and logs:
+`scratch/stage-scan/` of the worktree (build.sh, buildall.sh, dual.sh, ktest.sh, qt.sh, *.sum).
+
+**The problem.** 7.82 staged the advertiser's scan response and every connection-event reply;
+the scanner's SCAN_REQ (active scanning) and the initiator's CONNECT_IND were still decided by
+the M33 at the advertisement's end, in a completion whose RESPOND deadline is about 80 us after the
+frame. Device under test with silicon figures in QEMU (`EFR32_RADIO_TIMING_SILICON`, admission on,
+the safe-shutdown policy), before this change [Q]:
+- active scanner (+ the hardware-configuration advertiser): `deadline unsat:
+  efr32_radio_completion_event ... deadline 50693 ns from the check, demand ahead of it 58114 ns`
+  at its 33rd SCAN_REQ, safe shutdown;
+- Central (+ Peripheral): `deadline unsat: efr32_radio_completion_event ... deadline 86963 ns
+  from the check, demand ahead of it 58114 ns, running at release: efr32_lll_thread`, 1.03 s after
+  boot: the CONNECT_IND's completion was released while the LLL context ran a prepare, which,
+  cooperative at the same priority, finishes first (the report's "ahead" omits it, the simulation
+  does not). After the safe shutdown the host's next command took an LL_ASSERT in `ull_scan.c`
+  `disable()` (a stopped controller asked to stop scanning): not changed here.
+- The initiator's first anchor could not be met at all: OpenISA sends WinOffset 0 without
+  `BT_CTLR_SCHED_ADVANCED` (which this module does not support), so the first connection event's
+  ticker expiry fell before the advertisement had even ended (below): the Central's "one miss in
+  every connection run" of 7.82.
+
+**What the sequencer decides, and from what [S].** Everything `isr_rx_pdu()` (`lll_scan.c`) decides
+from is either in the received frame or fixed for the receive, except address resolution:
+- *Active scanner*: answer an ADV_IND or ADV_SCAN_IND (Vol 6 Part B 2.3.1.1, 2.3.1.4: AdvA and 0-31
+  octets of AdvData, so length 6-37) with a good CRC by a SCAN_REQ (2.3.2.1: ScanA, AdvA) whose RxAdd
+  is the frame's TxAdd and whose AdvA is the frame's (2.3, 4.4.3.2). The sequencer writes the
+  staged SCAN_REQ into the BUFC TX FIFO with those two fields from the RX FIFO, and arms the
+  SCAN_RSP receive itself (SWRXEN, decision word STAGED) as after a connection reply.
+- *Initiator*: answer, by a CONNECT_IND (2.3.3.1), an ADV_IND from the advertiser it initiates to
+  (AdvA and TxAdd equal to the staged ones, 4.4.4), or an ADV_DIRECT_IND (2.3.1.2, length 12) from
+  it whose TargetA is our InitA with RxAdd our address type or, with the extended filter policy,
+  any resolvable private TargetA (RxAdd 1, top bits 0b01, 1.3.2.2). The CONNECT_IND does not depend
+  on the frame: its AdvA and RxAdd equal the staged advertiser's by the match, every other field
+  is the initiator's. `isr_rx_pdu()`'s own scheduling rule (no CONNECT_IND for a frame ending later
+  than the scan slot less T_IFS, the CONNECT_IND, EVENT_OVERHEAD_START_US and
+  EVENT_TICKER_RES_MARGIN_US after the event timer's start, modulo the scan interval when scanning
+  continuously) is checked on TIMER0: the frame's end is TIMER0 at the decision less RAC.STIMER
+  (counting from RX2TX's start) and the RXFRAME exit, converted with the TIMER0 rate the M33 maps
+  from the scheduler clock; the remainder by shift and subtract.
+- *Both*: an RX buffer must be free for the report or the connection node.
+
+| rule | where | why |
+|---|---|---|
+| CRC, PDU type, length (AdvA present) | sequencer | in the frame |
+| initiator: AdvA and TxAdd are the target's, directed TargetA and RxAdd | sequencer, against staged addresses | in the frame; the target is fixed while initiating |
+| initiator: the CONNECT_IND fits the scan slot | sequencer, on TIMER0 | frame timing; `isr_rx_pdu()` follows the sequencer's verdict (`efr32_scan_declined()`): its own estimate of the frame's end differs by the two cores' timer reads |
+| an RX buffer is free | staged when the receive is set up | only the LLL takes buffers, so one free then is free at the commit; the commit follows the staged answer |
+| own address and type, WinOffset, interval, channel map, ... | staged, built as `isr_rx_pdu()` builds them (over its scratch PDU's header) | fixed for the receive |
+| filter accept list in the filter policy | no turnaround armed | this HAL has no matcher (`radio_filter_has_match()` is 0): no frame passes `isr_rx_scan_check()`, the window is a passive one |
+| resolving list: a target identity the list requires to resolve (`ull_filter_lll_rl_addr_allowed()`) | staged (no turnaround when not allowed) | fixed while initiating |
+| address resolution enabled (`ull_filter_lll_rl_enabled()`) | M33 at the frame's end, as before | matching an RPA is AES over every peer IRK: not within T_IFS on the M0+; infeasible on silicon by analysis (7.82, 7.84) |
+
+The HCI keeps the staged facts valid: the filter accept list, the resolving list and address
+resolution cannot change while scanning or initiating uses them (Vol 4 Part E 7.8.16, 7.8.38,
+7.8.44). The commit (`isr_rx()` unchanged but for two hooks) re-derives the same answer; the HAL
+asserts that the PDU it commits is the one sent (the SCAN_REQ against the staged one with the
+frame's RxAdd and AdvA from the RX FIFO, the CONNECT_IND octet for octet), and that a receive the
+link layer closes unanswered got no answer from the sequencer.
+
+**WinOffset [S][D].** The transmit window after a CONNECT_IND on LE 1M starts transmitWindowDelay
+(1.25 ms) plus transmitWindowOffset (WinOffset x 1.25 ms) after the CONNECT_IND's end, and the
+Central's first packet is its first anchor (Vol 6 Part B 4.5.3, 4.5.5; WinOffset 0 to
+connInterval, 2.3.3.1). The offset is therefore fixed relative to the CONNECT_IND, which the
+sequencer sends T_IFS after the advertisement: it does not depend on the frame's timing (only
+`BT_CTLR_SCHED_ADVANCED`'s alignment to a planned anchor would, which `lll_scan_stage.c` refuses at
+build time). What it must cover is the set-up after the CONNECT_IND: its transmit completion
+(`lll_done()`), then the ULL worker that rings (started within `EFR32_DL_ULL_WINDOW_CYC`, its run
+with the session-key ECB) starting the connection's ticker, before the first event's expiry,
+which is at most the prepare lead (59 ticks, 1800.5 us) and the TX ready delay before the anchor.
+`EFR32_DL_CONNECT_IND_WIN_OFFSET` is the smallest WinOffset that still leaves the CONNECT_IND's
+completion, released at the latest frame_end_to_post and one interrupt after the CONNECT_IND, one
+more interrupt and one LLL context run before its start-by. Silicon figures (a Central with
+link-layer encryption): set-up 1414.2 us, need 1842.1 us, window without offset -642.2 us:
+WinOffset **2** (the first anchor 3.75 ms after the CONNECT_IND, 15.7 us to spare); QEMU figures:
+WinOffset 3. `isr_rx_pdu()` puts its anchor at that window's start; WinSize stays 1.
+
+**Deadlines [D]** (`ll_deadlines.h`, figures in `Kconfig`):
+- staged scanner receive (commit, SCAN_REQ): re-arm the RX FIFO before the SCAN_RSP can begin
+  (EOF + 2 x 148 + 176 us, the SCAN_REQ being 176 us on air) and stage its receive before the
+  shortest frame there can end (+ 80 us): `efr32_dl_rx_staged_start_by()`, 7.82's connection rule
+  with the reply's own air time;
+- the SCAN_REQ's transmit completion ends before that receive's completion is due
+  (`efr32_dl_tx_staged_start_by()`);
+- staged initiator receive (commit, CONNECT_IND): it, the CONNECT_IND's completion and the set-up
+  end within the window above (`efr32_dl_init_commit_start_by()`); the CONNECT_IND's completion
+  likewise (`efr32_dl_init_tx_start_by()`);
+- a staged receive the sequencer did not answer keeps those deadlines (its completion cannot
+  know at its post whether a reply left).
+
+**Figures.** New, QEMU-measured (120 s wall, shift 3, QEMU figures, `EFR32_RADIO_TIMING_PROBE`),
+each standing in on silicon with the connection path that QEMU runs longer (7.77's
+EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS is the precedent, the other way round) until measured:
+
+| Kconfig | QEMU | silicon default (stand-in) |
+|---|---|---|
+| EFR32_RADIO_WCET_SCAN_COMMIT_NS | 59.3 us (initiator; scanner 55.8) | WCET_CONN_COMPLETION_RX_TX, 109.3 us (QEMU 76.3) |
+| EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS | 37.2 us | CONN_COMPLETION_TO_RESPOND, 103.2 us (QEMU 72.5) |
+| EFR32_RADIO_SCAN_COMMIT_TO_STAGED_NS | 56.8 us | CONN_COMPLETION_TO_STAGED, 95.1 us (QEMU 68.8) |
+
+The other scanner and initiator runs stay within their kinds' QEMU figures: the SCAN_REQ's
+transmit completion 35.8 us (TX_RX 86.8), the CONNECT_IND's 21.9 us (TX 186.8), the scanner's
+abort completion, which now stages, 84.0 us (ABORT 91.8), the Central's LLL context 263.3 us
+(266.9). (The QEMU-figure Peripheral's LLL context ran 304.9 us in the same runs, above its 266.9:
+not a path changed here, recorded for the Peripheral's own figures.)
+
+**Admission on silicon figures, by analysis [D]** (latest post EOF + 11.54 + 58.1 us; at worst one
+interrupt and one LLL context run ahead):
+
+| completion | before | after: start-by | window from the latest post | worst demand ahead |
+|---|---|---|---|---|
+| scanner, SCAN_REQ | RESPOND, window at the check 50.7 us: unsat | EOF + 368.8 us | 299.2 us | 58.1 us, + 249.1 with an LLL run |
+| SCAN_REQ transmit completion | PENDING before the SCAN_RSP is recognised | post + 465.2 us | 465.2 us | 307.2 us |
+| initiator, CONNECT_IND | RESPOND, unsat behind a prepare | EOF + 834.4 us | 764.8 us | 358.3 us (LLL with CCM) |
+| CONNECT_IND transmit completion | the scan rule (2.5 ms); first anchor unmeetable | post + 374.0 us | 374.0 us | 358.3 us |
+
+Every staged path is feasible with the interrupt allowance; with an LLL context run already in
+progress at the post as well, the initiator's paths are, and the scanner's commit is short with
+the stand-in figures: by 8 us in a scanner image (LLL run 249.1 us; feasible once its path to the
+RX FIFO re-arm is measured below 95.2 us), by 59 us in a Central image scanning actively (LLL run
+with the anchor's CCM 300.2 us; below 44.1 us). QEMU: 37.2 us. Moving the RX FIFO re-arm out of
+the commit (to the start of the completion, before the LLL callback) would remove that term. Admission checks each release against what is actually pending, so
+that case, should it arise (only another role's prepare can fall on a scan window's frame),
+stops the radio safely; it arose in no run below.
+
+**QEMU runs** (silicon figures, admission on; the device under test, second, with the safe-shutdown
+policy, the peer counting misses; virtual seconds from the scheduler clock):
+
+| pair | shift 3 | shift 5 |
+|---|---|---|
+| advertiser + active scanner | 97.8 s, 3915 / 978 (SCAN_REQ) TX, 1955 reports, 0 / 0 misses | 105.8 s, 4231 / 1057 (SCAN_REQ) TX, 2113 reports, 0 / 0 misses |
+| Peripheral + Central (GATT write/read-back) | 1489.2 s, 1140/1140 rounds, 0 / 0 misses | 1534.3 s, 1170/1170 rounds, 0 / 0 misses |
+| the same, LE Secure Connections passkey pairing (level 4), encrypted GATT | 1497.3 s, 1140/1140 rounds, 0 / 0 misses | 1517.9 s, 1140/1140 rounds, level 4, 0 / 0 misses |
+| injected: the scanner's commit declared to reach its RX FIFO re-arm 400 us after it starts | unsat at the first staged SCAN_REQ (`deadline 57488 ns from the check, demand ahead of it 58114 ns`), safe shutdown, no SCAN_REQ on air | - |
+
+(600 s wall each, the injected run 60 s; no disconnection, no late delivery, no assertion.) The
+Central's 7.82 miss is gone with the WinOffset. The Central pairing image fits RAM with the
+safe-shutdown policy only with `SCHED_DEADLINE_MISS_HISTORY=2` and a 128-octet log buffer (it
+overflowed by 220 octets before this change, 268 after; QEMU test configuration only). With QEMU
+figures and admission on (the measurement runs, misses counted) the scanner and the Central had no
+miss either (every turnaround they had was infeasible with QEMU figures before); the QEMU-figure
+advertiser and Peripheral still miss, as 7.77 says.
+
+Kernel suites (native_sim/native/64, kernel unchanged): clock_event_sched 13/13, deadline 14/14
+(also with admission and stats), deferred_release 5/5, clock_event 4/4, deadline_admission 15/15.
+qtests: efr32bg22-test 104, rf 36, dap 13, board 7, unit test-jlink-swd-io 3, all pass; the host
+contract tests (`tests/efr32-radio-contract`) pass; the QEMU-configuration images (QEMU TIFS seam,
+staging off) build.
+
+**Silicon measurements needed** (BGM220 EK as active scanner, then as initiator, against the laptop
+or a second kit advertising; probe images with `EFR32_RADIO_TIMING_PROBE`):
+1. T_IFS of our SCAN_REQ and of our CONNECT_IND: the advertisement's EOF to our SYNCSENT
+   (`scripts/bg22-tifs-probe.tcl`, PRS MODEMH.EOF reload-starting TIMER1); expected the SCAN_RSP's
+   180.1-180.9 us (the same RX2TX hold).
+2. The sequencer's decision time in the SCAN and INIT modes (`EFR32_SEQ_CONN_TAKEN_AT`, the RX2TX
+   trace at SEQRAM 0x4F40): the address compares and the slot check run before the synthesizer
+   retune, and 7.84 item 4 left at least 76 us before the hold.
+3. The slot check: the frame end the sequencer computes against TIMER1's PRS-captured EOF (7.84
+   item 2's method), and its verdict against `isr_rx_pdu()`'s own `pdu_end_us` near the limit.
+4. The new figures: the scanner's and the initiator's commit runs (EFR32_RADIO_WCET_SCAN_COMMIT_NS),
+   the scanner commit's paths to its RX FIFO re-arm and to the next stage
+   (EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS, _TO_STAGED_NS); and the scanner paths the existing kinds
+   cover without a silicon sample: the SCAN_REQ's transmit completion (`isr_tx`, TX_RX), the
+   CONNECT_IND's (`isr_cleanup`, TX), the scanner's abort completion with its stage (ABORT), the
+   scanner's and initiator's prepare with the stage (EFR32_RADIO_WCET_LLL_NS).
+5. The first anchor: the CONNECT_IND's end to the Central's first SYNCSENT, expected 1.25 ms +
+   WinOffset x 1.25 ms (3.75 ms with the silicon figures).
+
+**Open.** Address resolution in the sequencer (controller privacy as scanner or initiator, and as
+advertiser, 7.84); the silicon measurements above; the scanner commit's worst case with an LLL
+run ahead (above).

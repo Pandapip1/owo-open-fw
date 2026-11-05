@@ -267,7 +267,8 @@ static void efr32_radio_hold_init(void)
 }/* The longest completion kind: registers the completion event for admission. */
 #define EFR32_RADIO_WCET_COMPLETION_MAX_NS \
 	MAX(MAX(MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS, \
-		    CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS), \
+		    MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_TX_NS, \
+			CONFIG_EFR32_RADIO_WCET_SCAN_COMMIT_NS)), \
 		MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_RX_NS, \
 		    CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS)), \
 	    MAX(CONFIG_EFR32_RADIO_WCET_COMPLETION_ABORT_NS, \
@@ -2300,6 +2301,8 @@ static int ccm_run(bool encrypt, const struct ccm *ccm, const uint8_t *pdu_in, u
  * sequencer's reply may be on air, so nothing that frames or tunes the radio (FRC packet
  * setup, PHY tables) may be rewritten, and a TXDONE of that reply must not be cleared.
  * efr32_conn_committing: isr_rx() is committing a reply the sequencer sent.
+ * efr32_init_sent: the reply committed was an initiator's CONNECT_IND (7.87), whose transmit
+ * completion is still to come.
  */
 #if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
 #define EFR32_SEQ_CONN_WORD(offset) \
@@ -2307,7 +2310,10 @@ static int ccm_run(bool encrypt, const struct ccm *ccm, const uint8_t *pdu_in, u
 static uint8_t MALIGN(4) efr32_conn_image[2][EFR32_PKT_SIZE_MAX];
 static uint16_t efr32_conn_image_octets[2];
 static uint16_t efr32_conn_generation;
-static uint8_t efr32_conn_flags;
+static uint32_t efr32_conn_flags;
+/* RX FIFO offset the staged receive's frame starts at (the sequencer reads it from there). */
+static uint32_t efr32_conn_rx_offset;
+static bool efr32_init_sent;
 static bool efr32_conn_staged;
 static bool efr32_conn_received;
 static bool efr32_conn_in_flight;
@@ -2350,8 +2356,10 @@ static uint16_t efr32_conn_image_build(uint8_t *image, const struct efr32_radio_
 	return PDU_DC_LL_HEADER_SIZE + image[1];
 }
 
-static void efr32_seq_stage(uint8_t flags, uint8_t rx_max, const struct efr32_radio_conn_reply *cur,
-			    const struct efr32_radio_conn_reply *next, const uint8_t *adva);
+static void efr32_seq_stage(uint32_t flags, uint8_t rx_max,
+			    const struct efr32_radio_conn_reply *cur,
+			    const struct efr32_radio_conn_reply *next, const uint8_t *adva,
+			    const struct efr32_radio_scan_stage *scan);
 
 void efr32_radio_conn_stage(bool central, bool rx_free, bool crc_closes, uint8_t sn, uint8_t nesn,
 			    uint8_t rx_max, const struct efr32_radio_conn_reply *cur,
@@ -2362,7 +2370,7 @@ void efr32_radio_conn_stage(bool central, bool rx_free, bool crc_closes, uint8_t
 			(crc_closes ? EFR32_SEQ_CONN_CRC_CLOSES : 0U) |
 			((sn & 1U) << EFR32_SEQ_CONN_SN_SHIFT) |
 			((nesn & 1U) << EFR32_SEQ_CONN_NESN_SHIFT),
-			rx_max, cur, next, NULL);
+			rx_max, cur, next, NULL, NULL);
 }
 
 void efr32_radio_adv_stage(const uint8_t *scan_rsp, const uint8_t *adva, bool tx_addr)
@@ -2375,11 +2383,102 @@ void efr32_radio_adv_stage(const uint8_t *scan_rsp, const uint8_t *adva, bool tx
 
 	/* The receive the ADV_IND turns to is configured: its length limit. */
 	efr32_seq_stage(EFR32_SEQ_CONN_ADV | (tx_addr ? EFR32_SEQ_CONN_ADV_TXADD : 0U),
-			efr32_packet_stage.max_len, &r, &r, adva);
+			efr32_packet_stage.max_len, &r, &r, adva, NULL);
 }
 
-static void efr32_seq_stage(uint8_t flags, uint8_t rx_max, const struct efr32_radio_conn_reply *cur,
-			    const struct efr32_radio_conn_reply *next, const uint8_t *adva)
+void efr32_radio_scan_stage(const struct efr32_radio_scan_stage *stage)
+{
+	struct efr32_radio_conn_reply r = {
+		.header = stage->reply[0],
+		.len = stage->reply[1],
+		.payload = stage->reply + PDU_AC_LL_HEADER_SIZE,
+	};
+	uint32_t flags = EFR32_SEQ_CONN_SCAN | (stage->rx_free ? EFR32_SEQ_CONN_RX_FREE : 0U);
+
+	if (stage->connect) {
+		flags |= EFR32_SEQ_CONN_INIT |
+			 (stage->adv_addr_type ? EFR32_SEQ_CONN_ADV_TXADD : 0U) |
+			 (stage->init_addr_type ? EFR32_SEQ_CONN_INIT_RXADD : 0U) |
+			 (stage->tgta_rpa ? EFR32_SEQ_CONN_INIT_TGTA_RPA : 0U) |
+			 (stage->timed ? EFR32_SEQ_CONN_INIT_TIMED : 0U);
+	} else {
+		flags |= EFR32_SEQ_CONN_SCAN_REQ;
+	}
+	/* The receive is configured (prepare_cb(), isr_common_done()): its length limit. */
+	efr32_seq_stage(flags, efr32_packet_stage.max_len, &r, &r,
+			stage->connect ? stage->adv_addr : NULL, stage);
+}
+
+/*
+ * TIMER0 counts per millisecond of the scheduler clock, from the active provider's mapping (the
+ * sequencer reads TIMER0, hal/efr32/seq_abi.h), 0 while the service is not on that provider.
+ */
+static uint32_t efr32_scan_t0_per_ms(void)
+{
+	static uint32_t per_ms;
+	uint32_t now = k_cycle_get_32();
+	uint32_t from;
+	uint32_t to;
+
+	if (per_ms == 0U && k_clock_event_sched_active_target(now, &from) == 0 &&
+	    k_clock_event_sched_active_target(now + k_us_to_cyc_floor32(USEC_PER_MSEC), &to) == 0) {
+		per_ms = to - from;
+	}
+	return per_ms;
+}
+
+static uint32_t efr32_scan_us_to_t0(uint32_t us, uint32_t per_ms)
+{
+	return (uint32_t)((uint64_t)us * per_ms / USEC_PER_MSEC);
+}
+
+/*
+ * The event timer's start on TIMER0, for an initiator's slot check (EFR32_SEQ_CONN_INIT_TIMED);
+ * when it cannot be mapped LATEST becomes 0 and nothing is answered.
+ */
+static void efr32_scan_start_write(void)
+{
+	uint32_t start;
+
+	if (k_clock_event_sched_active_target(efr32_radio_start_cyc, &start) != 0) {
+		*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_LATEST) = 0U;
+		return;
+	}
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_START) = start;
+}
+
+/*
+ * The initiator's slot check on TIMER0. Without the provider's rate (not on it) LATEST is 0 and
+ * the sequencer answers nothing, which isr_rx_pdu() then follows (lll/lll_scan_stage.c).
+ */
+static void efr32_scan_timing_write(const struct efr32_radio_scan_stage *stage)
+{
+	uint32_t per_ms = efr32_scan_t0_per_ms();
+	/* RAC.STIMER ticks per millisecond (seq_abi.h gives them per 10 us). */
+	uint32_t stimer_per_ms = EFR32_SEQ_RAC_STIMER_TICKS_PER_10US * (USEC_PER_MSEC / 10U);
+
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_LATEST) = efr32_scan_us_to_t0(stage->latest_us, per_ms);
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_PERIOD) = efr32_scan_us_to_t0(stage->period_us, per_ms);
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_T0_PER_STIMER_Q8) =
+		DIV_ROUND_CLOSEST(per_ms << EFR32_SEQ_SCAN_Q8_SHIFT, stimer_per_ms);
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_SCAN_EOF_TO_EXIT) =
+		(uint32_t)((uint64_t)per_ms * CONFIG_EFR32_RADIO_RX_EOF_TO_EXIT_NS / NSEC_PER_MSEC);
+	efr32_scan_start_write();
+}
+
+static void efr32_seq_addr_write(uint32_t offset, const uint8_t *addr)
+{
+	volatile uint8_t *a = (volatile uint8_t *)EFR32_SEQ_CONN_WORD(offset);
+
+	for (uint32_t i = 0U; i < EFR32_SEQ_ADV_ADDR_LEN; i++) {
+		a[i] = addr[i];
+	}
+}
+
+static void efr32_seq_stage(uint32_t flags, uint8_t rx_max,
+			    const struct efr32_radio_conn_reply *cur,
+			    const struct efr32_radio_conn_reply *next, const uint8_t *adva,
+			    const struct efr32_radio_scan_stage *scan)
 {
 	uintptr_t rx = EFR32_BUFC_BASE + EFR32_BUFC_RX_BASE_OFFSET;
 	uintptr_t tx = EFR32_BUFC_BASE + EFR32_BUFC_TX_BASE_OFFSET;
@@ -2392,16 +2491,19 @@ static void efr32_seq_stage(uint8_t flags, uint8_t rx_max, const struct efr32_ra
 	efr32_conn_flags = flags;
 	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_FLAGS) = efr32_conn_flags;
 	if (adva != NULL) {
-		volatile uint8_t *a = (volatile uint8_t *)EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_ADVA);
-
-		for (uint32_t i = 0U; i < EFR32_SEQ_ADV_ADDR_LEN; i++) {
-			a[i] = adva[i];
+		efr32_seq_addr_write(EFR32_SEQ_CONN_ADVA, adva);
+	}
+	if (scan != NULL && scan->connect) {
+		efr32_seq_addr_write(EFR32_SEQ_CONN_INITA, scan->init_addr);
+		if (scan->timed) {
+			efr32_scan_timing_write(scan);
 		}
 	}
 	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_BASE) = (uint32_t)(uintptr_t)efr32_rx_fifo;
 	/* Every earlier frame has been consumed: the next one starts at READOFFSET. */
-	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_OFFSET) =
-		*radio_reg32(rx + EFR32_BUFC_READOFFSET_OFFSET) % sizeof(efr32_rx_fifo);
+	efr32_conn_rx_offset = *radio_reg32(rx + EFR32_BUFC_READOFFSET_OFFSET) %
+			       sizeof(efr32_rx_fifo);
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_OFFSET) = efr32_conn_rx_offset;
 	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_MASK) = sizeof(efr32_rx_fifo) - 1U;
 	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_MAX) = rx_max;
 	for (uint32_t i = 0U; i < 2U; i++) {
@@ -2488,6 +2590,27 @@ bool efr32_radio_conn_continues(void)
 	       EFR32_SEQ_CONN_OUT_REPLY;
 }
 
+/*
+ * The SCAN_REQ isr_rx_pdu() committed is the one the sequencer sent: the staged one with RxAdd
+ * the received frame's TxAdd and AdvA the frame's (still in the RX FIFO where it was staged).
+ */
+static void efr32_scan_req_check(const uint8_t *pdu)
+{
+	const uint8_t *image = efr32_conn_image[0];
+	uint8_t rx_header = efr32_rx_fifo[efr32_conn_rx_offset];
+	uint8_t rxadd = BIT(EFR32_SEQ_ADV_RXADD_BIT);
+
+	LL_ASSERT((pdu[0] & ~rxadd) == (image[0] & ~rxadd));
+	LL_ASSERT(((pdu[0] >> EFR32_SEQ_ADV_RXADD_BIT) & 1U) ==
+		  ((rx_header >> EFR32_SEQ_ADV_TXADD_BIT) & 1U));
+	LL_ASSERT(memcmp(pdu + 1, image + 1, EFR32_SEQ_SCAN_REQ_ADVA_OCTET - 1) == 0);
+	for (uint32_t i = 0U; i < EFR32_SEQ_ADV_ADDR_LEN; i++) {
+		LL_ASSERT(pdu[EFR32_SEQ_SCAN_REQ_ADVA_OCTET + i] ==
+			  efr32_rx_fifo[(efr32_conn_rx_offset + PDU_AC_LL_HEADER_SIZE + i) %
+					sizeof(efr32_rx_fifo)]);
+	}
+}
+
 /* The SN and NESN octet the sequencer put on air for the reply being committed. */
 static uint8_t efr32_conn_sent_seq_bits(void)
 {
@@ -2509,6 +2632,7 @@ static void efr32_conn_stage_reset(void)
 	efr32_conn_committing = false;
 	efr32_conn_outcome_word = 0U;
 	efr32_conn_reply_header = -1;
+	efr32_init_sent = false;
 }
 #else
 static inline void efr32_conn_stage_reset(void)
@@ -3036,6 +3160,48 @@ static void efr32_radio_completion_window(bool abort, uint32_t now, int *deadlin
 		*deadline = efr32_dl_conn_rx_staged_start_by(
 			eof, CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS + EFR32_DL_CCM_RX_NS,
 			CONFIG_EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS + EFR32_DL_CCM_RX_TX_NS);
+		return;
+	}
+	/*
+	 * A scanner's or initiator's staged receive (lll_scan.c, 7.87): the sequencer may have
+	 * answered. An active scanner's commit re-arms the RX FIFO and stages the SCAN_RSP
+	 * receive before that exchange needs them; an initiator's lets the connection be set up
+	 * before its first anchor. Without a reply the completion needs no more time than that.
+	 */
+	if (!abort && !conn && direction == EFR32_RADIO_PACKET_RX && efr32_conn_received &&
+	    (efr32_conn_flags & EFR32_SEQ_CONN_SCAN) != 0U) {
+		uint32_t eof = efr32_radio_rx_eof_valid ? efr32_radio_rx_eof_cyc :
+			now - EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) -
+			EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS);
+
+		efr32_radio_completion_work.kind = EFR32_COMPLETION_RX_TX;
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_SCAN_COMMIT_NS);
+		*deadline = ((efr32_conn_flags & EFR32_SEQ_CONN_INIT) != 0U) ?
+			efr32_dl_init_commit_start_by(eof, CONFIG_EFR32_RADIO_WCET_SCAN_COMMIT_NS) :
+			efr32_dl_rx_staged_start_by(eof, BT_LE_1M_SCAN_REQ_US,
+						    CONFIG_EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS,
+						    CONFIG_EFR32_RADIO_SCAN_COMMIT_TO_STAGED_NS);
+		return;
+	}
+	/*
+	 * The SCAN_REQ the sequencer sent turns to the staged SCAN_RSP receive: this completion
+	 * ends before that receive's completion is due.
+	 */
+	if (!abort && !conn && direction == EFR32_RADIO_PACKET_TX && rx_follows &&
+	    efr32_conn_staged && (efr32_conn_flags & EFR32_SEQ_CONN_SCAN_REQ) != 0U) {
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS);
+		*deadline = efr32_dl_tx_staged_start_by(now,
+							CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_RX_NS,
+							BT_LE_1M_SCAN_REQ_US,
+							CONFIG_EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS,
+							CONFIG_EFR32_RADIO_SCAN_COMMIT_TO_STAGED_NS);
+		return;
+	}
+	/* The CONNECT_IND the sequencer sent: the connection is set up before its first anchor. */
+	if (!abort && direction == EFR32_RADIO_PACKET_TX && efr32_init_sent) {
+		efr32_init_sent = false;
+		*budget = EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS);
+		*deadline = efr32_dl_init_tx_start_by(now, CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS);
 		return;
 	}
 	/*
@@ -3808,7 +3974,8 @@ static void efr32_bufc_rx_fifo_configure(void)
 	*radio_reg32(base + EFR32_BUFC_THRESHOLD_OFFSET) = EFR32_BUFC_RX_THRESHOLD;
 #if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
 	/* A staged receive's frame now starts at the FIFO's start (a Central's anchor CLEARs). */
-	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_OFFSET) = 0U;
+	efr32_conn_rx_offset = 0U;
+	*EFR32_SEQ_CONN_WORD(EFR32_SEQ_CONN_RX_OFFSET) = efr32_conn_rx_offset;
 #endif
 }
 
@@ -4193,12 +4360,15 @@ void radio_pkt_tx_set(void *tx_packet)
 		uint8_t ack = (efr32_conn_outcome_word & EFR32_SEQ_CONN_OUT_ACK) != 0U;
 		uint8_t seq_bits = BIT(EFR32_SEQ_PDU_SN_BIT) | BIT(EFR32_SEQ_PDU_NESN_BIT);
 
-		if ((efr32_conn_flags & EFR32_SEQ_CONN_ADV) == 0U) {
-			LL_ASSERT((header & seq_bits) == efr32_conn_sent_seq_bits());
-		} else {
+		if ((efr32_conn_flags & EFR32_SEQ_CONN_SCAN_REQ) != 0U) {
+			efr32_scan_req_check(pdu);
+		} else if ((efr32_conn_flags & (EFR32_SEQ_CONN_ADV | EFR32_SEQ_CONN_INIT)) != 0U) {
 			LL_ASSERT(memcmp(pdu, efr32_conn_image[0], bytes) == 0);
+		} else {
+			LL_ASSERT((header & seq_bits) == efr32_conn_sent_seq_bits());
 		}
 		LL_ASSERT(bytes == efr32_conn_image_octets[ack]);
+		efr32_init_sent = (efr32_conn_flags & EFR32_SEQ_CONN_INIT) != 0U;
 		efr32_conn_committing = false;
 		efr32_conn_reply_header = -1;
 		efr32_packet_stage.tx_source = tx_packet;
@@ -4467,14 +4637,16 @@ void radio_disable(void)
 
 #if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
 	/*
-	 * An advertiser's isr_rx() that answers nothing ends the event here: the sequencer must
-	 * have answered nothing either (a mismatch is a bug in its rules, seq_abi.h).
+	 * An advertiser's, scanner's or initiator's isr_rx() that answers nothing ends the
+	 * exchange here: the sequencer must have answered nothing either (a mismatch is a bug in
+	 * its rules, seq_abi.h).
 	 */
-	if (efr32_conn_received && (efr32_conn_flags & EFR32_SEQ_CONN_ADV) != 0U) {
+	if ((efr32_conn_flags & (EFR32_SEQ_CONN_ADV | EFR32_SEQ_CONN_SCAN)) != 0U) {
 		uint32_t outcome;
 
-		LL_ASSERT(efr32_radio_conn_outcome(&outcome) <= 0 ||
+		LL_ASSERT(!efr32_conn_received || efr32_radio_conn_outcome(&outcome) <= 0 ||
 			  (outcome & EFR32_SEQ_CONN_OUT_REPLY) == 0U);
+		LL_ASSERT(!efr32_conn_committing);
 	}
 #endif
 	efr32_radio_launch_disarm();
@@ -4859,6 +5031,12 @@ static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t
 	 */
 	efr32_radio_start_cyc = cntr_tick_cycles(tick);
 	efr32_radio_launch_cyc = efr32_radio_start_cyc + k_us_to_cyc_floor32(remainder);
+#if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
+	/* An initiator's receive staged ahead of its start: its slot check counts from here. */
+	if (efr32_conn_staged && (efr32_conn_flags & EFR32_SEQ_CONN_INIT_TIMED) != 0U) {
+		efr32_scan_start_write();
+	}
+#endif
 	efr32_radio_ready_us = remainder + (trx ? radio_tx_ready_delay_get(0U, 0U) :
 						  radio_rx_ready_delay_get(0U, 0U));
 	efr32_radio_rx_eof_valid = false;

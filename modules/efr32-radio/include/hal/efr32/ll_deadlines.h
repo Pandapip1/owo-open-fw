@@ -298,42 +298,133 @@ static inline int efr32_dl_completion_tx_rx_start_by(uint32_t post, uint32_t to_
 #define EFR32_DL_CONN_TURN_US (BT_T_IFS_150_US - BT_ACTIVE_CLOCK_JITTER_US)
 
 /*
- * Receive completion (isr_rx(): commit the outcome, stage the replies to the next receive) of
- * the frame that ended at @p eof: it re-arms the RX FIFO (BUFC CLEAR, @p to_clear_ns from its
- * start) before the next frame can begin, and posts the next stage (@p to_staged_ns) before
- * that frame can end, when the sequencer takes it.
+ * Receive completion that commits a staged reply of @p reply_us on air (isr_rx(): commit the
+ * outcome, stage the replies to the next receive) to the frame that ended at @p eof: it re-arms
+ * the RX FIFO (BUFC CLEAR, @p to_clear_ns from its start) before the next frame can begin, and
+ * posts the next stage (@p to_staged_ns) before that frame can end, when the sequencer takes it.
  */
-static inline int efr32_dl_conn_rx_staged_start_by(uint32_t eof, uint32_t to_clear_ns,
-						   uint32_t to_staged_ns)
+static inline int efr32_dl_rx_staged_start_by(uint32_t eof, uint32_t reply_us,
+					      uint32_t to_clear_ns, uint32_t to_staged_ns)
 {
-	int32_t clear = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US +
-							   BT_LE_1M_EMPTY_PDU_US) -
+	int32_t clear = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US + reply_us) -
 				  EFR32_DL_MEAS_CYC(to_clear_ns));
-	int32_t staged = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * (EFR32_DL_CONN_TURN_US +
-								   BT_LE_1M_EMPTY_PDU_US)) -
+	int32_t staged = (int32_t)(eof + EFR32_DL_SPEC_CYC(2U * EFR32_DL_CONN_TURN_US + reply_us +
+							    BT_LE_1M_EMPTY_PDU_US) -
 				   EFR32_DL_MEAS_CYC(to_staged_ns));
 
 	return ((staged - clear) < 0) ? (int)staged : (int)clear;
+}
+
+/* In a connection event the shortest reply is the empty PDU. */
+static inline int efr32_dl_conn_rx_staged_start_by(uint32_t eof, uint32_t to_clear_ns,
+						   uint32_t to_staged_ns)
+{
+	return efr32_dl_rx_staged_start_by(eof, BT_LE_1M_EMPTY_PDU_US, to_clear_ns, to_staged_ns);
 }
 
 /*
  * Transmit completion that turns to a staged receive (isr_tx(): label the receive, arm its
  * timeout): the receive's completion is held off while it runs, so it must end before that
  * completion's start-by. Our frame ended at the earliest frame_end_to_post and one blocked
- * interrupt before @p post; the receive's frame ends at the earliest one exchange later.
+ * interrupt before @p post; the receive's frame ends at the earliest one exchange later, and a
+ * reply to it is @p reply_us on air.
  */
-static inline int efr32_dl_conn_tx_staged_start_by(uint32_t post, uint32_t run_ns,
-						   uint32_t to_clear_ns, uint32_t to_staged_ns)
+static inline int efr32_dl_tx_staged_start_by(uint32_t post, uint32_t run_ns, uint32_t reply_us,
+					      uint32_t to_clear_ns, uint32_t to_staged_ns)
 {
 	uint32_t eof_next = post -
 			    EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) -
 			    EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS) +
 			    EFR32_DL_SPEC_CYC(EFR32_DL_CONN_TURN_US + BT_LE_1M_EMPTY_PDU_US);
 
-	return (int)((uint32_t)efr32_dl_conn_rx_staged_start_by(eof_next, to_clear_ns,
-								 to_staged_ns) -
+	return (int)((uint32_t)efr32_dl_rx_staged_start_by(eof_next, reply_us, to_clear_ns,
+							    to_staged_ns) -
 		     EFR32_DL_MEAS_CYC(run_ns));
 }
+
+static inline int efr32_dl_conn_tx_staged_start_by(uint32_t post, uint32_t run_ns,
+						   uint32_t to_clear_ns, uint32_t to_staged_ns)
+{
+	return efr32_dl_tx_staged_start_by(post, run_ns, BT_LE_1M_EMPTY_PDU_US, to_clear_ns,
+					   to_staged_ns);
+}
+
+/*
+ * Scanner and initiator replies staged before the frame ends (docs/radio-tables.md 7.87). An
+ * active scanner's SCAN_REQ (ScanA, AdvA: 12 octets, Vol 6 Part B 2.3.2.1) and an initiator's
+ * CONNECT_IND (34 octets, 2.3.3.1), on LE 1M with preamble, Access Address, header and CRC.
+ */
+#define BT_LE_1M_SCAN_REQ_US \
+	((1U + 4U + 2U + 12U + BT_LE_CRC_OCTETS) * BT_LE_1M_US_PER_OCTET)
+#define BT_LE_1M_CONNECT_IND_US \
+	((1U + 4U + 2U + 34U + BT_LE_CRC_OCTETS) * BT_LE_1M_US_PER_OCTET)
+/*
+ * The transmit window after a CONNECT_IND sent on LE 1M starts transmitWindowDelay (1.25 ms)
+ * plus transmitWindowOffset (WinOffset x 1.25 ms) after the CONNECT_IND's end, and the
+ * Central's first packet is its first anchor point (Vol 6 Part B 4.5.3; WinOffset and WinSize
+ * in 1.25 ms units, 2.3.3.1).
+ */
+#define BT_TRANSMIT_WINDOW_DELAY_US 1250U
+#define BT_TRANSMIT_WINDOW_UNIT_US 1250U
+
+/*
+ * The initiator's connection is set up after the CONNECT_IND: its transmit completion ends the
+ * scan event (lll_done()), and the ULL worker that rings, started within EFR32_DL_ULL_WINDOW_CYC,
+ * sets the connection up and starts its ticker within its run (EFR32_DL_INIT_AFTER_TX_CYC). The
+ * first connection event's ticker expiry must come after that: it is at most
+ * EFR32_DL_PREPARE_LEAD_MAX_CYC before the event's TX launch, which is the TX ready delay before
+ * the anchor. Macros, as the prepare chain's constants need lll_vendor.h.
+ */
+#define EFR32_DL_INIT_AFTER_TX_CYC \
+	(EFR32_DL_ULL_WINDOW_CYC + \
+	 EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_ULL_NS + EFR32_DL_ECB_ULL_NS))
+#define EFR32_DL_INIT_SETUP_CYC \
+	(EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_WCET_COMPLETION_TX_NS) + EFR32_DL_INIT_AFTER_TX_CYC)
+/* CONNECT_IND end to the latest end of the setup, for WinOffset @p win_offset. */
+#define EFR32_DL_INIT_WINDOW_CYC(win_offset) \
+	((int32_t)(EFR32_DL_SPEC_CYC(BT_TRANSMIT_WINDOW_DELAY_US + \
+				     (win_offset) * BT_TRANSMIT_WINDOW_UNIT_US) - \
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_TX_READY_NS) - EFR32_DL_PREPARE_LEAD_MAX_CYC))
+/*
+ * The initiator's WinOffset (docs/radio-tables.md 7.87). The transmit window is fixed relative
+ * to the CONNECT_IND, so the WinOffset the setup chain needs does not depend on when the
+ * advertisement was received: it is the smallest for which the CONNECT_IND's transmit
+ * completion, released at the latest frame_end_to_post and one blocked interrupt after the
+ * CONNECT_IND's end, still has one more interrupt and one LLL context run (the completion job
+ * shares the LLL's cooperative priority) ahead of it before its start-by. OpenISA's initiator
+ * otherwise sends 0 without BT_CTLR_SCHED_ADVANCED (which this module does not support), and
+ * WinOffset 0 puts the first event's ticker expiry before the CONNECT_IND has been sent.
+ */
+#define EFR32_DL_INIT_NEED_CYC \
+	((int32_t)(EFR32_DL_INIT_SETUP_CYC + \
+		   EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) + \
+		   2U * EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS) + \
+		   EFR32_DL_MEAS_CYC(EFR32_DL_WCET_LLL_NS)))
+#define EFR32_DL_CONNECT_IND_WIN_OFFSET \
+	((EFR32_DL_INIT_NEED_CYC - EFR32_DL_INIT_WINDOW_CYC(0U)) <= 0 ? 0U : \
+	 DIV_ROUND_UP((uint32_t)(EFR32_DL_INIT_NEED_CYC - EFR32_DL_INIT_WINDOW_CYC(0U)), \
+		      EFR32_DL_SPEC_CYC(BT_TRANSMIT_WINDOW_UNIT_US)))
+/*
+ * The CONNECT_IND's transmit completion, posted at @p post, of @p run_ns: it and the ULL setup
+ * after it end within the setup window of the CONNECT_IND's end, which was at the earliest
+ * frame_end_to_post and one blocked interrupt before the post.
+ */
+#define efr32_dl_init_tx_start_by(post, run_ns) \
+	((int)((uint32_t)(post) - \
+	       EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS) - \
+	       EFR32_DL_MEAS_CYC(CONFIG_EFR32_RADIO_INTERRUPT_BLOCKING_NS) + \
+	       (uint32_t)EFR32_DL_INIT_WINDOW_CYC(EFR32_DL_CONNECT_IND_WIN_OFFSET) - \
+	       EFR32_DL_INIT_AFTER_TX_CYC - EFR32_DL_MEAS_CYC(run_ns)))
+/*
+ * The receive completion, of @p run_ns, that commits the CONNECT_IND the sequencer sent to the
+ * advertisement that ended at @p eof (the CONNECT_IND ends T_IFS, active clock included, and its
+ * own air time later): it, the transmit completion and the setup end within the setup window.
+ */
+#define efr32_dl_init_commit_start_by(eof, run_ns) \
+	((int)((uint32_t)(eof) + \
+	       EFR32_DL_SPEC_CYC(EFR32_DL_CONN_TURN_US + BT_LE_1M_CONNECT_IND_US) + \
+	       (uint32_t)EFR32_DL_INIT_WINDOW_CYC(EFR32_DL_CONNECT_IND_WIN_OFFSET) - \
+	       EFR32_DL_INIT_SETUP_CYC - EFR32_DL_MEAS_CYC(run_ns)))
 
 /*
  * Work whose output is the next packet of an advertising event (a completion or timeout that

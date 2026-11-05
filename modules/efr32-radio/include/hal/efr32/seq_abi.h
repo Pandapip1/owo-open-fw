@@ -141,6 +141,51 @@
 #define EFR32_SEQ_ADV_SCAN_REQ_LEN 12
 #define EFR32_SEQ_ADV_SCAN_REQ_ADVA 6
 #define EFR32_SEQ_ADV_ADDR_LEN 6
+/*
+ * SCAN: a scanner's or initiator's receive (docs/radio-tables.md 7.87). Answered, as
+ * lll_scan.c's isr_rx_pdu() does without privacy, only with SCAN_REQ or INIT set, and only when
+ * the frame's CRC is ok, it carries an AdvA (Core v6.1 Vol 6 Part B 2.3.1) and an RX buffer was
+ * free (RX_FREE):
+ * - SCAN_REQ (active scanner): an ADV_IND or ADV_SCAN_IND (AdvA and 0-31 octets of AdvData) gets
+ *   CUR, the SCAN_REQ, with RxAdd set to the frame's TxAdd and AdvA copied from the frame; the
+ *   scanner then listens for the SCAN_RSP (the next receive is armed, STAGED).
+ * - INIT (initiator): an ADV_IND from AdvA ADVA (TxAdd ADV_TXADD), or an ADV_DIRECT_IND from it
+ *   whose TargetA is INITA with RxAdd INIT_RXADD (or, with INIT_TGTA_RPA, any resolvable private
+ *   TargetA with RxAdd 1), gets CUR, the CONNECT_IND, unchanged; the event then ends (DONE).
+ *   With INIT_TIMED it is answered only when the frame ends, counted on TIMER0 from START and
+ *   modulo PERIOD when PERIOD is not 0, less than LATEST counts after START: lll_scan.c's
+ *   CONNECT_IND-fits-the-scan-slot check. The frame's end is TIMER0 at the decision less
+ *   RAC.STIMER (since RX2TX began) times T0_PER_STIMER_Q8 / 256, less EOF_TO_EXIT counts.
+ */
+#define EFR32_SEQ_CONN_SCAN 0x80
+#define EFR32_SEQ_CONN_SCAN_REQ 0x100
+#define EFR32_SEQ_CONN_INIT 0x200
+#define EFR32_SEQ_CONN_INIT_RXADD 0x400
+#define EFR32_SEQ_CONN_INIT_TGTA_RPA 0x800
+#define EFR32_SEQ_CONN_INIT_TIMED 0x1000
+#define EFR32_SEQ_CONN_INITA 0x38
+#define EFR32_SEQ_SCAN_START 0x40
+#define EFR32_SEQ_SCAN_LATEST 0x44
+#define EFR32_SEQ_SCAN_PERIOD 0x48
+#define EFR32_SEQ_SCAN_T0_PER_STIMER_Q8 0x4c
+#define EFR32_SEQ_SCAN_EOF_TO_EXIT 0x50
+#define EFR32_SEQ_SCAN_Q8_SHIFT 8
+/* Advertising channel PDU header (Vol 6 Part B 2.3): PDU type 3:0, TxAdd 6, RxAdd 7. */
+#define EFR32_SEQ_ADV_IND_TYPE 0x0
+#define EFR32_SEQ_ADV_DIRECT_IND_TYPE 0x1
+#define EFR32_SEQ_ADV_SCAN_IND_TYPE 0x6
+#define EFR32_SEQ_ADV_TXADD_BIT 6
+/* ADV_IND, ADV_SCAN_IND: AdvA and 0-31 octets of AdvData (2.3.1.1, 2.3.1.4). */
+#define EFR32_SEQ_ADV_IND_LEN_MAX 37
+/* ADV_DIRECT_IND: AdvA, TargetA (2.3.1.2). */
+#define EFR32_SEQ_ADV_DIRECT_IND_LEN 12
+#define EFR32_SEQ_ADV_DIRECT_TARGETA 6
+/* A resolvable private address: its two most significant bits are 0b01 (Vol 6 Part B 1.3.2.2). */
+#define EFR32_SEQ_ADDR_TYPE_OCTET 5
+#define EFR32_SEQ_ADDR_TYPE_MASK 0xc0
+#define EFR32_SEQ_ADDR_TYPE_RPA 0x40
+/* SCAN_REQ: header, length, ScanA, AdvA (2.3.2.1): AdvA at PDU octet 8. */
+#define EFR32_SEQ_SCAN_REQ_ADVA_OCTET 8
 /* OUTCOME */
 #define EFR32_SEQ_CONN_OUT_VALID 0x01
 #define EFR32_SEQ_CONN_OUT_CRC_OK 0x02
