@@ -161,6 +161,14 @@ explicit that deadline ordering does not prove a job will meet a deadline
 (`vendor/zephyr/include/zephyr/kernel.h:1114-1141`).  Admission control,
 priority assignment, and bounded job work remain required.
 
+Time arithmetic: the service keeps 64-bit logical time; every 32-bit value a
+client sees (`k_cycle_get_32()`, deadline-event deadlines, clock-event arms,
+provider counts) is compared only as a modular difference read as signed, so
+any two values compared must lie within 2^31 cycles (64 s at 2^25 Hz) of each
+other. `tests/kernel/clock_event_sched` delivers arms across logical 2^31,
+2^32, 2^32 + 2^31 and 2^33; the one place that broke the rule, the radio
+sequencer's LIMIT check at TIMER0 = 2^31, is `docs/radio-tables.md` 7.88.
+
 ### Releases are not deadlines
 
 The current upstream timeout interface cannot implement an “arm too late, so

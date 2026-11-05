@@ -8304,3 +8304,67 @@ or a second kit advertising; probe images with `EFR32_RADIO_TIMING_PROBE`):
 **Open.** Address resolution in the sequencer (controller privacy as scanner or initiator, and as
 advertiser, 7.84); the silicon measurements above; the scanner commit's worst case with an LLL
 run ahead (above).
+
+### 7.88 32-bit time across 2^31 and 2^32: the sequencer's LIMIT check
+
+Tags as in 7.79. Question: a dual-SoC QEMU run (`b-adv`/`b-scan` images of 31 Oct) made a safe
+shutdown at 64.2 s, "deadline late start: efr32_radio_completion_event ... deadline
+-2139858319", just past 2^31 scheduler-clock cycles (2^25 Hz). Is a 32-bit wrap in the deadline
+arithmetic the cause, and can it reach silicon?
+
+**That miss is not a wrap.** [Q] It is deterministic (the same release, deadline and now at
+icount shift 2, 3 and 4). Under the gdbstub, logical time was moved 0x58000000 cycles ahead at the
+first provider registration, so 2^31 fell at 20 s of uptime: the same miss came at the same
+uptime (64.63 s, as in the unshifted control under the same stop), at logical 3 644 950 554, far
+from 2^31 and 2^32, and nothing happened at 20 s. The completion was posted 9.8 ms after the
+event's last TXEN, so its start-by (`efr32_dl_adv_next_start_by()`, 10 ms after that TXEN) was 28
+cycles away. "-2139858319" is only `k_deadline_miss_print()` printing the unsigned deadline with
+`%d` (now `%u`). Current images do not reproduce it: 0 misses in 451 s.
+
+**A real wrap, in the sequencer.** `efr32_seq_timed_command` decided "past LIMIT" with
+`subs r4, CNT, LIMIT; bgt late`. `bgt` reads V as well as N and Z, and V is set when TIMER0's
+count and LIMIT lie on either side of 0x80000000 (the difference overflows as a signed value), so
+the test is not modular there:
+- CNT < 2^31 <= LIMIT, the command on time: reported `EFR32_SEQ_TIMED_LATE`, which
+  `efr32_seq_timed_check()` turns into a late start of "efr32 sequencer timed command" and a safe
+  shutdown;
+- LIMIT < 2^31 <= CNT, the command late: issued anyway, the miss unreported.
+
+The crossing of 2^32 (0xFFFFFFFF to 0) is correct either way, and the instant wait (`bmi`, N only)
+is correct at both. Fixed: late is `LIMIT - CNT` negative, `subs r4, LIMIT, CNT; bmi late`.
+
+**On silicon.** TIMER0 counts EM01GRPACLK, 76.8 MHz on silicon and in QEMU (`active_hz` read
+76 800 000 from a running image): it passes 0x80000000 27.96 s after it starts and then every
+55.92 s. A false LATE needs a command's [TARGET, LIMIT] to straddle that count, so the chance per
+crossing is the timed-command rate times `LIMIT - TARGET` (1149 counts, 15 us, for a TX launch; a
+Peripheral's receive-window tolerance is wider). At one command per 30 ms that is 5e-4 per
+crossing, about 3 % per hour. The 10-minute silicon connection runs crossed it about 10 times.
+Consequence: a spurious safe shutdown (radio stopped, link lost) or, rarer, a late TXEN or SWRXEN
+issued past its spec tolerance without the miss being reported.
+
+**Test.** `tests/sequencer-timed-wrap` (bg22_ek4108a on the QEMU model, M0+ included) installs the
+open sequencer as `radio_reset()` does, starts TIMER0 just below 2^31 and 2^32 and posts SWRXEN
+(RAC forced disabled) with the window, the instant or LIMIT across each boundary. Before the fix
+4 of 6 cases pass: `test_window_across_2_31` (on time, reported LATE) and `test_late_across_2_31`
+(issued past LIMIT) fail. After it all 6 pass.
+
+**Audit** of every 32-bit time comparison on these paths (the rule is the half-range one: values
+compared lie within 2^31 of each other):
+- kernel: `deadline.c` (coalescing, not-before wait, late start), the EDF compare in
+  `priority_q.h`, `deadline_admission.c` (`rel()` to now, then relative times), `deadline_miss.c`,
+  `deferred_release.c`, `clock_event.c` (lead check), `clock_event_sched.c` (64-bit logical time,
+  `extend()`, `to_active()`/`to_deep()` within their re-anchored spans), `clock_event_timer.c`,
+  `silabs_burtc_clock_event.c`, `counter_silabs_timer.c`: wrap-safe. A regression case in
+  `tests/kernel/clock_event_sched` crosses 2^31, 2^32, 2^32 + 2^31 and 2^33 with short-lead,
+  deep-then-active and late deliveries.
+- radio: `hal/cntr.c` (64-bit, sign-extended 32-bit offsets), `ll_threads.c`, `radio.c` (hold,
+  RX EOF, completion windows, timed post), `ll_deadlines.h`: wrap-safe. One signed subtraction of
+  two absolute times (`efr32_dl_conn_rx_staged_start_by()`), undefined on overflow, is now an
+  unsigned difference read as signed.
+- sequencer: the LIMIT check above. The instant wait, and RAC.STIMER (restarts per state), are fine.
+
+**RAM.** `owo_suit -DOWO_HW=ON`: 30 556 B before and after (one instruction of the SEQRAM image, a
+format string, a header-only rewrite).
+
+**QEMU dual run** (`dual.sh`, icount shift 3): fixed images 455.5 s virtual, 0 misses (8 crossings
+of TIMER0 = 2^31, logical 2^31, 2^32 and 2^32 + 2^31 all passed); unfixed images 451.4 s, 0.
