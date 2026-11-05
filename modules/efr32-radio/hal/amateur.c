@@ -866,7 +866,8 @@ static int efr32_amateur_id_build(const char *call)
 	if (err != 0) {
 		return err;
 	}
-	timing.cw_us = efr32_amateur_cw_airtime_us;
+	timing.cw_us = efr32_amateur_cw_airtime_us +
+		       DIV_ROUND_UP(CONFIG_EFR32_RADIO_AMATEUR_CW_TAIL_NS, NSEC_PER_USEC);
 #endif
 #if defined(CONFIG_EFR32_RADIO_AMATEUR_ID_DATA)
 	{

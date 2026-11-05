@@ -1,0 +1,39 @@
+/*
+ * The product's sense channel (boards/owo_suit_hw.overlay channel@0: PD2, gain 1, VDD reference,
+ * 12 bit) on the explorer kit, for the driver-path timing. PD2 and PD3 are only read.
+ */
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/silabs-adc.h>
+#include <zephyr/dt-bindings/pinctrl/silabs/xg22-pinctrl.h>
+
+&pinctrl {
+	iadc0_timing: iadc0_timing {
+		group0 {
+			silabs,analog-bus = <ABUS_CDEVEN0_IADC0>, <ABUS_CDODD0_IADC0>;
+		};
+	};
+};
+
+/ {
+	zephyr,user {
+		io-channels = <&adc0 0>;
+	};
+};
+
+&adc0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-0 = <&iadc0_timing>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	channel@0 {
+		reg = <0>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,input-positive = <IADC_INPUT_PD2>;
+		zephyr,reference = "ADC_REF_VDD_1";
+		zephyr,resolution = <12>;
+		zephyr,vref-mv = <3300>;
+	};
+};
