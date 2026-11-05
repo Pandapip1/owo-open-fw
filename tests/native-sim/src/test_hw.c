@@ -153,6 +153,13 @@ static const struct device *const gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 static const struct device *const adc = DEVICE_DT_GET(DT_NODELABEL(test_adc));
 
 static atomic_t gain_percent = ATOMIC_INIT(100);
+/* Pack millivolts; the battery input reads them through the 33/133 divider. */
+#define BATTERY_DIVIDER_NUM 133U
+#define BATTERY_DIVIDER_DEN 33U
+#define PACK_NOMINAL_MV 7600
+static atomic_t battery_mv = ATOMIC_INIT(PACK_NOMINAL_MV);
+/* The stop input (power button): gpio0 pin 8, active low. */
+#define STOP_PIN 8
 static atomic_t adc_hang;
 static K_SEM_DEFINE(hang_sem, 0, 1);
 static atomic_t conversions;
@@ -249,9 +256,23 @@ static int plant_value(const struct device *dev, unsigned int chan, void *data, 
 	return 0;
 }
 
+static int battery_value(const struct device *dev, unsigned int chan, void *data,
+			 uint32_t *result)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(chan);
+	ARG_UNUSED(data);
+	*result = (uint32_t)atomic_get(&battery_mv) * BATTERY_DIVIDER_DEN / BATTERY_DIVIDER_NUM;
+	return 0;
+}
+
 void t_plant_start(void)
 {
 	(void)adc_emul_value_func_set(adc, 0, plant_value, NULL);
+	(void)adc_emul_value_func_set(adc, 1, battery_value, NULL);
+	/* The button is released (its pull-up) before the output stage reads it. */
+	(void)gpio_pin_configure(gpio0, STOP_PIN, GPIO_INPUT);
+	(void)gpio_emul_input_set(gpio0, STOP_PIN, 1);
 }
 
 /* ------------------------------------------------------------ test interface */
@@ -269,6 +290,26 @@ uint32_t t_trace_len(void) { return (uint32_t)atomic_get(&trace_len); }
 uint32_t t_trace(uint32_t i) { return i < ARRAY_SIZE(trace) ? trace[i] : 0; }
 
 void t_set_gain_percent(uint32_t g) { atomic_set(&gain_percent, g); }
+void t_set_battery_mv(uint32_t mv) { atomic_set(&battery_mv, mv); }
+
+/* Pressing drives the stop input low. */
+void t_set_stop_pressed(int pressed)
+{
+	(void)gpio_emul_input_set(gpio0, STOP_PIN, pressed ? 0 : 1);
+}
+
+/* A stop requested from an interrupt @p us from now (a timer expiry). */
+extern void t_stop_from_isr(void);
+static void stop_timer_fn(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+	t_stop_from_isr();
+}
+static K_TIMER_DEFINE(stop_timer, stop_timer_fn, NULL);
+void t_stop_in_us(uint32_t us)
+{
+	k_timer_start(&stop_timer, K_USEC(us), K_NO_WAIT);
+}
 void t_set_corrupt_readback(int on) { atomic_set(&corrupt_readback, on); }
 
 void t_set_adc_hang(int on)

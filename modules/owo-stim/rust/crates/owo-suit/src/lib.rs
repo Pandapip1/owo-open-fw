@@ -14,15 +14,16 @@
 
 #![no_std]
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use owo_hal::Switchable as _;
 use owo_hbridge::{HBridge, State};
 use owo_stim::hw::{Bridge, Hw, HwError};
 use owo_switch::Switch;
 use zephyr_io::{
-    suit_handle, suit_param, suit_post, suit_supply_handle, suit_switch_routes, AdcChannel, Dac, Gpio,
-    Port, Pwm, FineCounter, Regulator, SuitHandle, SuitParam,
+    suit_handle, suit_param, suit_post, suit_stop_input, suit_stop_input_pending,
+    suit_stop_input_setup, suit_supply_handle, suit_switch_routes, AdcChannel, Dac, Gpio, Port, Pwm, FineCounter, Regulator, SuitHandle,
+    SuitParam,
 };
 
 /// The DAC driver's entry points are called only from C (`drivers/dac/dac_ltc2634.c`); this keeps
@@ -57,6 +58,61 @@ pub fn revoke() { RESOURCE_LEASES.revoke(); }
 /// race a job that still owns the resource.
 pub fn recover_after_shutdown() -> Result<(), LeaseError> {
     RESOURCE_LEASES.recover()
+}
+
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static STOP_LISTENER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+static STOP_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Request a stop, from any context (interrupts included; lock-free). A pulse in progress
+/// completes, so its charge stays balanced (it is bounded by the supervisor's phase and gap
+/// limits); the output's owner starts no pulse while a request is pending, takes it
+/// ([`take_stop_request`]) and locks the output out. Revocation ([`revoke`]) is the path that
+/// ends a pulse mid-phase.
+pub fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::Release);
+}
+
+/// Whether a stop was requested, clearing the request.
+pub fn take_stop_request() -> bool {
+    STOP_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+pub fn stop_requested() -> bool {
+    STOP_REQUESTED.load(Ordering::Acquire)
+}
+
+/// Called after the stop input requested a stop (from its controller's callback context, which
+/// must not block): the owner wakes up to take the request.
+pub fn set_stop_listener(f: fn()) {
+    STOP_LISTENER.store(f as *mut (), Ordering::Release);
+}
+
+/// Whether the board's stop input (the power button) asks for the output to stop: active, or
+/// unreadable (its controller does not answer, so a press could not be seen). False on a board
+/// without one.
+pub fn stop_input_demands_stop() -> bool {
+    STOP_INPUT.load(Ordering::Acquire) && suit_stop_input().unwrap_or(true)
+}
+
+/// The backstop for a lost change callback: an expander's /INT left asserted (by a change whose
+/// read failed) raises no further edge. Reads the input only while its controller's interrupt
+/// line is asserted, so a healthy idle input costs no bus transfer.
+pub fn stop_input_backstop_demands_stop() -> bool {
+    STOP_INPUT.load(Ordering::Acquire) && suit_stop_input_pending() && stop_input_demands_stop()
+}
+
+/// The stop input's controller saw it change (shim callback).
+#[no_mangle]
+extern "C" fn owo_suit_stop_input_changed() {
+    if stop_input_demands_stop() {
+        request_stop();
+        let f = STOP_LISTENER.load(Ordering::Acquire);
+        if !f.is_null() {
+            // SAFETY: only `set_stop_listener` stores a non-null value, a `fn()`.
+            unsafe { core::mem::transmute::<*mut (), fn()>(f)() };
+        }
+    }
 }
 
 /// Lock-free access control for one output-owning resource.
@@ -412,6 +468,15 @@ impl Suit {
             supply_on: false,
         };
         s.shutdown()?;
+        if suit_param(SuitParam::HasStopInput) != 0 {
+            ok(suit_stop_input_setup())?;
+            STOP_INPUT.store(true, Ordering::Release);
+            // The first read also releases an expander /INT that was asserted before its edge
+            // interrupt was enabled; a press already held at boot is seen here.
+            if stop_input_demands_stop() {
+                request_stop();
+            }
+        }
         Ok(s)
     }
 

@@ -15,12 +15,14 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/init.h>
+#if defined(CONFIG_SOC_FAMILY_SILABS_S2)
+#include <zephyr/drivers/pinctrl.h>
 #include <em_device.h>
 #include <sl_clock_manager.h>
 #include <sl_hal_gpio.h>
 #include <sl_hal_i2c.h>
+#endif
 
 int owo_gpio_configure(const void *g, int active)
 {
@@ -359,6 +361,7 @@ uint32_t owo_suit_param(int kind)
 	case 9: return ARRAY_SIZE(switch_routes);
 	case 10: return DT_PROP_BY_IDX(SUIT, battery_divider, 0);
 	case 11: return DT_PROP_BY_IDX(SUIT, battery_divider, 1);
+	case 12: return DT_NODE_HAS_PROP(SUIT, stop_gpios);
 	default: return 0;
 	}
 }
@@ -368,6 +371,88 @@ const uint32_t *owo_suit_switch_routes(void)
 	return switch_routes;
 }
 
+/*
+ * ---- stop input (stop-gpios) ----
+ *
+ * The callback runs where the input's controller delivers it (for a PCF857x: the system work
+ * queue, after it read the port on its /INT); the Rust side reads the level and decides.
+ */
+#if DT_NODE_HAS_PROP(SUIT, stop_gpios)
+static const struct gpio_dt_spec stop_in = GPIO_DT_SPEC_GET(SUIT, stop_gpios);
+static struct gpio_callback stop_cb;
+
+extern void owo_suit_stop_input_changed(void);
+
+static void stop_changed(const struct device *port, struct gpio_callback *cb,
+			 gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	owo_suit_stop_input_changed();
+}
+
+int owo_suit_stop_input_setup(void)
+{
+	int r;
+
+	if (!gpio_is_ready_dt(&stop_in)) {
+		return -ENODEV;
+	}
+	r = gpio_pin_configure_dt(&stop_in, GPIO_INPUT);
+	if (r < 0) {
+		return r;
+	}
+	gpio_init_callback(&stop_cb, stop_changed, BIT(stop_in.pin));
+	r = gpio_add_callback_dt(&stop_in, &stop_cb);
+	if (r < 0) {
+		return r;
+	}
+	return gpio_pin_interrupt_configure_dt(&stop_in, GPIO_INT_EDGE_BOTH);
+}
+
+int owo_suit_stop_input_get(void)
+{
+	return gpio_pin_get_dt(&stop_in);
+}
+
+/*
+ * 1 while the stop input's controller asserts its interrupt line (a change not yet read), or
+ * when it has none (only a read can tell). Reading the line is a plain GPIO read: no transfer
+ * to the controller.
+ */
+#define STOP_CTLR DT_GPIO_CTLR(SUIT, stop_gpios)
+#if DT_NODE_HAS_PROP(STOP_CTLR, int_gpios)
+static const struct gpio_dt_spec stop_ctlr_int = GPIO_DT_SPEC_GET(STOP_CTLR, int_gpios);
+
+int owo_suit_stop_input_pending(void)
+{
+	return gpio_pin_get_dt(&stop_ctlr_int) != 0;
+}
+#else
+int owo_suit_stop_input_pending(void)
+{
+	return 1;
+}
+#endif
+#else
+int owo_suit_stop_input_setup(void)
+{
+	return -ENOTSUP;
+}
+
+int owo_suit_stop_input_get(void)
+{
+	return -ENOTSUP;
+}
+
+int owo_suit_stop_input_pending(void)
+{
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_SOC_FAMILY_SILABS_S2)
 /*
  * ---- output safe state from the watchdog warning interrupt ----
  *
@@ -625,6 +710,7 @@ static int owo_suit_early_safe_off(void)
 }
 
 SYS_INIT(owo_suit_early_safe_off, EARLY, 0);
+#endif /* CONFIG_SOC_FAMILY_SILABS_S2 */
 
 const void *owo_suit_handle(int kind)
 {
@@ -672,6 +758,21 @@ uint32_t owo_suit_param(int kind)
 const uint32_t *owo_suit_switch_routes(void)
 {
 	return NULL;
+}
+
+int owo_suit_stop_input_setup(void)
+{
+	return -ENOTSUP;
+}
+
+int owo_suit_stop_input_get(void)
+{
+	return -ENOTSUP;
+}
+
+int owo_suit_stop_input_pending(void)
+{
+	return 0;
 }
 
 /* No output stage: nothing to put in a safe state, nothing that can be energised. */
