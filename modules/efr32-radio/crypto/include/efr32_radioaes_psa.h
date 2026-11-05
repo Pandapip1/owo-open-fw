@@ -8,6 +8,8 @@
 
 #include <psa/crypto_driver_common.h>
 
+#include "efr32_radioaes_psa_contexts.h"
+
 psa_status_t efr32_radioaes_cipher_encrypt(const psa_key_attributes_t *attributes,
 					   const uint8_t *key_buffer, size_t key_buffer_size,
 					   psa_algorithm_t alg, const uint8_t *iv, size_t iv_length,
@@ -26,6 +28,27 @@ psa_status_t efr32_radioaes_mac_compute(const psa_key_attributes_t *attributes,
 					psa_algorithm_t alg, const uint8_t *input,
 					size_t input_length, uint8_t *mac, size_t mac_size,
 					size_t *mac_length);
+
+psa_status_t efr32_radioaes_mac_sign_setup(efr32_radioaes_mac_operation_t *operation,
+					   const psa_key_attributes_t *attributes,
+					   const uint8_t *key_buffer, size_t key_buffer_size,
+					   psa_algorithm_t alg);
+
+psa_status_t efr32_radioaes_mac_verify_setup(efr32_radioaes_mac_operation_t *operation,
+					     const psa_key_attributes_t *attributes,
+					     const uint8_t *key_buffer, size_t key_buffer_size,
+					     psa_algorithm_t alg);
+
+psa_status_t efr32_radioaes_mac_update(efr32_radioaes_mac_operation_t *operation,
+				       const uint8_t *input, size_t input_length);
+
+psa_status_t efr32_radioaes_mac_sign_finish(efr32_radioaes_mac_operation_t *operation,
+					    uint8_t *mac, size_t mac_size, size_t *mac_length);
+
+psa_status_t efr32_radioaes_mac_verify_finish(efr32_radioaes_mac_operation_t *operation,
+					      const uint8_t *mac, size_t mac_length);
+
+psa_status_t efr32_radioaes_mac_abort(efr32_radioaes_mac_operation_t *operation);
 
 psa_status_t efr32_radioaes_aead_encrypt(const psa_key_attributes_t *attributes,
 					 const uint8_t *key_buffer, size_t key_buffer_size,
