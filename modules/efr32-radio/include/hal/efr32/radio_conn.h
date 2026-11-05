@@ -55,6 +55,34 @@ void efr32_radio_conn_stage(bool central, bool rx_free, bool crc_closes, uint8_t
  */
 void efr32_radio_adv_stage(const uint8_t *scan_rsp, const uint8_t *adva, bool tx_addr);
 /*
+ * A scanner's or initiator's receive (docs/radio-tables.md 7.87, hal/efr32/seq_abi.h
+ * EFR32_SEQ_CONN_SCAN): the sequencer answers an advertisement with @p reply (header, length,
+ * payload) by lll_scan.c's rules: an active scanner's SCAN_REQ, whose RxAdd and AdvA it takes
+ * from the frame, or an initiator's CONNECT_IND (@p connect), sent unchanged.
+ */
+struct efr32_radio_scan_stage {
+	const uint8_t *reply;
+	bool connect;
+	/* An RX buffer is free for the report or the connection the reply goes with. */
+	bool rx_free;
+	/* Initiator: the advertiser, and the TargetA a directed advertisement must carry. */
+	const uint8_t *adv_addr;
+	bool adv_addr_type;
+	const uint8_t *init_addr;
+	bool init_addr_type;
+	/* Initiator, extended filter policy: any resolvable private TargetA. */
+	bool tgta_rpa;
+	/*
+	 * Initiator: answered only when the frame ends less than @p latest_us after the event
+	 * timer's start (radio_tmr_end_get()), taken modulo @p period_us when that is not 0;
+	 * @p timed false: whenever.
+	 */
+	bool timed;
+	uint32_t latest_us;
+	uint32_t period_us;
+};
+void efr32_radio_scan_stage(const struct efr32_radio_scan_stage *stage);
+/*
  * The sequencer's decision on the frame just received: 0 when the receive was not staged, 1 with
  * @p outcome (EFR32_SEQ_CONN_OUT_*), -1 when staged but no decision was taken (nothing was sent).
  */

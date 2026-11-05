@@ -155,20 +155,35 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "preempt timeout restart asserts it was not already scheduled")
 
   # OpenISA's scanner arms an RX->TX turnaround for every receive window, a passive scanner's
-  # included. On the EFR32 an armed window holds the RAC in RX2TX at each frame's end and gives
-  # the frame's completion the T_IFS response deadline (docs/radio-tables.md 7.77), which a
-  # passive scanner, which never responds, has no reason to meet: on silicon admission found it
-  # unsat at the first received advertisement (7.80). Arm the turnaround only where a response
-  # can follow: an active scanner's SCAN_REQ or an initiator's CONNECT_IND.
+  # included; efr32_scan_switch() (lll/lll_scan_stage.c) arms it only where a response can follow,
+  # an active scanner's SCAN_REQ or an initiator's CONNECT_IND, and stages that response: the
+  # sequencer answers at T_IFS by isr_rx_pdu()'s rules and isr_rx_pdu() commits the same answer
+  # (docs/radio-tables.md 7.87). With EFR32_RADIO_CONN_STAGED off only the turnaround is armed.
   efr32_radio_patch(lll/lll_scan.c "static void isr_race(void *param);\n"
-            "static void isr_race(void *param);\n\nstatic void efr32_scan_switch(const struct lll_scan *lll)\n{\n\tbool respond = (lll->type != 0U);\n\n#if defined(CONFIG_BT_CENTRAL)\n\trespond = respond || (lll->conn != NULL);\n#endif /* CONFIG_BT_CENTRAL */\n\tif (respond) {\n\t\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY,\n\t\t\t\t\t     PHY_FLAGS_UNUSED);\n\t} else {\n\t\tradio_switch_complete_and_disable();\n\t}\n}\n"
-            "passive scanner: no RX->TX turnaround")
+            "static void isr_race(void *param);\n#include \"hal/efr32/radio_conn.h\"\n#include \"hal/efr32/ll_deadlines.h\"\nstatic void efr32_scan_switch(struct lll_scan *lll);\nstatic bool efr32_scan_declined(bool declines);\nstatic void efr32_scan_stage_next(struct lll_scan *lll);\n"
+            "staged scanner replies: declarations")
   efr32_radio_patch(lll/lll_scan.c "\tradio_isr_set(isr_rx, lll);\n\n\t/* setup tIFS switching */\n\tradio_tmr_tifs_set(EVENT_IFS_US);\n\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY, PHY_FLAGS_UNUSED);\n"
             "\tradio_isr_set(isr_rx, lll);\n\n\t/* setup tIFS switching */\n\tradio_tmr_tifs_set(EVENT_IFS_US);\n\tefr32_scan_switch(lll);\n"
             "passive scanner: no RX->TX turnaround at prepare")
   efr32_radio_patch(lll/lll_scan.c "\tradio_switch_complete_and_tx(PHY_LEGACY, PHY_FLAGS_UNUSED, PHY_LEGACY, PHY_FLAGS_UNUSED);\n\n\tnode_rx = ull_pdu_rx_alloc_peek(1);\n\tLL_ASSERT(node_rx);\n\tradio_pkt_rx_set(node_rx->pdu);\n\n#if defined(CONFIG_BT_CTLR_PRIVACY)"
             "\tefr32_scan_switch(param);\n\n\tnode_rx = ull_pdu_rx_alloc_peek(1);\n\tLL_ASSERT(node_rx);\n\tradio_pkt_rx_set(node_rx->pdu);\n\n#if defined(CONFIG_BT_CTLR_PRIVACY)"
             "passive scanner: no RX->TX turnaround after a closed exchange")
+  efr32_radio_patch(lll/lll_scan.c "\t\tuint32_t err;\n\n\t\t/* setup tIFS switching */\n\t\tradio_tmr_tifs_set(EVENT_IFS_US);\n\t\tradio_switch_complete_and_rx(0);\n"
+            "\t\tuint32_t err;\n\n\t\t/* A staged SCAN_REQ: what the sequencer sent, or nothing. */\n\t\tif (efr32_scan_declined(false)) {\n\t\t\treturn 1;\n\t\t}\n\n\t\t/* setup tIFS switching */\n\t\tradio_tmr_tifs_set(EVENT_IFS_US);\n\t\tradio_switch_complete_and_rx(0);\n"
+            "staged scanner replies: the sequencer's SCAN_REQ decision")
+  efr32_radio_patch(lll/lll_scan.c "\t\tlll->state = 1U;\n\t\tradio_isr_set(isr_tx, lll);\n"
+            "\t\tlll->state = 1U;\n\t\tradio_isr_set(isr_tx, lll);\n\t\tefr32_scan_stage_next(lll);\n"
+            "staged scanner replies: stage the SCAN_RSP receive")
+  if(CONFIG_BT_CENTRAL)
+    efr32_radio_patch(lll/lll_scan.c "\t\tif (pdu_end_us > (HAL_TICKER_TICKS_TO_US(ull->ticks_slot) -\n\t\t\t\t  EVENT_IFS_US - 352 - EVENT_OVERHEAD_START_US -\n\t\t\t\t  EVENT_TICKER_RES_MARGIN_US)) {\n"
+              "\t\t/* A staged CONNECT_IND: what the sequencer sent, or nothing. */\n\t\tif (efr32_scan_declined(pdu_end_us > (HAL_TICKER_TICKS_TO_US(ull->ticks_slot) -\n\t\t\t\t  EVENT_IFS_US - 352 - EVENT_OVERHEAD_START_US -\n\t\t\t\t  EVENT_TICKER_RES_MARGIN_US))) {\n"
+              "staged initiator replies: the sequencer's CONNECT_IND decision")
+    # WinOffset: hal/efr32/ll_deadlines.h EFR32_DL_CONNECT_IND_WIN_OFFSET.
+    efr32_radio_patch(lll/lll_scan.c "\t\t\tconn_space_us = conn_offset_us;\n\t\t\tpdu_tx->connect_ind.win_offset = sys_cpu_to_le16(0);\n"
+              "\t\t\tconn_space_us = conn_offset_us + EFR32_DL_CONNECT_IND_WIN_OFFSET *\n\t\t\t\t\t\t\t BT_TRANSMIT_WINDOW_UNIT_US;\n\t\t\tpdu_tx->connect_ind.win_offset =\n\t\t\t\tsys_cpu_to_le16(EFR32_DL_CONNECT_IND_WIN_OFFSET);\n"
+              "initiator: the WinOffset the connection setup needs")
+  endif()
+  file(APPEND ${GEN}/lll/lll_scan.c "\n#include \"${CMAKE_CURRENT_LIST_DIR}/lll/lll_scan_stage.c\"\n")
 
   # Connection events tell the radio HAL what their jobs serve (hal/efr32/radio_conn.h): the
   # connection interval, whose next event the event's closing work serves, and, for a Peripheral,

@@ -234,16 +234,17 @@ config EFR32_RADIO_ADMISSION
 	  Specification and the measured times below
 	  (include/hal/efr32/ll_deadlines.h, docs/radio-tables.md 7.77).
 
-	  On by default with silicon's times, where the advertising and
-	  connection job sets are feasible: launches are timed by the
-	  sequencer and connection replies and scan responses are staged
-	  (EFR32_RADIO_CONN_STAGED, docs/radio-tables.md 7.82).
-	  Off by default with the QEMU model's: there the turnarounds the M33
-	  still decides are infeasible by analysis: the model's longest
+	  On by default with silicon's times, where the advertising,
+	  scanning, initiating and connection job sets are feasible: launches
+	  are timed by the sequencer and connection replies, scan responses,
+	  scan requests and CONNECT_INDs are staged (EFR32_RADIO_CONN_STAGED,
+	  docs/radio-tables.md 7.82, 7.87).
+	  Off by default with the QEMU model's: there the work the M33 still
+	  does in a turnaround is infeasible by analysis: the model's longest
 	  interrupt, 72.4 us, exceeds the ADV_IND completion's window (46.6 us
-	  after its post), a scanner's or initiator's response window and the
-	  QEMU TIFS turnaround's, so admission would stop the radio at the
-	  first one. Every start is still checked at run time.
+	  after its post) and the QEMU TIFS turnaround's, so admission would
+	  stop the radio at the first one. Every start is still checked at
+	  run time.
 
 choice EFR32_RADIO_TIMING
 	prompt "Platform the measured times come from"
@@ -641,6 +642,39 @@ config EFR32_RADIO_COMPLETION_TO_RESPOND_NS
 	  Longest path from an RX-with-response completion's start to the
 	  RESPOND store (radio_pkt_tx_set()): silicon 28.2 us (7.84; 24.7 us
 	  in 7.77), QEMU 43.2 us.
+
+config EFR32_RADIO_WCET_SCAN_COMMIT_NS
+	int "Scanner or initiator: staged receive's completion run (ns)"
+	default 59300 if EFR32_RADIO_TIMING_QEMU
+	default EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS
+	help
+	  The completion that commits the SCAN_REQ or CONNECT_IND the
+	  sequencer sent, or that it sent nothing (lll/lll_scan_stage.c,
+	  docs/radio-tables.md 7.87): QEMU 55.8 us (active scanner) and
+	  59.3 us (initiator). Not measured on silicon: the connection
+	  receive's commit and stage, which QEMU runs longer (76.3 us in the
+	  same runs), stands in with its silicon figure.
+
+config EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS
+	int "Scanner: staged completion's start to its commit (ns)"
+	default 37200 if EFR32_RADIO_TIMING_QEMU
+	default EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
+	help
+	  Longest path from the completion committing an active scanner's
+	  staged SCAN_REQ to radio_pkt_tx_set(), which re-arms the RX FIFO
+	  for the SCAN_RSP (7.87): QEMU 37.2 us. Not measured on silicon:
+	  the connection commit's path to the same store (QEMU 72.5 us)
+	  stands in with its silicon figure.
+
+config EFR32_RADIO_SCAN_COMMIT_TO_STAGED_NS
+	int "Scanner: staged completion's start to the next stage (ns)"
+	default 56800 if EFR32_RADIO_TIMING_QEMU
+	default EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS
+	help
+	  Longest path from the completion committing an active scanner's
+	  staged SCAN_REQ to the stage of the SCAN_RSP receive (7.87): QEMU
+	  56.8 us. Not measured on silicon: the connection commit's path to
+	  its next stage (QEMU 68.8 us) stands in with its silicon figure.
 
 config EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS
 	int "TX frame end to its completion's post, unblocked (ns)"

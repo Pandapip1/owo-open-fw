@@ -2033,14 +2033,22 @@ efr32_seq_conn_decide:
     beq 3f
     movs r0, #EFR32_SEQ_CONN_OUT_CRC_OK
     orrs r6, r0
-    movs r0, #EFR32_SEQ_CONN_ADV
+    movs r0, #EFR32_SEQ_CONN_SCAN
+    tst r5, r0
+    beq 21f
+    b .Lscan_answer
+21: movs r0, #EFR32_SEQ_CONN_ADV
     tst r5, r0
     beq 15f
     bl efr32_seq_adv_scan_req_match
     cmp r0, #0
     bne 16f
     b 14f
-3:  movs r0, #EFR32_SEQ_CONN_ADV
+3:  movs r0, #EFR32_SEQ_CONN_SCAN
+    tst r5, r0
+    beq 22f
+    b .Lscan_silent
+22: movs r0, #EFR32_SEQ_CONN_ADV
     tst r5, r0
     beq 17f
     /* An advertiser answers nothing but a matching SCAN_REQ; the event then ends. */
@@ -2169,6 +2177,66 @@ efr32_seq_conn_decide:
     str r1, [r0]
 13: movs r0, #1
     pop {r4-r7, pc}
+.Lscan_answer:
+    /* A scanner's or initiator's receive (seq_abi.h EFR32_SEQ_CONN_SCAN). */
+    bl efr32_seq_scan_match
+    cmp r0, #0
+    beq .Lscan_silent
+    ldr r0, =EFR32_SEQ_CONN_INIT
+    tst r5, r0
+    beq 23f
+    /* The CONNECT_IND goes out unchanged and ends the event. */
+    b 16b
+23: /* The SCAN_REQ: RxAdd the frame's TxAdd, AdvA the frame's; the SCAN_RSP
+     * receive follows it. */
+    movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_REPLY)
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    ldr r2, [r7, #EFR32_SEQ_CONN_CUR]
+    ldrb r0, [r2]
+    movs r1, #(1 << EFR32_SEQ_ADV_RXADD_BIT)
+    bics r0, r1
+    lsrs r1, r4, #EFR32_SEQ_ADV_TXADD_BIT
+    movs r3, #1
+    ands r1, r3
+    lsls r1, r1, #EFR32_SEQ_ADV_RXADD_BIT
+    orrs r0, r1
+    mov r4, r0
+    ldr r0, =EFR32_SEQ_FRC_WCNTCMP0
+    movs r1, #EFR32_SEQ_FRC_WCNTCMP0_LENGTH_PENDING
+    str r1, [r0]
+    ldr r0, =EFR32_SEQ_BUFC_TX_CMD
+    movs r1, #EFR32_SEQ_BUFC_CMD_CLEAR
+    str r1, [r0]
+    ldr r0, =EFR32_SEQ_BUFC_TX_WRITEDATA
+    str r4, [r0]
+    movs r1, #1
+1:  ldrb r4, [r2, r1]
+    str r4, [r0]
+    adds r1, #1
+    cmp r1, #EFR32_SEQ_SCAN_REQ_ADVA_OCTET
+    blo 1b
+    /* AdvA: the frame's payload octets 0-5; the FIFO wraps. */
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r3, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    ldr r5, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    adds r5, #2
+    movs r1, #0
+2:  adds r4, r5, r1
+    ands r4, r3
+    ldrb r4, [r2, r4]
+    str r4, [r0]
+    adds r1, #1
+    cmp r1, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 2b
+    b 12b
+.Lscan_silent:
+    /* Nothing is sent; the scanner listens on. */
+    movs r0, #EFR32_SEQ_CONN_OUT_VALID
+    orrs r6, r0
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
+    movs r0, #0
+    pop {r4-r7, pc}
 .ltorg
 
 /*
@@ -2196,26 +2264,193 @@ efr32_seq_adv_scan_req_match:
     movs r1, #1
 1:  cmp r0, r1
     bne 8f
-    /* AdvA, at payload octet 6, against the staged one; the FIFO wraps. */
-    ldr r0, [r7, #EFR32_SEQ_CONN_RX_BASE]
-    ldr r1, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
-    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MASK]
-    adds r1, #(2 + EFR32_SEQ_ADV_SCAN_REQ_ADVA)
-    movs r3, #0
-2:  mov r4, r1
-    adds r4, r4, r3
-    ands r4, r2
-    ldrb r4, [r0, r4]
-    movs r5, #EFR32_SEQ_CONN_ADVA
-    adds r5, r5, r3
-    ldrb r5, [r7, r5]
-    cmp r4, r5
-    bne 8f
-    adds r3, #1
-    cmp r3, #EFR32_SEQ_ADV_ADDR_LEN
-    blo 2b
-    movs r0, #1
+    /* AdvA, at payload octet 6, against the staged one. */
+    movs r0, #(2 + EFR32_SEQ_ADV_SCAN_REQ_ADVA)
+    movs r1, #EFR32_SEQ_CONN_ADVA
+    bl efr32_seq_rx_addr_eq
     pop {r4-r6, pc}
 8:  movs r0, #0
     pop {r4-r6, pc}
 .ltorg
+
+/*
+ * Whether a scanner's or initiator's received frame is answered (seq_abi.h
+ * EFR32_SEQ_CONN_SCAN), as lll_scan.c's isr_rx_pdu() decides without privacy:
+ * an active scanner's SCAN_REQ, an initiator's CONNECT_IND.  r7 the stage
+ * block, r4 the received header octet, r3 its length, r5 FLAGS.  Returns
+ * r0 = 1 to answer.  Clobbers r0-r3; preserves r4-r7.
+ */
+.thumb_func
+efr32_seq_scan_match:
+    push {r4-r6, lr}
+    /* An RX buffer for what the link layer reports. */
+    movs r0, #EFR32_SEQ_CONN_RX_FREE
+    tst r5, r0
+    beq 8f
+    movs r6, #EFR32_SEQ_ADV_TYPE_MASK
+    ands r6, r4
+    ldr r0, =EFR32_SEQ_CONN_INIT
+    tst r5, r0
+    bne 4f
+    ldr r0, =EFR32_SEQ_CONN_SCAN_REQ
+    tst r5, r0
+    beq 8f
+    /* Active scanner: an ADV_IND or ADV_SCAN_IND, with its AdvA. */
+    cmp r6, #EFR32_SEQ_ADV_IND_TYPE
+    beq 1f
+    cmp r6, #EFR32_SEQ_ADV_SCAN_IND_TYPE
+    bne 8f
+1:  cmp r3, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 8f
+    cmp r3, #EFR32_SEQ_ADV_IND_LEN_MAX
+    bhi 8f
+    b 9f
+4:  /* Initiator: from the advertiser it connects to (TxAdd, then AdvA below). */
+    lsrs r0, r4, #EFR32_SEQ_ADV_TXADD_BIT
+    movs r1, #1
+    ands r0, r1
+    movs r1, #EFR32_SEQ_CONN_ADV_TXADD
+    ands r1, r5
+    beq 5f
+    movs r1, #1
+5:  cmp r0, r1
+    bne 8f
+    cmp r6, #EFR32_SEQ_ADV_IND_TYPE
+    bne 6f
+    cmp r3, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 8f
+    cmp r3, #EFR32_SEQ_ADV_IND_LEN_MAX
+    bhi 8f
+    b 7f
+6:  cmp r6, #EFR32_SEQ_ADV_DIRECT_IND_TYPE
+    bne 8f
+    cmp r3, #EFR32_SEQ_ADV_DIRECT_IND_LEN
+    bne 8f
+    /* TargetA: with the extended filter policy any resolvable private address
+     * (RxAdd 1), else ours. */
+    lsrs r6, r4, #EFR32_SEQ_ADV_RXADD_BIT
+    ldr r0, =EFR32_SEQ_CONN_INIT_TGTA_RPA
+    tst r5, r0
+    beq 10f
+    cmp r6, #1
+    bne 10f
+    ldr r0, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r1, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    adds r1, #(2 + EFR32_SEQ_ADV_DIRECT_TARGETA + EFR32_SEQ_ADDR_TYPE_OCTET)
+    ands r1, r2
+    ldrb r1, [r0, r1]
+    movs r2, #EFR32_SEQ_ADDR_TYPE_MASK
+    ands r1, r2
+    cmp r1, #EFR32_SEQ_ADDR_TYPE_RPA
+    beq 7f
+10: movs r1, #0
+    ldr r0, =EFR32_SEQ_CONN_INIT_RXADD
+    tst r5, r0
+    beq 11f
+    movs r1, #1
+11: cmp r6, r1
+    bne 8f
+    movs r0, #(2 + EFR32_SEQ_ADV_DIRECT_TARGETA)
+    movs r1, #EFR32_SEQ_CONN_INITA
+    bl efr32_seq_rx_addr_eq
+    cmp r0, #0
+    beq 8f
+7:  movs r0, #2
+    movs r1, #EFR32_SEQ_CONN_ADVA
+    bl efr32_seq_rx_addr_eq
+    cmp r0, #0
+    beq 8f
+    ldr r0, =EFR32_SEQ_CONN_INIT_TIMED
+    tst r5, r0
+    beq 9f
+    bl efr32_seq_init_in_slot
+    pop {r4-r6, pc}
+9:  movs r0, #1
+    pop {r4-r6, pc}
+8:  movs r0, #0
+    pop {r4-r6, pc}
+.ltorg
+
+/*
+ * The 6-octet address at octet r0 of the received frame (the FIFO wraps)
+ * equals the one at offset r1 of the stage block r7.  Returns r0 = 1 when it
+ * does.  Clobbers r0-r3; preserves r4-r7.
+ */
+.thumb_func
+efr32_seq_rx_addr_eq:
+    push {r4-r6, lr}
+    ldr r2, [r7, #EFR32_SEQ_CONN_RX_OFFSET]
+    adds r4, r2, r0
+    adds r5, r7, r1
+    ldr r6, [r7, #EFR32_SEQ_CONN_RX_BASE]
+    ldr r3, [r7, #EFR32_SEQ_CONN_RX_MASK]
+    movs r1, #0
+1:  adds r0, r4, r1
+    ands r0, r3
+    ldrb r0, [r6, r0]
+    ldrb r2, [r5, r1]
+    cmp r0, r2
+    bne 8f
+    adds r1, #1
+    cmp r1, #EFR32_SEQ_ADV_ADDR_LEN
+    blo 1b
+    movs r0, #1
+    pop {r4-r6, pc}
+8:  movs r0, #0
+    pop {r4-r6, pc}
+
+/*
+ * The initiator's frame ended early enough in its scan slot for the
+ * CONNECT_IND (seq_abi.h EFR32_SEQ_CONN_INIT_TIMED): its end on TIMER0 is now
+ * less RAC.STIMER (counting since RX2TX began) in TIMER0 counts, less the
+ * RXFRAME exit.  r7 the stage block.  Returns r0 = 1 when in the slot.
+ * Clobbers r0-r3.
+ */
+.thumb_func
+efr32_seq_init_in_slot:
+    push {r4, lr}
+    ldr r0, =EFR32_RAC_STIMER
+    ldr r0, [r0]
+    uxth r0, r0
+    ldr r1, =EFR32_SEQ_TIMER0_CNT_NS
+    ldr r1, [r1]
+    ldr r2, [r7, #EFR32_SEQ_SCAN_T0_PER_STIMER_Q8]
+    muls r0, r2, r0
+    lsrs r0, r0, #EFR32_SEQ_SCAN_Q8_SHIFT
+    subs r1, r1, r0
+    ldr r0, [r7, #EFR32_SEQ_SCAN_EOF_TO_EXIT]
+    subs r1, r1, r0
+    ldr r0, [r7, #EFR32_SEQ_SCAN_START]
+    subs r0, r1, r0
+    ldr r1, [r7, #EFR32_SEQ_SCAN_PERIOD]
+    cmp r1, #0
+    beq 1f
+    bl efr32_seq_umod
+1:  ldr r1, [r7, #EFR32_SEQ_SCAN_LATEST]
+    cmp r0, r1
+    blo 2f
+    movs r0, #0
+    pop {r4, pc}
+2:  movs r0, #1
+    pop {r4, pc}
+.ltorg
+
+/* r0 = r0 mod r1 (unsigned, r1 not 0), by shift and subtract.  Clobbers r2-r3. */
+.thumb_func
+efr32_seq_umod:
+    mov r2, r1
+1:  lsls r3, r2, #1
+    bcs 2f
+    cmp r3, r0
+    bhi 2f
+    mov r2, r3
+    b 1b
+2:  cmp r0, r2
+    blo 3f
+    subs r0, r0, r2
+3:  cmp r2, r1
+    beq 4f
+    lsrs r2, r2, #1
+    b 2b
+4:  bx lr
