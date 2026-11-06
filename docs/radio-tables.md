@@ -8746,3 +8746,174 @@ taken as locked. qtests: `synth-locnt-counts-lo`, `synth-calibration-open-loop`,
 `synth-freq-step-settles`, `synth-large-step-slews`, `synth-lo-stops-at-vco-limit`,
 `synth-channel-and-offset-fields`, and the range qtests at the new edges; rf 43/43 and machine
 123/123 qtests pass, and the amateur dual-machine e2e passes.
+
+### 7.93 CPU execution timing: the M33 counts cycles per instruction class
+
+Tags: **[F]** measured on silicon, **[I]** inferred, **[P]** placeholder (unmeasured), **[Q]**
+measured in QEMU. QEMU branch `cpu-timing` in vendor/qemu (commit "arm, efr32bg22: count Armv8-M
+cycles per instruction class on the M33"), on `d4eb4aca99`. Probe image `tests/cpu-timing-port`
+(same image on silicon and in QEMU). Scratch: `scratch/cputime/` (dual.sh, run1.sh, mixstream.py,
+dur.py, logs). "Old" below is the same tree before this change (M33 at a flat 1.84 cycles per
+instruction, `build/qemu-new`).
+
+**The problem.** The M33 advanced 1.84 cycles per instruction, snprintk's average (7.75), with the
+bus model's access costs on top: an ALU loop ran 1.84x slower than silicon and a radio load cost
+1.84 + 2.875 = 4.7 cycles against 3.875 measured. Flash and SRAM data, which QEMU maps as RAM, never
+reached the bus model (B77).
+
+**Model.**
+- M33 (`target/arm/tcg/translate.c`, `armv8m_main_extra_mc`): one cycle per instruction plus a
+  per-class extra, counted by the translator as the M0+'s Armv6-M counts are (the extra counter
+  is now in millicycles):
+
+| class | cycles | source |
+|---|---|---|
+| ALU (16- and 32-bit), single load or store | 1 (+ target, below) | [F] 7.75 kernels |
+| NOP (16-bit) | 0.5 | [F] dual issue |
+| taken B<c> | 2 | [F] loop overhead 3 = SUBS 1 + BNE 2 |
+| B, BL, BX, BLX, taken CBZ/CBNZ, POP/LDM/LDR to PC, TBB/TBH | +1 refill | [I] as the taken B<c> |
+| LDM/STM/PUSH/POP of N words, LDRD/STRD | N, 2 | [I] one 32-bit word per bus cycle (single load 1 [F]) |
+| MUL/MLA/UMULL/UMLAL/UMAAL, MRS/MSR, barriers, NOP.W | 1 | [P] |
+| SDIV/UDIV | 12 | [P] Cortex-M4 TRM worst case |
+| IT-block folding (RM 6.3.10), dual issue other than NOP, load-use stalls | not modelled | [P] |
+
+- Data accesses to RAM-mapped memory (`icount_set_cpu_mem_costs`, read when the access runs),
+  extra over the instruction's cycle [F] unless noted:
+
+| code in | flash data (code region < 0x20000000) | SRAM |
+|---|---|---|
+| flash | load +3.5 (4.5 total) at MSC.READCTRL MODE = WS1 | 0 (1 total) |
+| SRAM | load +3.0 (4.0 total) | +0.5 (1.5 total) |
+
+  Literal pools cost as flash data [I]: RM 6.5 passes data reads of the code region through the
+  instruction cache uncached. Each wait state beyond WS1 adds one cycle [I] (RM 6.3.9), following
+  READCTRL writes. Peripheral, radio, BUFC and SEQRAM costs are the interconnect's (7.74),
+  unchanged; its M33 entries now sit on a 1-cycle instruction, as their calibration assumed.
+- Instruction fetch from flash: every fetch hits the instruction cache [P]. The cache's size,
+  associativity and miss cost are not in the RM and were not measured.
+- M0+ exception entry: scaled by the M33's SEQRAM tenures inside the entry itself (was: the last
+  round's average), and an entry restarts the M0+'s SEQRAM-local run, so M33 SEQRAM writes made while
+  the M0+ slept (the timed post's TARGET, LIMIT, DONE, OP) no longer cost it. Calibration
+  unchanged (14 cycles, 45 under full M33 SEQRAM streaming).
+- Tried and withdrawn: M0+ SEQRAM stores at 2.5 cycles (the 7.75 kernels' average). The sequencer's
+  delay loop takes 7 cycles per pass with its store at 2 and a copy at another address 8, so the
+  0.5 is a fetch-alignment effect; charging every store 2.5 lengthened TXWARM by 2.6 us and TX2RX
+  by 4.8 us against silicon. The Armv6-M 2 stands [P].
+
+**Kernels** (`tests/cpu-timing-port`, model): every M33 row of the 7.75 table reproduces to the
+cycle, code in flash and in SRAM: ALU 1, NOP 0.5, SRAM 1 / 1.5, flash 4.5 / 4.0, SEQRAM 1.875 /
+3.625, radio 3.875 / 5.625, BUFC 1.875 / 3.625, CMU and GPIO 3.875 / 5.125, TIMER1 11.875 / 13.125
+(old: 1.84 for every ALU or RAM instruction, 4.7 radio, 12.7 TIMER1). qtest
+`core-clocks-m33-access-costs` pins NOP, SRAM and flash loads, WS0/WS3 and SRAM-resident code.
+
+**Functions** (warm, less the empty call, 17 cycles (old 13); silicon 7.75):
+
+| function | silicon | old | model |
+|---|---|---|---|
+| memset 256 B (1030 insns) | 1542 | 1900 | 1549 |
+| strlen 11 chars (49 insns) | 71 | 90 | 71 |
+| memcpy 256 B (1286 insns) | 2057 | 2372 | 1811 |
+| snprintk | 7973 (4342 insns) | 7860 | 6404 (4706 insns: not the same code) |
+
+memcpy's byte loop (CMP, BNE taken, LDRB.W post-index, STRB.W pre-index writeback, B) is 8.03
+cycles per byte on silicon and 7 in the model: one cycle per iteration that memset's loop (no load)
+does not show. Three mechanisms fit (a store of the register the previous load wrote, any load then
+store, a pre-indexed writeback store); the probe kernels `k_ldr_str_dep`, `k_ldr_str_indep`,
+`k_ldrb_strb_wb` and `k_str_pre_wb` tell them apart. Not modelled until measured.
+
+**tests/crypto-port** (DWT cycles, min of 64 or of 2; silicon docs/crypto.md 4, 7.89):
+
+| operation | silicon | old | model |
+|---|---|---|---|
+| ECB direct | 437-484 | 414 | 365 |
+| CMAC 16 / 65 | 794 / 858 | 797 / 877 | 680 / 789 |
+| CCM enc 1 / 27 / 251 | 1185 / 1171 / 2740 | 1187 / 1292 / 2862 | 990 / 1100 / 2667 |
+| CCM dec 27 / 251 | 1205 / 2771 | 1334 / 2904 | 1124 / 2691 |
+| PSA ECB / CMAC 65 / CCM 27 | 3411 / 4198 / 4235 | 3161 / 4007 / 4061 | 2617 / 3314 / 3349 |
+| multi-part CMAC 65 / 256 | 9564 / 16891 | 10256 / 18797 | 8055 / 14767 |
+| P-256 key generation + export | 27 060 470 | 29 957 148 | 22 582 678 |
+| P-256 ECDH | 13 418 834 | 14 988 892 | 11 229 189 |
+
+The model now runs compiled C 6-22 % short of silicon. The ECDH call's mix [Q] (one-instruction TB
+trace, `mixstream.py`): 9.05 M instructions, 734 k long multiplies, 89.6 k MUL, 2.58 M loads,
+1.53 M stores, 135 k LDM + 135 k STM (874 k extra words), 772 k taken branches, 208 k load-use
+pairs, 37 divides. Its 2.19 M missing cycles equal 3 extra cycles per long multiply to 0.5 %, but
+equally 2.5 per extra LDM/STM word or 2.8 per taken branch; key generation (two calls of the same
+code) cannot separate them. `k_umull`, `k_umaal`, `k_umull_use`, `k_ldm4/8`, `k_push_pop4/8`, `k_bl`
+do. Nothing is fitted to it.
+
+**Radio paths** (hardware-configuration images in the dual machine, shift 3, the same images under
+both binaries; silicon from 7.82 for the stage-3 advertiser and 7.84 C1 for the connection
+profile, unencrypted; us unless stated):
+
+| path | silicon | old | model |
+|---|---|---|---|
+| advertiser: TX launch start -> TXEN post | 20.4 | 14.4 | 14.3 |
+| advertiser: completion TX->RX (ADV_IND) | 46.4 (7.77) | 49.9 | 46.9 |
+| advertiser: completion RX->TX (SCAN_REQ) | 47.0 | 24.2 | 22.9 |
+| advertiser: start -> PENDING / RESPOND | 27.6 / 27.8 (7.84) | 24.6 / 21.7 | 21.8 / 20.2 |
+| Peripheral: conn completion TX->RX | 179.1 | 144.4 | 129.9 |
+| Peripheral: conn completion RX->TX | 98.9 | 76.1 | 69.1 |
+| Peripheral: start -> PENDING / RESPOND / STAGED | 144.0 / 78.9 / 95.0 | 108.4 / 56.8 / 68.9 | 109.5 / 64.9 / 64.6 |
+| Peripheral: held RX launch run | 18.8 | 13.1 | 13.6 |
+| sequencer: post -> first poll (TIMER0 counts at 76.8 MHz) | 136-140 | 211-212 | 187 |
+| sequencer: instant -> TIMER0 read after the command store (counts) | 111-121 | 127 (adv), 304 (conn) | 108 (adv), 140 (conn) |
+| TXWARM (RAC 0->8 .. 8->9) | 91.03 | 92.79 (91.63-94.18) | 92.65 (91.18-94.33) |
+| TX2RX (RAC 9->11 .. 11->2) | 123.53 | 126.18 (125.66-127.35) | 125.81 (124.89-127.00) |
+
+The M33 paths moved by 0.90-1.14x (the access-heavy paths were already priced per access) and now
+run 20-35 % short of silicon, more than compiled C in a tight loop (6-22 %). Radio paths run once
+per event through code the rest of the stack has since evicted, so [I] instruction-cache misses
+are the leading candidate; the model has none. The earlier "1.2-4x slower" figures (7.77) compared
+QEMU-configuration images (TIFS and RX-descriptor seams) with silicon's hardware configuration; in
+the same image the model was already within 0.5-1.1x. The sequencer wake keeps 51 counts (27 M0+
+cycles) more than silicon; [Q] it includes the end of whatever handler the M0+ was in at the post,
+not split yet.
+
+**Admission.**
+- Silicon budgets and admission in QEMU, hardware configuration (`EFR32_RADIO_TIMING_SILICON`,
+  `EFR32_RADIO_ADMISSION=y`): Peripheral + Central with GATT, 502 s virtual, 0 misses and 0 unsat
+  on both; the advertiser 81 s, 0 misses. Since the model is now faster than silicon on every M33
+  path, admission on silicon figures is feasible in QEMU, but it says nothing new about silicon.
+- QEMU-timed images (`EFR32_RADIO_TIMING_QEMU`): admission stays off. Their budgets are QEMU
+  figures measured on the old model (Kconfig help updated), and the infeasibility 7.77 derived is
+  in the QEMU-configuration seam (a 72.4 us interrupt against a 46.6 us window, the TIFS turnaround
+  counted from the LLL callback), not in the CPU's rate; a 0.9-1.14x change cannot close it.
+  Turning it on needs the QEMU figures re-measured on this model and the seam retired (7.77 Open).
+
+**Tests.** qtests: efr32bg22-test 124/124 (one new), efr32bg22-rf-test 43/43. e2e, new model:
+radio-port smoke, radio-rx-port smoke, connection (60 s: 120 GATT rounds, no disconnection),
+scheduler-deadline (BURTC suite), amateur (call sign, OOK identification) pass. radio-rx-port dual
+(scanner RX arm before the advertiser's first snapshot) and active-scan (0 ordered exchanges) fail
+with the old binary on the same images too. The hardware-configuration active scanner hits
+`LL_ASSERT` in `radio_disable()` (staged-reply outcome check) at 19.8 s old and 41.5 s new: a
+firmware defect, not this change. The simulation runs about 27 % slower (502 vs 684 s virtual in
+150 s wall): every RAM load and store now carries its address check.
+
+**Silicon measurements still needed** (`tests/cpu-timing-port` on the BGM220 kit prints all of them,
+code in flash and in SRAM; the `I` lines need ICACHE0's bus clock, CMU.CLKEN1 bit 16, which is why
+the debugger could not read the cache registers in 7.75):
+1. Multiplies: `k_mul`, `k_mla`, `k_umull`, `k_umlal`, `k_umaal`, `k_umull_use`, `k_umull_chain`.
+2. Divides: `k_udiv_*`, `k_sdiv_*` at four operand pairs (early termination).
+3. Multiple transfers: `k_ldm2/4/8`, `k_stm4`, `k_push_pop1/4/8`, `k_ldrd`, `k_strd`, from SRAM
+   and flash.
+4. Branches other than a taken B<c>: `k_b`, `k_bl`, `k_blx`, `k_cbnz_taken`, `k_cbz_not`,
+   `k_bcc_not`; IT folding: `k_it_taken`, `k_it_not`.
+5. Load/store interactions (the memcpy cycle): `k_ldr_use`, `k_ldr_str_dep`, `k_ldr_str_indep`,
+   `k_ldrb_strb_wb`, `k_str_pre_wb`, `k_str_post_wb`, `k_ldr_ldr`.
+6. Literal loads: `k_ldr_lit`, `k_ldr_lit_alu` (the 4.5 inference).
+7. Dual issue: `k_alu_pair` (independent 16-bit ALU), `k_nop_w`; system: `k_mrs`, `k_msr`, barriers.
+8. Instruction cache: `ic_512` .. `ic_16k` cold (after FLUSH) and warm, with PCHITS/PCMISSES:
+   size, miss cost and whether a straight-line block larger than the cache misses warm. Then the
+   perf counters around the radio completion paths (STARTPC/STOPPC in a probe build) to test the
+   cache-miss hypothesis for their 20-35 %.
+9. Functions in the same image: `C` lines (snprintk, memcpy, memset, strlen), cold and warm.
+10. M33 exception entry with flash-resident vectors (17 cycles assumed from SRAM vectors) and both
+    cores' exception return.
+11. M0+ SEQRAM store by alignment: eight `str` kernels at each halfword offset mod 8 and the delay
+    loop at each, to replace the Armv6-M 2.
+12. The sequencer wake split: a SysTick stamp at the IRQ 23 entry in a probe build of the sequencer.
+
+**Open.** The placeholders above; instruction-cache misses; M33 SRAM occupancy still invisible to
+the interconnect, so M33 SRAM traffic does not slow the M0+ (B77); QEMU-timed Kconfig figures to be
+re-measured on this model.
