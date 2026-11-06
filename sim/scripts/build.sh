@@ -9,8 +9,9 @@ export BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:--D_GCC_ARM_ACLE_H -
 D=$1
 shift
 BUILD_DIR="${BUILD_DIR:-$ROOT/build/$D}"
-EXTRA_MODULES="${ZEPHYR_EXTRA_MODULES:-$ROOT/vendor/zephyr-lang-rust}"
+MODULES="${ZEPHYR_MODULES:-$ROOT/vendor/cmsis_6;$ROOT/vendor/hal_silabs;$ROOT/vendor/mbedtls;$ROOT/vendor/tf-psa-crypto;$ROOT/vendor/zephyr-lang-rust}"
 
-cd "$ROOT"
-west build -p always -b bg22_ek4108a -d "$BUILD_DIR" . -- \
-  -DCONFIG_BUILD_ONLY_NO_BLOBS=y -DZEPHYR_EXTRA_MODULES="$EXTRA_MODULES" "$@"
+# No west workspace: the submodules are the Zephyr tree.
+rm -rf "$BUILD_DIR"
+cmake -GNinja -S "$ROOT" -B "$BUILD_DIR" -DBOARD=bg22_ek4108a -DZEPHYR_MODULES="$MODULES" "$@"
+ninja -C "$BUILD_DIR" ${NINJA_JOBS:+-j "$NINJA_JOBS"}

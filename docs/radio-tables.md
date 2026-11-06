@@ -1,6 +1,6 @@
 # EFR32BG22 radio: register/table knowledge needed by the Zephyr LL port
 
-**Unvalidated on hardware.** Labels: **[F]** = fact from a cited public source or directly observed in a stock-firmware trace in the QEMU
+**Hardware status:** the open stack runs on BG22 silicon from §7.62 on; each section states what it measured. Labels: **[F]** = fact from a cited public source or directly observed in a stock-firmware trace in the QEMU
 model; **[I]** = inference, not confirmed. No blob bytes or disassembly are reproduced here. The QEMU radio model is checked
 against these findings in `docs/model-fidelity.md`.
 

@@ -183,11 +183,12 @@
                 # not carry that Apple-only resource compiler.
                 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
               ''}
-              # West wants the Zephyr tree; `west init -l . && west update` puts it next to this repo.
-              echo "OWO open firmware dev shell"
-              echo "  first time:  west init -l . && west update && west blobs fetch hal_silabs"
-              echo "  build:       west build -b bg22_ek4108a ."
-              echo "  QEMU:        mkdir -p build/qemu && (cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp)"
+              echo "OWO open firmware dev shell (no west workspace: the submodules are the tree)"
+              echo "  first time:  git submodule update --init --recursive"
+              echo "  build:       ZEPHYR_BASE=\$PWD/vendor/zephyr cmake -GNinja -S . -B build/ek -DBOARD=bg22_ek4108a \\"
+              echo "                 \"-DZEPHYR_MODULES=\$PWD/vendor/cmsis_6;\$PWD/vendor/hal_silabs;\$PWD/vendor/mbedtls;\$PWD/vendor/tf-psa-crypto;\$PWD/vendor/zephyr-lang-rust\""
+              echo "               ninja -C build/ek   (README.md \"Build\")"
+              echo "  QEMU:        mkdir -p build/qemu && (cd build/qemu && ../../vendor/qemu/configure --target-list=arm-softmmu --disable-docs --disable-capstone --enable-slirp --disable-werror)"
               echo "               ninja -C build/qemu qemu-system-arm"
               echo "  twister:     ZEPHYR_BASE=\$PWD/vendor/zephyr QEMU_BIN_PATH=\$PWD/build/qemu vendor/zephyr/scripts/twister \\"
               echo "                 -x=ZEPHYR_MODULES=\$PWD/vendor/cmsis_6 \\"

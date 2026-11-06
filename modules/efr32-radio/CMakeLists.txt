@@ -1,6 +1,6 @@
 # Out-of-tree lower link layer ("vendor") for Zephyr's split BLE controller on the EFR32BG22.
-# Hardware bring-up is in progress; TX reaches the radio state machine but the
-# stage-3 advertisement is not yet on air (docs/hardware-bringup.md).
+# Runs on silicon: advertising, scanning and encrypted connections on a BG22 kit
+# (docs/radio-tables.md §7.84, docs/hardware-bringup.md).
 # SPDX-License-Identifier: Apache-2.0
 #
 # Zephyr only knows the Nordic and OpenISA lower link layers (subsys/bluetooth/controller/

@@ -70,8 +70,8 @@ The USART tells a `serial` backend the guest's baud rate, parity, data and stop 
 port follows the firmware's configuration. Frames take their real duration in virtual time at
 the programmed rate (start, data, parity and stop bits; PCLK from CMU.SYSCLKCTRL); while the
 receiver is disabled the line is held, and once enabled, a frame completing into a full RX
-buffer is lost with RXOF as on silicon. Not modelled: synchronous (SPI) mode, IrDA, I2S, the
-USART timer comparators (Zephyr's async API), parity/framing errors and the EUSART.
+buffer is lost with RXOF as on silicon. Not modelled: IrDA, I2S, parity errors, TX sequencer delays,
+AUTOCS and secondary synchronous mode. The EUART is a separate model (docs/model-fidelity.md, ch. 21-22).
 
 `efr32bg22_usart_tx` still traces every transmitted byte (now at the frame's stop bit) and
 `efr32_usart_rx` every received one, so trace-based console reconstruction keeps working.

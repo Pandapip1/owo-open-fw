@@ -1,6 +1,6 @@
 # Zephyr split Link Layer (ULL/LLL) lower layer for the EFR32BG22 radio.
 #
-# UNVALIDATED ON HARDWARE and mostly stubs: see docs/zephyr-ll-port.md and docs/radio-tables.md.
+# Runs on BG22 silicon (docs/radio-tables.md §7.84); see docs/zephyr-ll-port.md.
 # SPDX-License-Identifier: Apache-2.0
 
 config BT_LLL_VENDOR_EFR32
