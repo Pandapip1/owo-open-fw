@@ -251,10 +251,12 @@ choice EFR32_RADIO_TIMING
 	default EFR32_RADIO_TIMING_SILICON
 	help
 	  Every budget and path below is measured on the platform that runs
-	  the image. QEMU (vendor/qemu, per-core clocks, the M33 at a flat
-	  1.84 cycles per instruction) runs this firmware's paths at other
-	  speeds than silicon, slower for most (docs/radio-tables.md 7.77), so
-	  its images declare its own measurements.
+	  the image. QEMU (vendor/qemu, per-core clocks) runs this firmware's
+	  paths at other speeds than silicon (docs/radio-tables.md 7.77, 7.93),
+	  so its images declare its own measurements. The QEMU figures below
+	  were taken with the M33 at a flat 1.84 cycles per instruction; with
+	  per-class cycle counts (7.93) the hardware-configuration paths run
+	  0.9-1.15x as long as those figures.
 
 config EFR32_RADIO_TIMING_SILICON
 	bool "Silicon (BG22)"
