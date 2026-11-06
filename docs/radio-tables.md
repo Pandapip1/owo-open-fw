@@ -8775,6 +8775,76 @@ taken as locked. qtests: `synth-locnt-counts-lo`, `synth-calibration-open-loop`,
 `synth-channel-and-offset-fields`, and the range qtests at the new edges; rf 43/43 and machine
 123/123 qtests pass, and the amateur dual-machine e2e passes.
 
+### 7.92 Safety 4 (QEMU only): the session-start safe shutdown, interrupt masking by I2C, the stock image on the model, run-to-run determinism
+
+Tags as in 7.79. Everything here is emulation (the suit board model, `docs/stim-simulation.md`);
+no hardware was used. Runs: the baselines area next to the stock dump (`safety4-2026-11-05/`).
+
+**The spontaneous safe shutdown at a session start** [E]. On the silicon-timing image (miss
+policy: the radio's safe shutdown) the kernel's timeout clock event was delivered 91-306 us late
+about 25 ms after a frame. The late delivery lines up with the pump's supply enable, a PCF857x
+port write: without DMA, Zephyr's `i2c_silabs` runs every leader transfer in the vendor's
+blocking state machine (`sl_i2c_leader_*_blocking`), which polls the bus inside
+`CORE_ENTER_ATOMIC`, so BASEPRI masks every kernel interrupt for the whole transfer (0.3 ms for a
+3-byte write at 100 kHz) and, with SDA held low, until its 1000 ms timeout, past the watchdog. Fix
+(vendor/zephyr 7b29ba0f741): leader transfers move on from the I2C interrupt, one bus event per
+interrupt, the caller waiting on the transfer semaphore for at most `I2C_SILABS_TIMEOUT` (1 ms in
+`owo-suit-hw.conf`: at most 22 transfers per pump pass with the bus dead fit the watchdog
+budget); a timeout aborts the transfer. Session starts with a late delivery: 16 of 30 before
+(104-306 us), 0 of 30 after.
+
+**The expander read while armed** [E]. With transfers no longer masking interrupts the pump reads
+the stop input every `OWO_STIM_STOP_INPUT_POLL_MS` (100 ms) while armed, not only while /INT is
+asserted: an expander that does not answer (address NACK, SDA held low) stops the output, the
+last live pulse 23.7 ms after the fault (before: stimulation went on). Longest watchdog feed
+interval with SDA stuck: 26.6 ms, no reset. RAM, `owo_suit -DOWO_HW=ON`: 30 596 -> 30 628 B. The
+boost supply enable is an expander output and stays as it was with the expander dead.
+
+**The stock image on the model** [E]. On vendor/qemu 32e626a the stock image never set up its
+watchdog or expander. Bisect (boot to 1.5 s, WDOG and I2C trace counts): first bad e6d6a85bb0. Three
+model gaps, in the order the image met them:
+- its start-up known-answer test of the TRNG conditioning function (key and blocks of NIST SP
+  800-38A F.2.1, the expected MAC that example's last CBC block) waited for the FIFO level
+  forever: the model had no test mode. Now TESTEN feeds TESTDATA to the conditioning function
+  (AES-128 CBC-MAC under KEY0-3, one MAC block to the FIFO; CONDBYPASS writes the blocks
+  unconditioned). The image writes NB128BITBLOCKS 0 with four blocks and expects one MAC, so 0
+  conditions four blocks [I]. vendor/qemu 549b715e3a; qtest `trng-conditioning-kat`.
+- its radio set-up waited for PRORTC (0xA8000000) to run: the model only stored its registers.
+  PRORTC is now a second RTCC instance (CMU.PRORTCCLKCTRL 0x248, reset LFRCO; IRQ 41; PRS producer
+  SOURCESEL 0x09, CCV0-1; public device header). d9c5166046; qtest `prortc-counts-and-compares`.
+- its PendSV sets RAC.EM1PCSR.RADIOEM1PMODE (bit 0) and polls RADIOEM1PACK (bit 17, public RAC_S
+  field model); the model never set ACK, the image hung 1.88 s after reset and WDOG0 (PERSEL 8,
+  LFRCO, 62.5 ms) reset it every 1.7-1.9 s. ACK now follows RADIOEM1PMODE at once [I: latency
+  unmeasured]; no EM1P request is raised. 14d73ed9ad; qtest `rac-em1p-ack`.
+
+Stock baseline scenario now: 1752 pulses, no resets (before: 0 pulses, 3 resets; the 2026-11-01
+run on 58ec437: 1709 pulses).
+
+**PCF8575 /INT** [F, datasheet]. The NXP data sheet generates the interrupt on a change of a pin
+in input mode and resets it when the pins return to the earlier levels or the port is read or
+written. The model compared all pins with the last read, so every output write (a supply enable,
+the DAC's /CLR) asserted /INT and cost the firmware a read. Now a pin written 0 is an output and
+raises nothing, and a read or write of a port resets that port's part. bf67918d93; board qtest
+`expander-int-inputs-only`.
+
+**Determinism** [E]. The same `-icount sleep=off` scenario with gdb stops gave different
+schedules run to run; two host-timing leaks:
+- the round-robin TCG thread runs every vCPU, and when one stopped (gdb watchpoint, EXCP_DEBUG)
+  or asked for a VM stop the others ran on until the main loop stopped the VM.
+  `cpu_stop_current()` now also stops the other vCPUs of its thread, and the EXCP_DEBUG path
+  calls it;
+- a stopped vCPU counts as idle, so with every vCPU stopped or halted
+  `icount_start_warp_timer()` moved QEMU_CLOCK_VIRTUAL to the next deadline before the VM was
+  marked stopped (a deadline then came late in the guest). No warp while a vCPU is stopped or
+  stopping.
+owo-suit's scripted pause uses `vm_stop()`. 915f06c59f. The same stimulation scenario with
+watchpoint waits: three different recordings in three runs before, three identical after (board
+VCD and trace hashes); without waits two of two identical.
+
+**Checks** after the fixes (after a clean rebuild of QEMU and the image): machine 126/126, rf
+43/43 and board 8/8 qtests pass. Open for silicon: the interrupt-driven I2C driver and its 1 ms
+timeout, the EM1PCSR acknowledge latency, the suit expander's /INT behaviour.
+
 ### 7.93 CPU execution timing: the M33 counts cycles per instruction class
 
 Tags: **[F]** measured on silicon, **[I]** inferred, **[P]** placeholder (unmeasured), **[Q]**

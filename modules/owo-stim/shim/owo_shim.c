@@ -415,26 +415,6 @@ int owo_suit_stop_input_get(void)
 {
 	return gpio_pin_get_dt(&stop_in);
 }
-
-/*
- * 1 while the stop input's controller asserts its interrupt line (a change not yet read), or
- * when it has none (only a read can tell). Reading the line is a plain GPIO read: no transfer
- * to the controller.
- */
-#define STOP_CTLR DT_GPIO_CTLR(SUIT, stop_gpios)
-#if DT_NODE_HAS_PROP(STOP_CTLR, int_gpios)
-static const struct gpio_dt_spec stop_ctlr_int = GPIO_DT_SPEC_GET(STOP_CTLR, int_gpios);
-
-int owo_suit_stop_input_pending(void)
-{
-	return gpio_pin_get_dt(&stop_ctlr_int) != 0;
-}
-#else
-int owo_suit_stop_input_pending(void)
-{
-	return 1;
-}
-#endif
 #else
 int owo_suit_stop_input_setup(void)
 {
@@ -444,11 +424,6 @@ int owo_suit_stop_input_setup(void)
 int owo_suit_stop_input_get(void)
 {
 	return -ENOTSUP;
-}
-
-int owo_suit_stop_input_pending(void)
-{
-	return 0;
 }
 #endif
 
@@ -768,11 +743,6 @@ int owo_suit_stop_input_setup(void)
 int owo_suit_stop_input_get(void)
 {
 	return -ENOTSUP;
-}
-
-int owo_suit_stop_input_pending(void)
-{
-	return 0;
 }
 
 /* No output stage: nothing to put in a safe state, nothing that can be energised. */

@@ -35,7 +35,6 @@ extern "C" {
     fn owo_suit_switch_routes() -> *const u32;
     fn owo_suit_stop_input_setup() -> c_int;
     fn owo_suit_stop_input_get() -> c_int;
-    fn owo_suit_stop_input_pending() -> c_int;
 }
 
 /// Non-energising POST for every driver named by the `owo,suit-output` node.
@@ -119,13 +118,6 @@ pub fn suit_stop_input() -> Result<bool, Errno> {
     // SAFETY: as above.
     let r = unsafe { owo_suit_stop_input_get() };
     check(r).map(|_| r != 0)
-}
-
-/// Whether the stop input's controller signals an unread change on its interrupt line (always
-/// true for a controller without one). A GPIO read only: nothing is transferred to the controller.
-pub fn suit_stop_input_pending() -> bool {
-    // SAFETY: as above.
-    unsafe { owo_suit_stop_input_pending() != 0 }
 }
 
 /// Per-channel switch pin masks from devicetree (`switch-routes`); static for the program's life.
