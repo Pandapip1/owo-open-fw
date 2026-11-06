@@ -395,12 +395,13 @@ config EFR32_RADIO_WCET_RX_LAUNCH_NS
 config EFR32_RADIO_WCET_COMPLETION_TX_RX_NS
 	int "Completion budget: TX followed by RX (ns)"
 	default 86800 if EFR32_RADIO_TIMING_QEMU
-	default 62000
+	default 117800
 	help
 	  Completion of a transmission the sequencer turns to RX (the LLL's
-	  isr_tx: the ADV_IND of a scannable advertiser): silicon 62.0 us
-	  (the connection profiles with a host scanning, 7.84; 46.4 us in the
-	  stage-3 advertiser, 7.77),
+	  isr_tx: the ADV_IND of a scannable advertiser, a scanner's
+	  SCAN_REQ): silicon 117.8 us (the SCAN_REQ's, largest of 15 runs,
+	  50.0-117.8 us, 7.91; the ADV_IND's 62.0 us with a host scanning,
+	  7.84, 46.4 us in the stage-3 advertiser, 7.77),
 	  QEMU 86.8 us (hardware configuration).
 
 config EFR32_RADIO_WCET_COMPLETION_RX_TX_NS
@@ -509,8 +510,8 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	  silicon 103.2 us (Peripheral), QEMU 133.0 us (Peripheral; Central
 	  121.2 us). With EFR32_RADIO_CONN_STAGED the same store commits the
 	  reply the sequencer sent (7.82); the RX FIFO is re-armed before the
-	  callback (efr32_conn_rx_rearm(); Central 16.6 us on silicon, the
-	  Peripheral not re-measured, 7.91).
+	  callback (efr32_conn_rx_rearm(); Central 16.5-16.8 us on silicon,
+	  the Peripheral not re-measured, 7.91).
 
 # Link-layer AES-CCM on RADIOAES (crypto/radioaes.c, docs/crypto.md), for encrypted connections:
 # the completion job decrypts each received PDU before the LLL callback and the callback (or a
@@ -650,35 +651,35 @@ config EFR32_RADIO_COMPLETION_TO_RESPOND_NS
 config EFR32_RADIO_WCET_SCAN_COMMIT_NS
 	int "Scanner or initiator: staged receive's completion run (ns)"
 	default 59300 if EFR32_RADIO_TIMING_QEMU
-	default EFR32_RADIO_WCET_CONN_COMPLETION_RX_TX_NS
+	default 143300
 	help
 	  The completion that commits the SCAN_REQ or CONNECT_IND the
 	  sequencer sent, or that it sent nothing (lll/lll_scan_stage.c,
-	  docs/radio-tables.md 7.87): QEMU 55.8 us (active scanner) and
-	  59.3 us (initiator). Not measured on silicon: the connection
-	  receive's commit and stage, which QEMU runs longer (76.3 us in the
-	  same runs), stands in with its silicon figure.
+	  docs/radio-tables.md 7.87): silicon 143.3 us (largest of 15 runs:
+	  a Central's active scan and initiator 80.6-143.3 us, an active
+	  scanner 129.6-141.3 us, 7.91), QEMU 55.8 us (active scanner) and
+	  59.3 us (initiator).
 
 config EFR32_RADIO_SCAN_COMMIT_TO_RESPOND_NS
 	int "Scanner: staged completion's start to its commit (ns)"
 	default 37200 if EFR32_RADIO_TIMING_QEMU
-	default EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
+	default 58000
 	help
 	  Longest path from the completion committing an active scanner's
-	  staged SCAN_REQ to radio_pkt_tx_set(), which re-arms the RX FIFO
-	  for the SCAN_RSP (7.87): QEMU 37.2 us. Not measured on silicon:
-	  the connection commit's path to the same store (QEMU 72.5 us)
-	  stands in with its silicon figure.
+	  staged SCAN_REQ to the RX FIFO re-armed for the SCAN_RSP, before
+	  the link layer's callback (efr32_conn_rx_rearm()): silicon 58.0 us
+	  (largest of 11 runs, 16.6-58.0 us; 97.3 us when the commit re-armed
+	  it, 7.91), QEMU 37.2 us (7.87, the commit's path).
 
 config EFR32_RADIO_SCAN_COMMIT_TO_STAGED_NS
 	int "Scanner: staged completion's start to the next stage (ns)"
 	default 56800 if EFR32_RADIO_TIMING_QEMU
-	default EFR32_RADIO_CONN_COMPLETION_TO_STAGED_NS
+	default 134400
 	help
 	  Longest path from the completion committing an active scanner's
-	  staged SCAN_REQ to the stage of the SCAN_RSP receive (7.87): QEMU
-	  56.8 us. Not measured on silicon: the connection commit's path to
-	  its next stage (QEMU 68.8 us) stands in with its silicon figure.
+	  staged SCAN_REQ to the stage of the SCAN_RSP receive: silicon
+	  134.4 us (largest of 15 runs, 76.8-134.4 us, 7.91), QEMU 56.8 us
+	  (7.87).
 
 config EFR32_RADIO_FRAME_END_TO_COMPLETION_POST_NS
 	int "TX frame end to its completion's post, unblocked (ns)"
