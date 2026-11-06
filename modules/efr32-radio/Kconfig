@@ -508,7 +508,9 @@ config EFR32_RADIO_CONN_COMPLETION_TO_RESPOND_NS
 	  lll_conn_isr_rx's path to radio_pkt_tx_set()'s RESPOND store:
 	  silicon 103.2 us (Peripheral), QEMU 133.0 us (Peripheral; Central
 	  121.2 us). With EFR32_RADIO_CONN_STAGED the same store commits the
-	  reply the sequencer sent and re-arms the RX FIFO (7.82).
+	  reply the sequencer sent (7.82); the RX FIFO is re-armed before the
+	  callback (efr32_conn_rx_rearm(); Central 16.6 us on silicon, the
+	  Peripheral not re-measured, 7.91).
 
 # Link-layer AES-CCM on RADIOAES (crypto/radioaes.c, docs/crypto.md), for encrypted connections:
 # the completion job decrypts each received PDU before the LLL callback and the callback (or a
@@ -1032,6 +1034,12 @@ endif # BT_LLL_VENDOR_EFR32
 # controller's priority RX thread peaks at 376 of its default 448 bytes (thread analyzer).
 configdefault BT_CTLR_RX_PRIO_STACK_SIZE
 	default 640 if BT_LLL_VENDOR_EFR32
+
+# A Central's first anchor keeps its sub-tick part (ull_central.c passes it as the ticker's
+# first remainder): without it the first packet fell anywhere in one 30.5 us tick, up to 12 us
+# before the transmit window on silicon (docs/radio-tables.md 7.91).
+configdefault BT_TICKER_START_REMAINDER
+	default y if BT_LLL_VENDOR_EFR32 && BT_CENTRAL
 
 # A missed or infeasible scheduling deadline puts the radio in a safe state and stops the
 # controller (hal/radio.c, k_deadline_miss_handler()), in QEMU and hardware builds alike.

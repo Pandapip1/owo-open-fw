@@ -2306,7 +2306,8 @@ static int ccm_run(bool encrypt, const struct ccm *ccm, const uint8_t *pdu_in, u
  * setup, PHY tables) may be rewritten, and a TXDONE of that reply must not be cleared.
  * efr32_conn_committing: isr_rx() is committing a reply the sequencer sent.
  * efr32_init_sent: the reply committed was an initiator's CONNECT_IND (7.87), whose transmit
- * completion is still to come.
+ * completion is still to come. efr32_conn_rx_callback: the completion job is running the link
+ * layer's callback for a receive.
  */
 #if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
 #define EFR32_SEQ_CONN_WORD(offset) \
@@ -2322,7 +2323,15 @@ static bool efr32_conn_staged;
 static bool efr32_conn_received;
 static bool efr32_conn_in_flight;
 static bool efr32_conn_committing;
+static bool efr32_conn_rx_callback;
 static uint32_t efr32_conn_outcome_word;
+static int8_t efr32_conn_outcome_ret;
+/* efr32_conn_rx_rearm() pointed the RX FIFO at the receive after the reply. */
+static bool efr32_conn_rx_rearmed;
+/* The staged receive's header, length and AdvA, kept when the RX FIFO is re-armed. */
+static uint8_t efr32_conn_rx_frame[PDU_AC_LL_HEADER_SIZE + EFR32_SEQ_ADV_ADDR_LEN];
+static void efr32_bufc_rx_fifo_configure(void);
+static bool efr32_hw_rx_fifo_preconfigured;
 /* SN/NESN octet the link layer wrote into its reply, to check against the sequencer's. */
 static int16_t efr32_conn_reply_header = -1;
 
@@ -2542,17 +2551,17 @@ static void efr32_seq_stage(uint32_t flags, uint8_t rx_max,
 #endif
 }
 
-int efr32_radio_conn_outcome(uint32_t *outcome)
+/* The staged receive's outcome, read once (1, or -1 when there is none) and kept until consumed. */
+static int efr32_conn_outcome_read(void)
 {
 	uint32_t start = k_cycle_get_32();
 	uint32_t from = efr32_radio_rx_eof_valid ? efr32_radio_rx_eof_cyc : start;
 	uint32_t word;
 	bool valid;
 
-	if (!efr32_conn_received) {
-		return 0;
+	if (efr32_conn_outcome_ret != 0) {
+		return efr32_conn_outcome_ret;
 	}
-	efr32_conn_received = false;
 	/*
 	 * The sequencer decides as soon as RX2TX begins (EFR32_RADIO_RX_EOF_TO_EXIT_NS after the
 	 * frame's end) and in any case before its RX2TX hold ends (EFR32_SEQ_RX2TX_TX_AT_100NS
@@ -2577,6 +2586,7 @@ int efr32_radio_conn_outcome(uint32_t *outcome)
 #endif
 	if (!valid) {
 		efr32_conn_in_flight = false;
+		efr32_conn_outcome_ret = -1;
 		return -1;
 	}
 	efr32_conn_outcome_word = word;
@@ -2584,8 +2594,46 @@ int efr32_radio_conn_outcome(uint32_t *outcome)
 	if (!efr32_conn_committing) {
 		efr32_conn_in_flight = false;
 	}
-	*outcome = word;
+	efr32_conn_outcome_ret = 1;
 	return 1;
+}
+
+int efr32_radio_conn_outcome(uint32_t *outcome)
+{
+	int ret;
+
+	if (!efr32_conn_received) {
+		return 0;
+	}
+	efr32_conn_received = false;
+	ret = efr32_conn_outcome_read();
+	efr32_conn_outcome_ret = 0;
+	if (ret > 0) {
+		*outcome = efr32_conn_outcome_word;
+	}
+	return ret;
+}
+
+/*
+ * The reply the sequencer sent turns to a receive (a connection event that continues, an active
+ * scanner's SCAN_RSP): point the RX FIFO at its start before the link layer's callback, so the
+ * frame after the reply can arrive however long that callback takes (7.87, 7.91). The received
+ * frame was copied out at RXDONE; the header and AdvA the SCAN_REQ check compares are kept.
+ */
+static void efr32_conn_rx_rearm(void)
+{
+	if (!efr32_conn_received || efr32_conn_outcome_read() < 0 ||
+	    !efr32_radio_conn_continues()) {
+		return;
+	}
+	for (uint32_t i = 0U; i < sizeof(efr32_conn_rx_frame); i++) {
+		efr32_conn_rx_frame[i] =
+			efr32_rx_fifo[(efr32_conn_rx_offset + i) % sizeof(efr32_rx_fifo)];
+	}
+	efr32_bufc_rx_fifo_configure();
+	efr32_hw_rx_fifo_preconfigured = true;
+	efr32_conn_rx_rearmed = true;
+	EFR32_PROBE_PATH(to_respond);
 }
 
 bool efr32_radio_conn_continues(void)
@@ -2596,23 +2644,20 @@ bool efr32_radio_conn_continues(void)
 
 /*
  * The SCAN_REQ isr_rx_pdu() committed is the one the sequencer sent: the staged one with RxAdd
- * the received frame's TxAdd and AdvA the frame's (still in the RX FIFO where it was staged).
+ * the received frame's TxAdd and AdvA the frame's (kept by efr32_conn_rx_rearm()).
  */
 static void efr32_scan_req_check(const uint8_t *pdu)
 {
 	const uint8_t *image = efr32_conn_image[0];
-	uint8_t rx_header = efr32_rx_fifo[efr32_conn_rx_offset];
 	uint8_t rxadd = BIT(EFR32_SEQ_ADV_RXADD_BIT);
 
+	LL_ASSERT(efr32_conn_rx_rearmed);
 	LL_ASSERT((pdu[0] & ~rxadd) == (image[0] & ~rxadd));
 	LL_ASSERT(((pdu[0] >> EFR32_SEQ_ADV_RXADD_BIT) & 1U) ==
-		  ((rx_header >> EFR32_SEQ_ADV_TXADD_BIT) & 1U));
+		  ((efr32_conn_rx_frame[0] >> EFR32_SEQ_ADV_TXADD_BIT) & 1U));
 	LL_ASSERT(memcmp(pdu + 1, image + 1, EFR32_SEQ_SCAN_REQ_ADVA_OCTET - 1) == 0);
-	for (uint32_t i = 0U; i < EFR32_SEQ_ADV_ADDR_LEN; i++) {
-		LL_ASSERT(pdu[EFR32_SEQ_SCAN_REQ_ADVA_OCTET + i] ==
-			  efr32_rx_fifo[(efr32_conn_rx_offset + PDU_AC_LL_HEADER_SIZE + i) %
-					sizeof(efr32_rx_fifo)]);
-	}
+	LL_ASSERT(memcmp(pdu + EFR32_SEQ_SCAN_REQ_ADVA_OCTET,
+			 efr32_conn_rx_frame + PDU_AC_LL_HEADER_SIZE, EFR32_SEQ_ADV_ADDR_LEN) == 0);
 }
 
 /* The SN and NESN octet the sequencer put on air for the reply being committed. */
@@ -2635,6 +2680,8 @@ static void efr32_conn_stage_reset(void)
 	efr32_conn_in_flight = false;
 	efr32_conn_committing = false;
 	efr32_conn_outcome_word = 0U;
+	efr32_conn_outcome_ret = 0;
+	efr32_conn_rx_rearmed = false;
 	efr32_conn_reply_header = -1;
 	efr32_init_sent = false;
 }
@@ -2741,10 +2788,19 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 
 		if (rx_cb) {
 			EFR32_RX2TX_M33_STAMP(1);
+#if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
+			efr32_conn_rx_rearm();
+#endif
 			/* An encrypted receive is decrypted before the LLL reads it. */
 			efr32_ccm_rx_complete();
 		}
+#if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
+		efr32_conn_rx_callback = rx_cb;
+#endif
 		callback(param);
+#if defined(CONFIG_EFR32_RADIO_CONN_STAGED)
+		efr32_conn_rx_callback = false;
+#endif
 		if (rx_cb) {
 			EFR32_RX2TX_M33_STAMP(3);
 		}
@@ -3735,9 +3791,40 @@ static void efr32_modem_channel_rates_set(void)
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_DIGMIXCTRL_OFFSET) = digmix;
 }
 
+static void efr32_radio_sync_word_set(uint32_t sync0);
+
+/*
+ * Registers the PHY tables write that belong to the link, not the PHY: radio_crc_configure()'s
+ * RFCRC.CTRL, INIT and POLY and radio_whiten_iv_set()'s FRC.WHITEPOLY and WHITEINIT. The base
+ * table also writes radio_aa_set()'s MODEM.SYNC0 and every delta table its VTCORRCFG0 and 1
+ * (efr32_radio_sync_word_set()). OpenISA's Central sets them before radio_phy_set()
+ * (lll_central.c prepare_cb(), lll_conn_tx_pkt_set()): on silicon its packets went out with the
+ * tables' sync word, CRC init and whitening, and no Peripheral answered (docs/radio-tables.md
+ * 7.91).
+ */
+static const uintptr_t efr32_radio_link_registers[] = {
+	EFR32_RFCRC_BASE + EFR32_RFCRC_CTRL_OFFSET,
+	EFR32_RFCRC_BASE + EFR32_RFCRC_INIT_OFFSET,
+	EFR32_RFCRC_BASE + EFR32_RFCRC_POLY_OFFSET,
+	EFR32_FRC_BASE + EFR32_FRC_WHITEPOLY_OFFSET,
+	EFR32_FRC_BASE + EFR32_FRC_WHITEINIT_OFFSET,
+};
+
+/*
+ * The PHY whose tables are in the radio (EFR32_RADIO_PHY_NONE: none, or registers they set
+ * were changed since, as by the on-off keyed identification).
+ */
+#define EFR32_RADIO_PHY_NONE 0xFFFFU
+static uint16_t efr32_radio_phy_applied = EFR32_RADIO_PHY_NONE;
+
 /* [regs-public] Public BLE tables plus a relocated, image-local PHYINFO object. */
 void radio_phy_set(uint8_t phy, uint8_t flags)
 {
+	uint32_t link[ARRAY_SIZE(efr32_radio_link_registers)];
+	uint16_t applied = (uint16_t)(((phy == PHY_LEGACY) ? PHY_1M : phy) |
+				      ((phy == PHY_CODED) ? ((uint16_t)flags << 8) : 0U));
+	uint32_t sync0;
+
 	EFR32_RADIO_TRACE_ONCE("phy phy=%u flags=%u", phy, flags);
 	ARG_UNUSED(flags);
 	/*
@@ -3747,6 +3834,20 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 	if (efr32_conn_in_flight) {
 		return;
 	}
+	/*
+	 * The tables are in already. Rewriting them is not harmless: a Central's TX completion
+	 * (lll_conn.c isr_tx(), lll_conn_rx_pkt_set()) runs while the receive for the
+	 * Peripheral's reply is searching, and on silicon that receive then never detected a
+	 * frame (docs/radio-tables.md 7.91).
+	 */
+	if (applied == efr32_radio_phy_applied) {
+		return;
+	}
+	efr32_radio_phy_applied = applied;
+	for (size_t i = 0U; i < ARRAY_SIZE(link); i++) {
+		link[i] = *radio_reg32(efr32_radio_link_registers[i]);
+	}
+	sync0 = *radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SYNC0_OFFSET);
 
 	switch (phy) {
 	case PHY_LEGACY:
@@ -3777,6 +3878,11 @@ void radio_phy_set(uint8_t phy, uint8_t flags)
 	}
 	/* The tables carry the 2402 MHz rates: redo them for the channel already tuned. */
 	efr32_modem_channel_rates_set();
+	for (size_t i = 0U; i < ARRAY_SIZE(link); i++) {
+		*radio_reg32(efr32_radio_link_registers[i]) = link[i];
+	}
+	*radio_reg32(EFR32_RFCRC_BASE + EFR32_RFCRC_CMD_OFFSET) = EFR32_RFCRC_CMD_INITIALIZE;
+	efr32_radio_sync_word_set(sync0);
 }
 
 #if defined(CONFIG_EFR32_RADIO_TX_POWER)
@@ -3937,11 +4043,14 @@ void radio_aa_set(const uint8_t *aa)
 	 * order.  Assemble it explicitly rather than relying on aa being aligned
 	 * for a uint32_t load (the API only promises a byte pointer).
 	 */
-	uint32_t sync0 = (uint32_t)aa[0] |
-			 ((uint32_t)aa[1] << 8) |
-			 ((uint32_t)aa[2] << 16) |
-			 ((uint32_t)aa[3] << 24);
+	efr32_radio_sync_word_set((uint32_t)aa[0] |
+				  ((uint32_t)aa[1] << 8) |
+				  ((uint32_t)aa[2] << 16) |
+				  ((uint32_t)aa[3] << 24));
+}
 
+static void efr32_radio_sync_word_set(uint32_t sync0)
+{
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_SYNC0_OFFSET) = sync0;
 
 	/*
@@ -4464,18 +4573,15 @@ void radio_pkt_tx_set(void *tx_packet)
 		efr32_packet_lifecycle_arm(&efr32_packet_stage.lifecycle, EFR32_RADIO_PACKET_TX);
 		efr32_hw_rx2tx_armed = false;
 		atomic_inc(&efr32_hw_hcto_generation);
-		/* The sequencer raised SWRXEN exactly when the event continues. */
+		/*
+		 * The sequencer raised SWRXEN exactly when the event continues, and the completion
+		 * pointed the RX FIFO at that receive (efr32_conn_rx_rearm()).
+		 */
 		LL_ASSERT(efr32_hw_rx_after_tx_requested == efr32_radio_conn_continues());
-		if (efr32_hw_rx_after_tx_requested) {
-			/* The frame just received is consumed; the next starts at offset 0. */
-			efr32_bufc_rx_fifo_configure();
-			efr32_hw_rx_fifo_preconfigured = true;
-		}
+		LL_ASSERT(efr32_conn_rx_rearmed == efr32_hw_rx_after_tx_requested);
+		efr32_conn_rx_rearmed = false;
 		efr32_hw_rx_after_tx_pending = efr32_hw_rx_after_tx_requested;
 		efr32_hw_rx_after_tx_requested = false;
-#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
-		EFR32_PROBE_PATH(to_respond);
-#endif
 		return;
 	}
 #endif
@@ -4724,9 +4830,12 @@ void radio_disable(void)
 	/*
 	 * An advertiser's, scanner's or initiator's isr_rx() that answers nothing ends the
 	 * exchange here: the sequencer must have answered nothing either (a mismatch is a bug in
-	 * its rules, seq_abi.h).
+	 * its rules, seq_abi.h). An abort from another context (the scanner's next window, a
+	 * preempting prepare, a ticker stop) may find a reply the sequencer already sent and the
+	 * link layer has not committed: it is abandoned with the stage (docs/radio-tables.md 7.91).
 	 */
-	if ((efr32_conn_flags & (EFR32_SEQ_CONN_ADV | EFR32_SEQ_CONN_SCAN)) != 0U) {
+	if (efr32_conn_rx_callback &&
+	    (efr32_conn_flags & (EFR32_SEQ_CONN_ADV | EFR32_SEQ_CONN_SCAN)) != 0U) {
 		uint32_t outcome;
 
 		LL_ASSERT(!efr32_conn_received || efr32_radio_conn_outcome(&outcome) <= 0 ||
@@ -5734,6 +5843,7 @@ void efr32_radio_cw_transmit(uint32_t khz, const uint8_t *bits, size_t octets,
 	radio_aa_set(key_up_sync);
 	radio_pkt_configure(8U, EFR32_PKT_PAYLOAD_MAX, 0U);
 
+	efr32_radio_phy_applied = EFR32_RADIO_PHY_NONE;
 	efr32_reg_field(EFR32_MODEM_BASE + EFR32_MODEM_CTRL0_OFFSET,
 			EFR32_MODEM_CTRL0_MODFORMAT_MASK, EFR32_MODEM_CTRL0_MODFORMAT_OOKASK);
 	*radio_reg32(EFR32_MODEM_BASE + EFR32_MODEM_TXBR_OFFSET) =
