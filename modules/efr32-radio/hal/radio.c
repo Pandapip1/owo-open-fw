@@ -2035,7 +2035,7 @@ static const uint32_t efr32_ble_coded_s8_delta_table[] = {
 	 * Unlike the 1M/2M tables above, this table and the S2 one below
 	 * previously had no per-register naming at all; every entry below,
 	 * including the MODEM/SYNTH/RAC calibration words, is now named and
-	 * field-decoded against build/reference-models/*_S_field.py, the
+	 * field-decoded against build/reference-models/<block>_S_field.py, the
 	 * same way as the 1M/2M tables. */
 	0x00014010U, 0x00004100U, /* FRC.MAXLENGTH: MAXLENGTH=256, INILENGTH=4 */
 	0x0001403CU, 0x00000010U, /* FRC.FECCTRL: CONVMODE=1 (coded PHY uses
@@ -5222,7 +5222,7 @@ uint32_t radio_bc_has_match(void)
 static uint32_t efr32_radio_launch_schedule(uint8_t trx, uint32_t tick, uint32_t remainder)
 {
 	uint32_t generation;
-	uint32_t supplied_remainder = remainder;
+	uint32_t supplied_remainder __maybe_unused = remainder;
 
 	if (!(remainder / 1000000UL) || (remainder & BIT(31))) {
 		tick--;
