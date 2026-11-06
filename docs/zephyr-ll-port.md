@@ -1,9 +1,15 @@
 # Zephyr's own link layer on the EFR32BG22: what a port must provide
 
-**Unvalidated on hardware. Nothing here has transmitted or received a packet; the radio hooks are stubs.**
+**Status: the port drives the radio on silicon.** It transmits (docs/radio-tables.md 7.62), receives
+(7.64, 7.80), holds Peripheral connections with LE Secure Connections pairing and link-layer
+AES-CCM on RADIOAES (7.81, 7.84; docs/crypto.md), and stages the advertiser's, scanner's,
+initiator's and connection replies on the M0+ sequencer at T_IFS (7.82, 7.87). Sections 2-4 began as
+the pre-port analysis; their **[F]** items about the OpenISA reference still hold, and the EFR32
+status lines are updated where the code moved on.
 Decision (user, task #27): use Zephyr's open split controller (`BT_LL_SW_SPLIT`, ULL/LLL) instead of
 `crates/ble-ll` or the Silicon Labs `liblinklayer.a`. All paths are relative to the Zephyr tree used
-in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/` unless stated.
+in this workspace (the pinned `vendor/zephyr` fork, 4.5.0-rc2 based), `subsys/bluetooth/controller/`
+unless stated.
 
 ## 1. How the controller is built, and the seam
 
@@ -11,7 +17,7 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   The node binding is `dts/bindings/bluetooth/zephyr,bt-hci-ll-sw-split.yaml`; the board's own HCI node
   (`silabs,bt-hci-efr32`, `dts/arm/silabs/xg22/efr32bg22.dtsi:8-14`) is `disabled` by default, and the explorer-kit
   dtsi chooses it as `zephyr,bt-hci` (`boards/silabs/explorer_kits/xg22/xg22_explorer_kit.dtsi:15`). The overlay in
-  `tests/radio-port/boards/bg22_ek4108a.overlay` disables that node, adds the sw-split node under `&radio` and re-points `zephyr,bt-hci`.
+  `tests/radio-port/boards/bg22_ek4108a.overlay` (and the product's `boards/owo_product.dtsi`) disables that node, adds the sw-split node under `&radio` and re-points `zephyr,bt-hci`.
 * **[F]** The lower link layer ("LLL" vendor) is selected only by `BT_LLL_VENDOR_NORDIC` (`Kconfig.ll_sw_split:8`, needs
   `SOC_COMPATIBLE_NRF`) or `BT_LLL_VENDOR_OPENISA` (`Kconfig.ll_sw_split:88`, needs `SOC_OPENISA_RV32M1`), and `CMakeLists.txt:193-221`
   adds the matching include directories and `add_subdirectory(ll_sw/nordic|openisa)`. No other Kconfig/CMake code
@@ -30,6 +36,9 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   places do not build outside RV32M1 and are patched in the derived copy by `modules/efr32-radio/CMakeLists.txt`:
   `lll/lll_conn.c:547` writes `pdu_data.resv` (no longer a member of `struct pdu_data`, `ll_sw/pdu.h:978`), and
   `lll/lll.c:83-84` reads the LPTMR1 compare flag in the tick ISR. Everything else compiled unchanged.
+  Later patches in the same file are behavioural: the preempt-timeout fix (docs/radio-tables.md 7.76)
+  and the staged-reply and connection-timing hooks in `lll_conn.c`, `lll_adv.c`, `lll_scan.c`,
+  `lll_peripheral.c` and `lll_central.c` (7.82, 7.87).
 
 ## 2. What the port must provide
 
@@ -42,7 +51,9 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   `AGC 31, BUFC 32, FRC_PRI 33, FRC 34, MODEM 35, PROTIMER 36, RAC_RSM 37, RAC_SEQ 38, RDMAILBOX 39, RFSENSE 40, PRORTC 41, SYNTH 42`
   (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h:94-105,115-118`).
 * **Done** (`include/hal/efr32/swi.h`, `ll_irqs.h`): radio-LLL = SW0, ULL-low = SW1, worker = SW2 (pended from the counter alarm callback),
-  and `LL_RADIO_IRQn = FRC_IRQn`.  This is deliberately limited to the public
+  and `LL_RADIO_IRQn = FRC_IRQn`. The software interrupts only ring a doorbell: the LLL and ULL
+  contexts run in persistent meta-IRQ threads (`hal/ll_threads.c`, replacing RV32M1's `mayfly.c`;
+  docs/radio-tables.md 7.76).  This is deliberately limited to the public
   FRC `TXDONE`/`RXDONE` latches used by `radio_is_done()`; `RAC_SEQ_IRQn` is a
   separate sequencer route and is not enabled as an LLL completion source.
 
@@ -51,23 +62,21 @@ in this workspace (4.5.0-rc2, commit `67276f5b2`), `subsys/bluetooth/controller/
   (`HAL_TICKER_CNTR_CLK_UNIT_FSEC 30517578125`, `openisa/hal/RV32M1/ticker.h`), refcounted start, compare interrupt that
   runs `ticker_trigger(0)` (`openisa/lll/lll.c:78-95`). `mayfly.c`/`ticker.c` glue (`hal/RV32M1/mayfly.c`, `ticker.c`) is
   generic and is reused by derivation.
-* **Done** (`hal/cntr.c`): implemented on the Zephyr Counter API, devicetree alias `ll-counter` = `&burtc0` (BURTC, `dts/arm/silabs/xg22/xg22.dtsi:518-525`). The radio QEMU configurations select
-  `CONFIG_GECKO_BURTC_TIMER`, so the same free-running BURTC is now Zephyr's tickless system clock rather than RTCC/the Silicon Labs sleeptimer.
-  The combined upstream-side driver is the sole owner of BURTC `COMP` and IRQ18: it chooses the earlier wrap-safe deadline between the
-  kernel timeout and Counter's one-shot channel-0 alarm, clears/rearms that one comparator under its spinlock, announces elapsed kernel ticks,
-  and invokes an expired Counter callback after releasing the lock. This preserves Counter semantics without allowing two independent drivers
-  to program COMP or bind IRQ18. `tests/burtc-arbitration-port` is the focused QEMU regression: it arms a Counter alarm, enters a kernel
-  sleep on the same peripheral, and requires the callback before printing `burtc-arbitration: PASS`.
-  The Counter start is harmless and stop/top reprogramming are rejected while it is the monotonic system clock. Not run on hardware; the
-  frequency/top asserts are in `cntr_init`. **Open:** the physical BURTC clock source and its keeping time in EM2/EM3; local sleep-clock accuracy (`lll_clock.c` returns a fixed 500 ppm,
+* **Done** (`hal/cntr.c`): implemented on the kernel's scheduler clock service (docs/zephyr-dual-clock-scheduler.md): the
+  32.768 kHz ticker count is derived from the service's 2^25 Hz logical timebase, and the ticker compare, the LLL launch and the QEMU TIFS
+  wake are three scheduler clock events (`K_CLOCK_EVENT_DEFINE`), delivered by BURTC across deep sleep and TIMER0 while the CPU runs.
+  The product's system timer is the same service (`CONFIG_CLOCK_EVENT_SYSTEM_TIMER`, `prj.conf`). The earlier Counter-API version, with
+  `CONFIG_GECKO_BURTC_TIMER` and one BURTC driver arbitrating `COMP`/IRQ18 between the kernel timeout and the Counter alarm, survives only
+  in `tests/burtc-arbitration-port`, `tests/sequencer-timed-wrap` and `tests/scheduler-deadline-qemu/burtc.conf`. Runs on silicon
+  (docs/radio-tables.md 7.80, 7.84). **Open:** BURTC runs on the LFXO (docs/radio-tables.md 7.73) and wakes the M33 from EM2 (7.74), but the radio stack never enters EM2 (7.84), so time-keeping across EM2/EM3 with the controller running is unmeasured; local sleep-clock accuracy (`lll_clock.c` returns a fixed 500 ppm,
   `openisa/lll/lll_clock.c:16-33`, and `lll_clock_wait()` does nothing: HFXO start/stop is therefore not handled at all).
 
 ### 2.3 Crypto and entropy
 * **[F]** `lll.c:124-127` gets the default entropy device (`BT_CTLR_ENTROPY`); the xG22 build selects `CONFIG_ENTROPY_GECKO_TRNG`. Nothing to write.
-* **Done** `hal/ecb.c`: AES-128 ECB (`hal/ecb.h`: `ecb_encrypt`, `ecb_encrypt_be`, `ecb_encrypt_nonblocking`) via PSA (`psa_cipher_encrypt`,
-  `PSA_ALG_ECB_NO_PADDING`), the API Zephyr's host uses (`subsys/bluetooth/crypto/bt_crypto_psa.c:10`). TinyCrypt is no longer in this tree.
-* **Implemented and compile-checked** `radio_ccm_rx_pkt_set/tx_pkt_set/is_done/mic_is_valid/is_available` (`hal/ccm.h`: key, 39-bit counter, direction, IV):
-  synchronous software AES-CCM with a 4-byte MIC through `psa_aead_*` and `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM,4)`, preserving OpenISA's 13-byte BLE nonce and masked one-byte AAD contract. The nonce/AAD construction was cross-checked against OpenISA's Bluetooth Core sample vector (`f388...6088`). `radio_ar_*` (resolvable-address match) remains TODO.
+* **Done** `hal/ecb.c`: AES-128 ECB (`hal/ecb.h`: `ecb_encrypt`, `ecb_encrypt_be`, `ecb_encrypt_nonblocking`) on the RADIOAES accelerator,
+  called directly (`efr32_radioaes_ecb()`, no PSA key slot; docs/crypto.md). TinyCrypt is no longer in this tree.
+* **Done** `radio_ccm_rx_pkt_set/tx_pkt_set/is_done/mic_is_valid/is_available` (`hal/ccm.h`: key, 39-bit counter, direction, IV):
+  synchronous AES-CCM with a 4-byte MIC on RADIOAES (`efr32_radioaes_ccm()`), preserving OpenISA's 13-byte BLE nonce and masked one-byte AAD contract; the receive is decrypted in the completion job before the LLL callback (docs/crypto.md 3; silicon, docs/radio-tables.md 7.81, 7.84). The nonce/AAD construction was cross-checked against OpenISA's Bluetooth Core sample vector (`f388...6088`). `radio_ar_*` (resolvable-address match) is software: the normalized advertising PDU is resolved against the configured IRKs before the LLL callback (`efr32_radio_ar_execute()`, with `BT_CTLR_PRIVACY`).
 
 ### 2.4 The radio HAL (`hal/radio.h` -> `hal/efr32/radio/radio.h`, 78 functions)
 The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA uses the hardware (this is the model to follow):
@@ -81,18 +90,18 @@ The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA us
 
 Status of every function (all in `modules/efr32-radio/hal/radio.c`, each commented with its class):
 
-| Group | Functions | Class | Blocked on |
+| Group | Functions | Class | Status |
 |---|---|---|---|
-| Setup | `radio_setup`, `radio_reset`, `isr_radio`, `radio_isr_set`, `radio_sleep/wake/is_off` | regs | T1 (block enables, IRQs), T2 |
-| PHY/channel | `radio_phy_set`, `radio_freq_chan_set` | regs, public tables | T3, T4 |
-| Packet format | `radio_aa_set`, `radio_whiten_iv_set`, `radio_crc_configure`, `radio_pkt_configure`, `radio_pkt_rx/tx_set` | regs | T5 (FRC), T6 (BUFC known) |
-| Commands/status | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_status_reset`, `radio_is_ready/done/idle`, `radio_has_disabled`, `radio_crc_is_valid` | regs | T2 |
-| TIFS/switch | `radio_switch_complete_*`, `radio_tmr_tifs_set`, `radio_tmr_tifs_base_get` | regs | T2, T8 |
-| Timer | `radio_tmr_*` (17) | regs | T8 |
-| RSSI | `radio_rssi_*` | regs | T9 |
+| Setup | `radio_setup`, `radio_reset`, `isr_radio`, `radio_isr_set`, `radio_sleep/wake/is_off` | regs | implemented; silicon (docs/radio-tables.md 7.62, 7.80) |
+| PHY/channel | `radio_phy_set`, `radio_freq_chan_set` | regs, public tables | implemented: 1M, 2M and coded tables applied, channel-dependent demodulator rates (7.83); only LE 1M used on air |
+| Packet format | `radio_aa_set`, `radio_whiten_iv_set`, `radio_crc_configure`, `radio_pkt_configure`, `radio_pkt_rx/tx_set` | regs | implemented; `radio_pkt_configure` still notes "remaining FRC length/header fields" as TODO |
+| Commands/status | `radio_rx_enable`, `radio_tx_enable`, `radio_disable`, `radio_status_reset`, `radio_is_ready/done/idle`, `radio_has_disabled`, `radio_crc_is_valid` | regs | implemented; CRC from the FRC trailer in the RX FIFO (7.66) |
+| TIFS/switch | `radio_switch_complete_*`, `radio_tmr_tifs_set`, `radio_tmr_tifs_base_get` | regs | turnarounds by the M0+ sequencer (7.65, 7.82, 7.87); `radio_tmr_tifs_base_get` TODO (returns 0) |
+| Timer | `radio_tmr_*` (17) | regs | launches on the scheduler clock and the sequencer's TIMER0 wait (7.82); end/AA times from MODEM EOF; `radio_tmr_start_us`, `radio_tmr_start_now` (assert) and `radio_tmr_sample*` TODO |
+| RSSI | `radio_rssi_*` | regs | implemented (`AGC.FRAMERSSI`, `AGC.IF.RSSIVALID`) |
 | Power | `radio_tx_power_set/max_set`, `lll_radio_tx_pwr_*` | regs (MODEM.RAMPLEV, `EFR32_RADIO_TX_POWER`) | T7: dBm per level unmeasured (docs/tx-power.md) |
-| Delays | `radio_*_ready_delay_get`, `radio_*_chain_delay_get` | measured constants | hardware timing capture |
-| Software | `radio_pkt_empty/scratch_get`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*` (implemented and compile-checked); `radio_filter_*`, `radio_bc_*`, `radio_ar_*` remain | software | nothing |
+| Delays | `radio_*_ready_delay_get`, `radio_*_chain_delay_get` | measured constants | ready delays measured (`EFR32_RADIO_TX_READY_NS`, `EFR32_RADIO_RX_READY_NS`, LE 1M); chain delays TODO (0) |
+| Software | `radio_pkt_empty/scratch_get`, `radio_gpio_*` (no PA/LNA: no-ops), `radio_ccm_*` (RADIOAES), `radio_ar_*` (software ah()); `radio_filter_*`, `radio_bc_*` permanently no-match, as OpenISA's | software | done |
 
 Functions that would start air activity (`radio_rx_enable`, `radio_tx_enable`, `radio_tmr_start*`) `LL_ASSERT` while `CONFIG_EFR32_RADIO_STUB_REGISTERS=y`.
 
@@ -107,6 +116,13 @@ The current EFR32 packet-stage metadata records those values, and its dormant
 normalized-PDU completion helper accepts only an explicit two-octet LL header
 plus exactly the declared number of payload octets. It is intentionally not an
 FRC/BUFC reader.
+
+The producer this section and the next anticipate now exists on silicon:
+`efr32_hw_rx_deliver()` (`hal/radio.c`) takes the frame at the BUFC RX FIFO's
+`READOFFSET` (header, length and payload) and the CRC result from the one-octet
+`FRC.TRAILRXDATA.CRCOK` trailer after it, then hands the normalized PDU to that
+helper (docs/radio-tables.md 7.66). Statements below that the FRC/BUFC producer
+is unresolved or the helper dormant predate it.
 
 Before the HAL arms RAC for RX or TX it now checks this controller contract:
 the format and matching BUFC staging direction must have been configured, RX
@@ -239,17 +255,12 @@ The advertiser QEMU profile separately opts into
 `CONFIG_EFR32_RADIO_QEMU_TIFS`. After the LLL has retired a TX completion, the
 HAL records that boundary and arms a persistent scheduler job: the job enables
 the staged RX path after the requested TIFS, then uses the supplied HCTO as a
-bounded no-response teardown. This job no longer has a private kernel timer.
-Instead it is a radio-deadline client of the Counter API's BURTC owner, which
-also arbitrates the ordinary LLL ticker alarm and Zephyr's tickless system-clock
-deadline on the one hardware `COMP`/IRQ18 route. The Counter layer chooses the
-earlier wrap-safe Counter deadline against the kernel deadline, while the
-radio layer multiplexes ticker and radio-launch work into that Counter alarm
-(`modules/efr32-radio/hal/cntr.c:30-64,71-100,171-184`). Its ISR clears the
-due client and publishes only the appropriate wakeup. In particular, the
-QEMU-TIFS branch calls
-`efr32_radio_qemu_tifs_wake()` and never issues RAC MMIO in interrupt context
-(`cntr.c:85-99`; `radio.c:314-329`). Reset, `radio_disable()`, and
+bounded no-response teardown. This job has no private kernel timer: its wake
+is one of three scheduler clock events in `hal/cntr.c` (with the ticker compare
+and the radio launch), and the kernel's scheduler clock service chooses BURTC
+or TIMER0 to deliver it (docs/zephyr-dual-clock-scheduler.md). Its expiry
+handler (`qemu_tifs_expired()`) only calls `efr32_radio_qemu_tifs_wake()` and
+never issues RAC MMIO in interrupt context. Reset, `radio_disable()`, and
 `radio_tmr_stop()` invalidate the generation and cancel the mux client. This
 is a QEMU-only scheduler seam; it does not claim an EFR32 packet-end timestamp,
 PROTIMER compare, RAC sequencer latency, or silicon HCTO behavior, and the
@@ -267,9 +278,10 @@ stages `SCAN_REQ`, and records RX as the following action
 Because this port deliberately defers the LLL callback to a scheduler thread,
 the QEMU profile claims the recorded RX-to-TX turn before the callback,
 issues `RXDIS`, and waits for that callback to stage the response PDU.  Only
-then does it place a generation-guarded TIFS deadline through the BURTC mux;
-the persistent worker rechecks both idle state and staging before its final
-`RAC.CMD=TXEN` (`modules/efr32-radio/hal/radio.c:663-712,1023-1057`). This is
+then does it place a generation-guarded TIFS deadline on that scheduler clock
+event; the persistent worker rechecks both idle state and staging before its
+final `RAC.CMD=TXEN` (`efr32_radio_qemu_tifs_wake()` and its job in
+`modules/efr32-radio/hal/radio.c`). This is
 why the later `radio_switch_complete_and_rx()` is not treated as an immediate
 RX launch. `radio_disable()`, `radio_tmr_stop()`, reset, and
 `radio_switch_complete_and_disable()` cancel the generation. The mechanism
@@ -279,7 +291,7 @@ timing, packet-end capture, or the hardware sequencer's PROTIMER/RAC route.
 ## 3. Build integration
 * `modules/efr32-radio`: `Kconfig` (symbol `BT_LLL_VENDOR_EFR32`, same selects as OpenISA, PSA instead of tinycrypt), `CMakeLists.txt`.
   This is intentionally generic driver naming; OWO names are reserved for code specific to the suit/device.
-  (derives the OpenISA LLL/hal files into the build tree with `hal/RV32M1/` -> `hal/efr32/` and the two patches above, then adds the module's own `hal/{cntr,ecb,radio}.c`).
+  (derives the OpenISA LLL/hal files into the build tree with `hal/RV32M1/` -> `hal/efr32/` and the patches above, then adds the module's own `hal/` sources (`cntr.c`, `ecb.c`, `radio.c`, `ll_threads.c`, ...), the staged-reply `lll/*_stage.c`, the RADIOAES driver in `crypto/`, and the M0+ sequencer image built from `sequencer/radio_seq.S`).
   No Zephyr code is copied into this repository.
 * `tests/radio-port`: minimal Rust app (`bt_enable`, then a genuine legacy
   `bt_le_adv_start`) + overlay. It explicitly
@@ -339,12 +351,12 @@ observes `RAC.CMD=1` in the native trace. That proves the controller passed its
 scheduled start into the model's synthetic TXEN transition; it does **not**
 prove a BLE packet was emitted or received. QEMU's TX snapshot and in-process
 medium are validation seams, while packet framing, FRC/descriptor ownership,
-CRC, and real RF timing remain separately unproven. The current QEMU USART
-model accepts polling-console bytes
-but intentionally does not forward them to a host character device
-(`vendor/qemu/hw/arm/efr32bg22.c:150-153,1074-1079`), so if the markers are not
-available the script reports the queue state as unobserved rather than making
-that distinction falsely. Its repo-local temporary logs are cleaned on exit.
+CRC, and real RF timing remain separately unproven in this smoke (on silicon
+they are established separately, docs/radio-tables.md 7.62-7.71). The QEMU
+USART model now forwards to a host character device
+(`vendor/qemu/hw/arm/efr32-usart.c`, `sim/README.md` "Host devices"); if the
+markers are not available the script reports the queue state as unobserved
+rather than making that distinction falsely. Its repo-local temporary logs are cleaned on exit.
 
 `tests/radio-rx-port` is a separate, scanner-only Rust workload. Keeping it
 separate from `tests/radio-port` avoids allowing a scanner's timing to displace
@@ -419,13 +431,12 @@ nix develop . -c cmake --build build/radio-rx-port-active-qemu
 nix develop . -c tests/radio-rx-port/run-qemu-active-scan-e2e.sh 5
 ```
 
-Unlike the passive dual-image harness, this test defaults to `-icount shift=5`.
-That is a QEMU TCG pacing setting selected because the modeled 150-us
-turn-around otherwise stretches to roughly 1.5 ms at shift 1, allowing the
-LLL to clean up before the worker can issue TXEN
-(`run-qemu-active-scan-e2e.sh:13-16`). It is a reproducibility setting for the
-test's scheduler interleaving, not a calibrated radio clock or a statement
-about EFR32 timing.
+Unlike the passive dual-image harness (`shift=1`), this test defaults to
+`-icount shift=3,sleep=off`: about 60 MIPS per endpoint, close to the 76.8 MHz
+M33; slower settings make the firmware miss deadlines its scheduler clock would
+meet on silicon, and the miss check panics (`run-qemu-active-scan-e2e.sh`,
+`ICOUNT_SHIFT`). It is a reproducibility setting for the test's scheduler
+interleaving, not a calibrated radio clock or a statement about EFR32 timing.
 
 The active harness requires endpoint-tagged QEMU snapshots in this strict
 logical order: advertiser `ADV_IND` (endpoint 0, 11 bytes beginning
@@ -438,12 +449,12 @@ do not establish over-air reception, CRC/FRC production, packet-end timing,
 PROTIMER behavior, BLE channel access semantics, or a silicon TIFS guarantee.
 
 The same harness also enables QEMU-only `BURTC compare program`, `compare
-expired`, and IRQ18 tracepoints, all timestamped in virtual nanoseconds.  For
-each accepted active-scan turn it requires the causal model sequence: the
-advertiser TX retires, a short BURTC compare is armed, that compare expires,
-IRQ18 asserts, and only then does guest MMIO put RAC into RXSEARCH.  The last
-transition is the persistent TIFS job's observable action; the QEMU BURTC
-callback itself cannot issue RAC MMIO.  `MAX_TIFS_JOB_HANDOFF_NS` (100,000 ns
+expired`, IRQ18 and TIMER0 event tracepoints, all timestamped in virtual
+nanoseconds.  For each accepted active-scan turn it requires the causal model
+sequence: the advertiser TX retires, a scheduler-clock compare expires (BURTC
+IRQ18 or a TIMER0 CC match; the kernel chooses which), and only then does guest
+MMIO put RAC into RXSEARCH.  The last transition is the persistent TIFS job's
+observable action; the QEMU timer callback itself cannot issue RAC MMIO.  `MAX_TIFS_JOB_HANDOFF_NS` (100,000 ns
 by default) bounds expiry/IRQ publication to that job action as a QEMU virtual
 time diagnostic.  A five-second `-icount shift=5` run recorded 19 such
 handoffs with a 29,920-ns maximum.  This is observability for the simulated
@@ -469,8 +480,9 @@ safety margin.
 
   On 2026-10-20 it built and linked the real ULL (`ll_adv_enable`, `lll_init`,
   ...) with the module at 147,340 B flash (28.10%) and 26,632 B RAM (81.27%),
-  before any application payload. It cannot run: the radio hooks are stubs and
-  nothing configures BURTC. `CONFIG_BUILD_ONLY_NO_BLOBS=y` excludes proprietary
+  before any application payload. It could not run then (the radio hooks were
+  stubs); it now runs in QEMU and on silicon (docs/radio-tables.md 7.62, 7.80).
+  `CONFIG_BUILD_ONLY_NO_BLOBS=y` excludes proprietary
   binaries, not the now-present public source dependencies; it is build/CI
   validation only, not an on-device or QEMU radio validation.
 
@@ -478,10 +490,13 @@ safety margin.
 
 ### OpenISA radio delay hooks
 
-`radio_tx_ready_delay_get()`, `radio_rx_ready_delay_get()`,
-`radio_tx_chain_delay_get()`, and `radio_rx_chain_delay_get()` remain explicit
-TODO stubs returning zero in the EFR32 HAL
-(`modules/efr32-radio/hal/radio.c:1788-1822`). Their units are microseconds:
+`radio_tx_ready_delay_get()` and `radio_rx_ready_delay_get()` now return the
+silicon-measured `EFR32_RADIO_TX_READY_NS` (TXEN to the first preamble bit,
+91.65 us) and `EFR32_RADIO_RX_READY_NS` (SWRXEN to RXSEARCH, 166.76 us), LE 1M
+only (`modules/efr32-radio/Kconfig`; docs/radio-tables.md 7.72, 7.80).
+`radio_tx_chain_delay_get()` and `radio_rx_chain_delay_get()` remain explicit
+TODO stubs returning zero (`hal/radio.c`): only their sum d_tx + d_rx is
+measured (7.71). Their units are microseconds:
 the OpenISA ULL stores their results in `ready_delay_us` when reserving radio
 slots (for example `vendor/zephyr/subsys/bluetooth/controller/ll_sw/ull_conn.c:1329-1372`),
 and uses the chain values as additions/subtractions in its microsecond HCTO
@@ -498,18 +513,19 @@ and PA-ramp inputs; they warn that changing ramp time can change the minimum
 turnaround (`vendor/hal_silabs/simplicity_sdk/platform/radio/rail_lib/common/sl_rail.h:2744-2751,2957-2969`).
 They do not establish the EFR32 PHY-, PA-, or capture-path-specific values of
 these four hooks. In particular, the xG22 PA utility's configured 2-us ramp is
-not a radio-ready or chain-delay measurement. QEMU's synthetic 150-us
-completion is likewise a simulator boundary, not hardware timing evidence
-(`docs/radio-tables.md:476`).
+not a radio-ready or chain-delay measurement. QEMU's frame timing (once a
+synthetic 150-us completion, `docs/radio-tables.md` §4.1; now LE 1M airtime,
+`efr32_rf_le1m_airtime_ns()` in `vendor/qemu/hw/arm/efr32bg22.c`) is likewise
+not hardware evidence for these hooks.
 
-Keep the stubs until a hardware capture or a recovered RAIL timing contract
+Keep the chain-delay stubs until a hardware capture or a recovered RAIL timing contract
 identifies each returned quantity for the supported PHY and PA configuration,
 including which packet-end/capture reference its chain correction uses. A
 non-zero substitution, or treating zero as a proven value, would invent BLE
 timing and can change ULL scheduling.
 
-1. **Register knowledge** (T1-T9): the blocker. Shortest path in `docs/radio-tables.md` §6; RFSENSE is documented separately in §5 and is not on the startup/RX/TX critical path.
-2. **Hardware TIFS on a Cortex-M33** remains unproven, including RAC latency, packet-end capture, and HCTO semantics. The QEMU-only scheduler seam above is only a bounded model transition; if T_IFS (150 us +-2) cannot be met from the interrupt/job path on hardware, a hardware path (PRS/PROTIMER -> RAC) is required.
-3. **HFXO / sleep**: `lll_clock_wait` is a no-op; `EVENT_OVERHEAD_XTAL_US` etc. in `lll/lll_vendor.h` are OpenISA placeholders. Interaction with Zephyr PM (EM2) is unexamined.
-4. **Feature set**: legacy 1M only (OpenISA LLL). The stock suit needs LE Secure/legacy pairing with MITM (host side, fine) and encryption (needs CCM above).
-5. **Flash/RAM**: the controller adds ~100 kB flash on top of the application; the application slot in `boards/bg22_ek4108a.overlay` is 408 K, fine, but the existing app's RAM is already 85 % used without the controller.
+1. **Register knowledge** (T1-T9): no longer the blocker for the BLE path, which runs on silicon; the remaining per-function TODOs are in the 2.4 table and `docs/radio-tables.md` §3. RFSENSE is documented separately in §5 and is not on the startup/RX/TX critical path.
+2. **Hardware TIFS**: resolved by a hardware path, not the M33: the M0+ sequencer answers at T_IFS from staged replies (docs/radio-tables.md 7.82, 7.87), matched to the stock stack on silicon (7.71). The QEMU-only scheduler seam above remains a bounded model transition.
+3. **HFXO / sleep**: `lll_clock_wait` is a no-op; `EVENT_OVERHEAD_XTAL_US` and `EVENT_OVERHEAD_START_US` in the module's own `lll/lll_vendor.h` are design values covering the prepare lead (7.79). The radio stack never enters EM2 (7.84).
+4. **Feature set**: legacy advertising and scanning, Peripheral and Central connections (OpenISA LLL); `radio_phy_set` has 2M and coded tables, but only LE 1M is measured. The stock suit's MITM pairing and encryption run (CCM above; 7.84).
+5. **Flash/RAM**: the product with the controller, measured at master `918708d`: `bg22_ek4108a` 141,932 B flash / 29,612 B RAM; `owo_suit` 136,240 / 29,212; `owo_suit -DOWO_HW=ON` 157,048 / 30,596, inside the 31,000 B budget above. Application slots: 408 KiB on `bg22_ek4108a` (`boards/bg22_ek4108a.overlay`), 216 KiB on `owo_suit`.

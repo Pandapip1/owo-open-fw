@@ -7,8 +7,10 @@ firmware in that flash. Evidence tags as in `stock-stim-path.md`: **[F]** read f
 locations) are kept outside this repository, next to the dump.
 
 ```
-west build -b owo_suit .                  # or plain cmake with -DBOARD=owo_suit
-west build -b owo_suit . -- -DOWO_HW=ON   # bench only, as for the kit
+# ZEPHYR_BASE and -DZEPHYR_MODULES as in the README ("Build")
+cmake -GNinja -S . -B build/owo_suit -DBOARD=owo_suit -DZEPHYR_MODULES=...
+cmake -GNinja -S . -B build/owo_suit_hw -DBOARD=owo_suit -DOWO_HW=ON -DZEPHYR_MODULES=...   # bench only, as for the kit
+ninja -C build/owo_suit
 ```
 The board definition is out of tree (`boards/owo/owo_suit/`, found through `BOARD_ROOT` in
 `CMakeLists.txt`); `boards/owo_suit.overlay` and `.conf` add what every board of the product gets
@@ -67,7 +69,7 @@ Decision path if the product is to store bonds (a product decision; nothing is m
    where the stock NVM3 starts (0x4C000), and 0x56000 is the last page.
 2. Preferred: the top two pages of the application partition, 0x48000-0x4C000, become
    `storage_partition` (the application partition shrinks from 216 to 200 KiB; the images today
-   use 135 to 155 KiB of it), and 0x56000 stays unused. The stock NVM3 stays intact. A stock
+   use 133 to 154 KiB of it), and 0x56000 stays unused. The stock NVM3 stays intact. A stock
    application reinstalled by OTA (it ends at 0x4AA6E) overwrites those pages, which only loses
    the open firmware's bonds; an open-firmware OTA image cannot reach them (the link fails past
    its partition).
@@ -127,10 +129,12 @@ Limits of this:
   leaves them alone. **[M]**
 
 ## QEMU smoke boot
-The `efr32bg22` machine still models a 512 KiB part with a BGM220 module's DEVINFO, so the run below
-pads the unit's 352 KiB flash image with erased bytes to 512 KiB; nothing in it reaches beyond
-0x58000. The image is the unit's own flash (Gecko Bootloader, AppLoader, stock NVM3) with the
-application area replaced by the default `owo_suit` build. **[E]**
+When the run below was made the `efr32bg22` machine modelled only a 512 KiB part with a BGM220
+module's DEVINFO, so it padded the unit's 352 KiB flash image with erased bytes to 512 KiB; nothing
+in it reaches beyond 0x58000. The machine now sizes flash and RAM from DEVINFO.MSIZE, so with
+`devinfo=` the unit's page it is the 352 KiB part (`radio-tables.md` §7.78). The image is the
+unit's own flash (Gecko Bootloader, AppLoader, stock NVM3) with the application area replaced by
+the default `owo_suit` build. **[E]**
 - As built, the bootloader starts the AppLoader and the AppLoader stays in its OTA mode: the open
   firmware never runs, because it carries no ApplicationProperties_t (`ota.md`). With the stock
   application in place the bootloader hands over at once.
@@ -143,29 +147,28 @@ application area replaced by the default `owo_suit` build. **[E]**
 - The product now carries that descriptor (`src/gecko_app_properties.c`, `ota.md`); the default
   `owo_suit` build starts straight from the unit's bootloader and runs the radio. **[E]**
 
-## Build numbers (2026-10-31, with the budget settings in `prj.conf`)
+## Build numbers (2026-11-05, master 918708d, with the budget settings in `prj.conf`)
 | Board | Flash | RAM (of 32 760 B) | Reserve check (31 000 B) |
 |---|---|---|---|
-| `bg22_ek4108a` | 143 068 B | 29 972 B (91.5 %) | passes, 2 788 B free |
-| `bg22_ek4108a`, `-DOWO_HW=ON` | 156 316 B | 30 988 B (94.6 %) | passes, 1 772 B free |
-| `owo_suit` | 137 812 B of 221 184 B (62.3 %) | 29 588 B (90.3 %) | passes, 3 172 B free |
-| `owo_suit`, `-DOWO_HW=ON` | 156 324 B of 221 184 B (70.7 %) | 30 972 B (94.5 %) | passes, 1 788 B free |
+| `bg22_ek4108a` | 141 932 B | 29 612 B (90.4 %) | passes, 3 148 B free |
+| `owo_suit` | 136 240 B of 221 184 B (61.6 %) | 29 212 B (89.2 %) | passes, 3 548 B free |
+| `owo_suit`, `-DOWO_HW=ON` | 157 048 B of 221 184 B (71.0 %) | 30 596 B (93.4 %) | passes, 2 164 B free |
 
-What made the output-stage image fit (each number measured as the linker's RAM total before and
-after): four PSA key slots instead of sixteen (-1 248 B; the bound is argued in `prj.conf`), the
-radio HAL's BUFC TX FIFO and scratch PDU sized for the largest PDU this configuration stages
-instead of RAIL's 512 bytes and a 251-octet data PDU (-672 B, `hal/radio.c`), and the IADC
-driver's channel table cut to the one channel the output stage reads, without the unused DMA
-state (-192 B, `owo-suit-hw.conf`). Thread stacks are unchanged: most of their worst-case
-workloads (pairing, GATT writes, encrypted connections, a running output stage) cannot be driven
-in QEMU yet, so they keep their sizes and the reserve.
+`bg22_ek4108a` with `-DOWO_HW=ON` was not re-measured; on 2026-10-31 it was 156 316 B / 30 988 B.
 
-**Not yet counted: pairing needs a heap.** The image has no mbedtls heap and no CCM, so AES-CMAC,
-the ECB session key and link-layer CCM fail (see `prj.conf`); LE Secure Connections pairing and
-encryption cannot complete. Adding them costs about 1.4 KB of RAM (measured per operation, four
-contexts at once), which would leave the output-stage images below the 1 760 B reserve again,
-unless the AES work moves to the BG22's AES hardware or stacks are sized from measurements of
-those workloads.
+What made the output-stage image fit on 2026-10-31 (each number measured as the linker's RAM total
+before and after): four PSA key slots instead of sixteen (-1 248 B; two since eaac76d, the bound
+is argued in `prj.conf`), the radio HAL's BUFC TX FIFO and scratch PDU sized for the largest PDU
+this configuration stages instead of RAIL's 512 bytes and a 251-octet data PDU (-672 B,
+`hal/radio.c`), and the IADC driver's channel table cut to the one channel the output stage then
+read, without the unused DMA state (-192 B, `owo-suit-hw.conf`; two channels since the battery
+input, be8f798). Thread stacks are now sized from measured peaks of pairing, encrypted GATT and
+stimulation in QEMU and on silicon (`prj.conf`, `radio-tables.md` §7.86).
+
+Pairing no longer needs a heap: AES-ECB, AES-CMAC and link-layer CCM run on the RADIOAES
+accelerator with no mbedtls heap (`crypto.md`, eaac76d); LE Secure Connections pairing and
+encryption complete in the product's QEMU runs (§7.86) and in the radio-port image on silicon
+(§7.84).
 
 Before the budget settings (LTO, no printk, no controller privacy or filter list, no fault dump,
 no GATT caching, no vendor HCI) the kit needed 192 708 B / 33 068 B (RAM over by 308 B) and the

@@ -84,4 +84,5 @@ width field of the table is ever used, for both phases; the second width (field 
 - Whether the stock sense calibration (RAM 0x20003D58, piecewise trim) is needed; this backend uses the uncalibrated formula.
 - The real phase length (the 2 x scale above), the boost duty/frequency for each level (the stock firmware uses 50 % always),
   and the electrical limits of the output stage (isolation, maximum voltage/current).
-- Pin states between reset and `Suit::new` (the gate drivers may float), whether the stage is current-limited in hardware.
+- Pin states between reset and the early safe-off (`owo_suit_early_safe_off`, EARLY init level; the gate drivers may float
+  through the bootloader and the C runtime start-up), whether the stage is current-limited in hardware.

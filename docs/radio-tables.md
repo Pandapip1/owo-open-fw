@@ -1,8 +1,8 @@
 # EFR32BG22 radio: register/table knowledge needed by the Zephyr LL port
 
 **Unvalidated on hardware.** Labels: **[F]** = fact from a cited public source or directly observed in a stock-firmware trace in the QEMU
-model; **[I]** = inference, not confirmed. No blob bytes or disassembly are reproduced here. The sibling task (QEMU radio model,
-`docs/radio-block.md`) had not committed when this was written; this file does not duplicate it and should be reconciled with it.
+model; **[I]** = inference, not confirmed. No blob bytes or disassembly are reproduced here. The QEMU radio model is checked
+against these findings in `docs/model-fidelity.md`.
 
 ## 1. Block map
 | Block | Base | Basis |
@@ -1638,6 +1638,8 @@ doesn't understand, which the prior code did on every reset.
 
 ### 7.5.2 `RAC.SR3`'s remaining bits: read-only everywhere software touches it, origin still unknown
 
+**Superseded in part by §7.59:** stock's M33 does write `RAC.SR3` (base + `#0x4c`).
+
 All five literal-pool references to `RAC.SR3`'s base address in the stock
 sequencer object have now been traced by hand (raw byte offsets `0xa44`,
 `0x564`/`0x66c`, `0x133a`, `0x13a0`, `0x2b44` — found via a direct byte
@@ -1856,6 +1858,8 @@ fix for it, since it affects a SEQIF handshake bit, not `FRC.STATUS`
 directly.
 
 ### 7.5.4 The splice-into-stock hardware test: a real hang, later isolated to the splice vehicle, not the C lifts
+
+**Superseded in part by §7.53:** a fresh debugger session can itself cause this hang.
 
 The validation the user asked for — patch the five verified C lifts
 (`fn_0x7ac`/`_0x7be`/`_0x7c8`/`_0x894`/`_0x1bda`, relocated to free SEQRAM
@@ -2191,6 +2195,8 @@ TXEN in the compiled instruction stream, not merely in trace-log order.
 
 ### 7.7 Broader decompilation pass: `fn_0x19d0` and the structure around it
 
+**Superseded in part by §7.51:** there is a sixth vector, IRQ11.
+
 Per this project's own standing charter (full, genuine understanding of
 the proprietary blob, not just whatever slice bears on `ACTIVETXFCD`),
 revisited the object with a wider net: a raw byte scan for every
@@ -2433,7 +2439,7 @@ clears `RAC.SYNTHENCTRL.VCOSTARTUP` then later `SYNTHSTARTREQ`, pulses
 `SYNTH.VCDACCTRL`'s CLR alias, conditionally sets `RAC.RADIOEN`'s
 `PREEN`/`RFBIASEN` bits gated on a SEQRAM flag byte, and finishes by
 snapshotting `RAC.STIMER` (already established as live counter state,
-§7.44) into a SEQRAM scratch cell. Reachable only from `fn_0x2644`
+§7.43) into a SEQRAM scratch cell. Reachable only from `fn_0x2644`
 (IRQ10) and `fn_0x2362`/`fn_0x2390` (IRQ13) — confirmed via grep across
 every decompiled file in this directory, neither `fn_0x894` nor
 `fn_0xd38` reference it — so, like its callers, it is unreachable on the
@@ -2513,6 +2519,8 @@ plausibly just packet-length artifacts here) can actually be trusted
 either way.
 
 ### 7.9 `RAC.STCTRL` lines up exactly with a live hardware value, and the "19-entry calibration loop" is NVIC priority setup, not radio calibration
+
+**Superseded in part by §7.59:** the "hardware-latched flag" inference for `RAC.SR3` is withdrawn.
 
 Chasing `RAC.STCTRL`'s own real-hardware value (found as a genuine, non-
 packet-dependent config difference in §7.8: `0` on the open stack vs.
@@ -2802,6 +2810,8 @@ targeted code that genuinely runs once), but this specific pattern is
 now flagged for anyone writing a new one.
 
 ### 7.12 `ACTIVETXFCD` status: every hypothesis tried so far, consolidated
+
+**Superseded by §7.60:** root cause found (the synthesizer was off during TX).
 
 A long session's worth of hypotheses have now been tried and ruled out
 on this specific question. Consolidated here as one reference, so
@@ -3642,6 +3652,8 @@ other test on this chip.
 
 ### 7.29 A second real QEMU fidelity divergence, found and fixed: `FRC.WCNTCMP0`'s dynamic length
 
+**Superseded in part by §7.38:** `WCNTCMP0` is `field + MINLENGTH`, not the formula here.
+
 `vendor/qemu` had no special-case handling for `FRC.WCNTCMP0` at all --
 it just held whatever software last wrote (the open stack's bootstrap
 sentinel `0xFF`), never updating it, even though §7.20 already
@@ -3754,6 +3766,8 @@ against this exact, now very concrete, success criterion: does
 `READOFFSET` ever pass `2`).
 
 ### 7.32 `PROTIMER` is confirmed, with real captured data, to be completely disabled on the open stack -- and a cheap live test of enabling it crashed
+
+**Superseded in part by §7.39:** `PROTIMER.EN` reads 1: enabled, never started.
 
 Found `tests/hardware-lockstep/` (a differential hardware/QEMU debugger
 with `compare.py`, plus already-captured register-bank snapshots for
@@ -3911,6 +3925,8 @@ riskier undertaking than anything tried so far in this sub-thread and
 was not attempted this round.
 
 ### 7.35 The real-IRQ-servicing test attempt: confounded by the test apparatus itself, not a real finding either way
+
+**Superseded by §7.36:** the abort's attribution here was wrong.
 
 Attempted the experiment §7.32-7.34 identified as the remaining gap:
 does `FRC` need the CPU to actually *take* the IRQ36 exception, not
@@ -4201,6 +4217,8 @@ any of the interrupt-enable/pending machinery checked so far.
 
 ### 7.42 A genuinely new lead: `SYNTH.STATUS.INLOCK=0` at the stuck baseline -- the PLL is not locked
 
+**Superseded by §7.60:** the `INLOCK=0` comparison here was between mismatched RAC states.
+
 With the entire interrupt-handling thread closed, checked two blocks
 this investigation had never directly examined at the settled stuck
 baseline: `MODEM` and `SYNTH`. `MODEM.STATUS`/`STATUS2`/`STATUS3`/
@@ -4254,6 +4272,8 @@ explained by a RAM address, a channel-dependent config value, or a
 live counter.
 
 ### 7.43 Started that diff with `rfcrc` -- a real production-code fix found, but not the `ACTIVETXFCD` cause
+
+**Superseded in part by §7.60:** the "per-chip trim" and "never touched" closure of the RAC/MODEM/SYNTH diffs is withdrawn.
 
 Decoded `rfcrc`'s 12 differing bytes first (smallest set). All four
 repeats (the usual secure/non-secure alias pattern) reduce to one real
@@ -4352,7 +4372,7 @@ between physical silicon units regardless of firmware); or test/debug
 registers never touched by normal operation (`TESTCTRL`, `IFADCDBG`,
 `SCRATCH6`/`SCRATCH7`).
 
-**Conclusion for the whole §7.19/§7.41-7.44 mining effort:** one real,
+**Conclusion for the whole §7.19/§7.42-7.43 mining effort:** one real,
 independently confirmed production bug found and fixed
 (`RFCRC.CMD.INITIALIZE`, §7.43); every other difference across all
 seven radio blocks is accounted for by categories already understood
@@ -4393,7 +4413,7 @@ explain what any of them actually do.
 This closes off "find a shortcut via public documentation" definitively,
 not just as an assumption carried from earlier sessions. The only
 remaining avenues are direct hardware experimentation (now exhausted at
-the register level, per §7.1-7.44) or deeper reading of the M0+
+the register level, per §7.1-7.43) or deeper reading of the M0+
 sequencer's own dispatch logic (`fn_0x894`/`fn_0xd38`, deliberately
 never ported per this project's charter, but still readable purely for
 understanding).
@@ -4823,6 +4843,8 @@ convenience.
 
 ### 7.55 A major, previously-untested QEMU fidelity gap: the open stack's own TX attempt never reaches `RAC.STATUS=TX` in simulation at all
 
+**Superseded by §7.56:** retracted in full.
+
 Every existing QEMU regression for this radio (`efr32bg22-test`,
 `efr32bg22-rf-test`) exercises register behavior through direct qtest
 MMIO pokes, or (`radio-sequencer-executes-open-code`) a synthetic
@@ -5204,11 +5226,11 @@ uncommitted to this repository.
 
 ### 7.60 Root cause of the `ACTIVETXFCD` stall: stage 3 transmits with the frequency synthesizer powered off -- starting it by hand unsticks `FRC` and completes the frame
 
-**Correction to §7.42 and §7.44 first.** §7.42 dismissed
+**Correction to §7.42 and §7.43 first.** §7.42 dismissed
 `SYNTH.STATUS.INLOCK=0` as "normal on both stacks" by comparing stage 3
 *in TX* (`RAC.STATUS` state 9) against stock's ch37 "pre-TXEN" capture,
 whose `RAC.STATUS=0x00400000` is state 0 (OFF) -- a mismatched-state
-comparison. §7.44 then closed the RAC/MODEM/SYNTH diffs partly as
+comparison. §7.43 then closed the RAC/MODEM/SYNTH diffs partly as
 "per-physical-chip trim", but both captures are from the same chip, so
 any difference in those registers is firmware-written; and as "never
 touched" test registers (`SCRATCH6/7`), which §7.59 shows stock writes.
@@ -5392,6 +5414,8 @@ hardware sampling and is unconfirmed either way.
 
 ### 7.63 Receive: what stage 3 is missing, mapped on stock hardware (in progress)
 
+**Superseded by §7.64:** stage 3 receives; the RX `SYTRIM0` port here was wrong.
+
 Stage 3 transmits (§7.62) but never listens: on silicon and in QEMU its RAC
 only ever shows OFF/TXWARM/TX/TXPD. Two separate gaps [F]:
 
@@ -5514,7 +5538,7 @@ The decisive difference: `MODEM.VTCORRCFG0` stock `0xB5BEC8B8`, stage 3
 and around every event), and the live value is the advertising access
 address in on-air bit order rotated right by one:
 `ror(bitrev(0x8E89BED6), 1) = 0xB5BEC8B8`. The PHY table's `0x4A413747`
-(and §7.44's "access-address-shaped bytes") is its complement. RAIL also
+(and §7.43's "access-address-shaped bytes") is its complement. RAIL also
 lowers `VTCORRCFG1.EXPECTHT` from the table's 5 to 2 (observed; derivation
 unknown). The same diff showed §7.63's RX `SYTRIM0` port wrong: stock's RX
 value is `0x64E29` (`SYCHPBIAS=1`, *no* `SYCHPSRCEN`).
@@ -5548,6 +5572,8 @@ watchpoint halt; the store at that site writes RXDIS. Withdrawn -- see
 §7.65.)
 
 ### 7.65 RX->TX turnaround works mechanically; scan responses are blocked by bit errors on received SCAN_REQs
+
+**Superseded by §7.66:** the bit errors were stale RX-ring data, not reception errors.
 
 **Stock handlers [F].** IRQ4 (`STATERXPD`, captured by an AP3 watchpoint
 inside it) is the RF front-end power-down -- stock `fn_0xc02`, now named:
@@ -7319,7 +7345,7 @@ sequencer, or run the RX callback from the interrupt), not a wider tolerance.
   0x08/0x3E within 0.5-6 s.
 - `run-qemu-connection-e2e.sh` (now asserts a sustained link and GATT): pass at shift 3 (20 s wall,
   30/30 GATT rounds) and shift 5 (40 s wall, 90/90).
-- Injected infeasibility: Peripheral with `EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS` declared 80 us
+- Injected infeasibility: Peripheral with `EFR32_RADIO_RX_LAUNCH_HOLD_LATE_NS` (since §7.82 `EFR32_RADIO_SEQ_TIMED_HOLD_LATE_NS`) declared 80 us
   (beyond the window's 32 us tolerance), safe-shutdown policy: the first Peripheral window launch
   started 15.5 us past its start-by, safe shutdown (RAC 0x1d000000, PA off), the Peripheral silent
   afterwards, the Central reports 0x3E. With admission on, QEMU reports the first ADV_IND
@@ -7910,6 +7936,8 @@ connection close/abort budget still the QEMU 241.7 us (no abort after a receive 
 prepare lead; scanner and initiator responses still decided by the M33 (7.82); controller privacy
 with a staged scan response (a resolving list in the sequencer) if the product ever needs it.
 ### 7.85 The synthesizer below and above the 2.4 GHz band; amateur Morse identification on silicon
+
+**Superseded in part by §7.90:** the QEMU lock range is now 2158-2644 MHz.
 
 Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548). Code and context:
 `docs/amateur-radio.md`, `hal/amateur.c`, `hal/amateur_rules.c`, `hal/radio.c`

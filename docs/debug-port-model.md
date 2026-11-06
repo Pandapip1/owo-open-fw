@@ -275,10 +275,11 @@ descriptors and capability words were not captured (TODO.md).
 
 ## Results
 
-- qtest `efr32bg22-dap-test`: 6/6 (DP identity and the post-reset DPIDR
+- qtest `efr32bg22-dap-test`: 13 tests (DP identity and the post-reset DPIDR
   rule, AP identity and memory, ROM table, sticky errors, DCI status, halt
-  and core registers, FPB across SYSRESETREQ, MSC programming).
-  `efr32bg22-test` 98/98 and `efr32bg22-rf-test` 24/24 still pass.
+  and core registers, FPB across SYSRESETREQ, MSC programming, timers and
+  WDOG0 in debug halt, nRESET, the RAC retiming wedge).
+  `efr32bg22-test` 123/123 and `efr32bg22-rf-test` 43/43 pass.
 - Dual-MCU radio run (scratch/sched/dual.sh b-adv b-scan, shift 3, 60 s):
   122 SCAN_REQ, 122 SCAN_RSP, no late/unsat lines.
 - USB: on dummy_hcd the OB enumerates as 1366:0105 "J-Link" serial
@@ -306,9 +307,10 @@ descriptors and capability words were not captured (TODO.md).
   revisions, the other DCI status words.
 - The M0+ (AP3, deferred examine in xg22-dual-deferred.cfg): not on the
   model's DAP.
-- DWT watchpoints; C_MASKINTS while running; S_LOCKUP; ITM, ETM, CTI, TPIU.
-- Debug-access side effects (a debugger read popping a FIFO) and the SWD
-  access cost on the bus; EM2 with a debugger attached.
+- DWT watchpoints; ITM, ETM, CTI, TPIU.
+- Debug-access side effects (a debugger read popping a FIFO; TIMER capture
+  FIFOs excepted) and the SWD access cost on the bus; EM2 with a debugger
+  attached.
 - The probes' real USB descriptors, capability words, EDU Mini firmware
   string and hardware version; JTAG; SWCLK timing.
 - The OB VCOM joins USART1 through a pair of socket chardevs (configuration,
