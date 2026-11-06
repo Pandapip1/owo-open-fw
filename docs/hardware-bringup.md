@@ -22,6 +22,11 @@ throughout this plan.
    - Keep all stimulation outputs disabled.
    - Flash, verify, and confirm the intended driver behavior on the board.
 
+Status: all three stages have passed on the kit. Stage 3 transmits on air
+(`radio-tables.md` §7.62), receives (§7.64), answers scan requests (§7.68) and
+holds encrypted connections (§7.80, §7.84). The log below is chronological;
+open questions in it are superseded by the later `radio-tables.md` §7 entries.
+
 For every difference between real hardware and QEMU, record the evidence here,
 then fix the simulator and add regression coverage before hardware bring-up is
 declared complete. Dependency and QEMU downloads should run in the background.
@@ -169,7 +174,8 @@ declared complete. Dependency and QEMU downloads should run in the background.
   that FRC consumption of the staged BUFC FIFO and the complete sequencer
   handoff remain uncharacterized. Controller initialization and scheduling are
   runtime-confirmed; RF transmission remains the outstanding hardware gate if
-  stage 3 is required to advertise over the air.
+  stage 3 is required to advertise over the air. (Superseded by
+  `radio-tables.md` §7.62: stage 3 transmits on air.)
 - The trace build exposed another QEMU/hardware divergence at `radio_reset()`.
   Silicon retained `RAC.STATUS.STATE=13` (SHUTDOWN), and asserting
   `CTRL.FORCEDISABLE` there left it in SHUTDOWN forever; QEMU had incorrectly
@@ -624,8 +630,9 @@ that source independently for ARMv6-M, converts the result to a byte array, and
 links that array into the M33 application. `radio_reset()` validates the
 embedded initial SP and Thumb reset vector, asserts `RAC.CTRL.SEQRESET`, copies
 the image to `0xb0000000`, reads every byte back, and only then performs the
-CPU-wait release. The current image is 400 bytes with SHA-256
-`21f65696a8009288554589d157cec10953dd7dec7a1db4d259b4fe533840b102`.
+CPU-wait release. The image was then 400 bytes with SHA-256
+`21f65696a8009288554589d157cec10953dd7dec7a1db4d259b4fe533840b102`; it has
+grown since, as the sequencer took over TX, RX and timed launches (§7.61 on).
 The stage-3 link map contains no RAIL or proprietary sequencer archive member.
 
 This provenance boundary applies to the whole dependency chain, not merely the
@@ -707,6 +714,8 @@ dynamic-length-pending sentinel instead of zero. Hardware subsequently
 replaced it with 10 for the 11-byte frame, proving that the length byte was
 parsed, but `TXABORTED` and the two-byte stop remained. The bootstrap is
 correct but insufficient and is not represented as the whole fix.
+(Superseded by `radio-tables.md` §7.60: the abort was the synthesizer left
+powered off during TX; §7.61 and §7.62 port its power-up and the frame is sent.)
 
 The same discipline was applied to `FRC.FECCTRL.BLOCKWHITEMODE`. Static code
 at working-image `0x2c1e..0x2c24` conditionally clears the public three-bit

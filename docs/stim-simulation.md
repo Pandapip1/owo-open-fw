@@ -67,7 +67,9 @@ entry.
    to `settle_us`), and a converter answering at once (native_sim) kept the loop from ever
    reaching the end of the width (now a step between a result and the next start). Now: 62.2 /
    63.1 us for a commanded 50 us (max 63.8), gap 65.9 us, median |net charge| 6.7 nC, max 13 nC
-   (before: 52.1 / 52.9 us, max 93.3 us, max 0.33 uC).
+   (before: 52.1 / 52.9 us, max 93.3 us, max 0.33 uC). Since these runs the IADC's timing has
+   been measured on silicon and the model follows it (radio-tables.md 7.89: `adc_read_async()`
+   to its callback 24.5-24.8 us on the sense channel's configuration); not re-run here.
 6. **Open electrode and sense stuck at zero stop the open firmware** [E]: one live phase after
    a sense stuck at zero (0.46 uC), none for open pads. Below level 15 a zero reading lies inside
    the 14-level tolerance; narrowing it needs a silicon measurement of the sense against the
@@ -202,7 +204,7 @@ firmware: `owo_suit`, `-DOWO_HW=ON`, `sim/product-qemu.conf`, `CONFIG_OWO_SIM_IN
 the radio rows use the same image without `sim/product-qemu.conf` (silicon timing; its miss
 policy is the radio's safe shutdown, the QEMU profile only counts misses). Times are virtual;
 pulse timing reflects the model's instruction timing (icount shift 3) and its IADC (RM formulas,
-not measured silicon timing). Runs on this model are not reproducible run to run (the same
+not measured silicon timing; the model has followed silicon since radio-tables.md 7.89). Runs on this model are not reproducible run to run (the same
 scenario gave different schedules); the radio rows were repeated (finding 3). The per-run
 recordings are kept with the stock dump (`stim-sim-2026-11-05/`).
 
@@ -272,7 +274,8 @@ the deterministic miss reproduced unchanged with it; a gdb breakpoint stop moves
 by 250 us and changed the run, and an instrumented build no longer missed). Times below use the
 model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they are model times.
 
-- **Boot-time deadline miss** [E, root cause found, not fixed]: about 213 ms after reset the
+- **Boot-time deadline miss** [E, root cause found; superseded by radio-tables.md 7.82, which
+  removed the not-before spin]: about 213 ms after reset the
   radio TX launch job is released from the TIMER0 clock-event interrupt (release to its
   start-by 56.3 us: its not-before instant 35.4 us after the release plus 20.9 us). The release
   path is quick: the post comes 15 us into that interrupt, the interrupt ends 8.6 us later,
@@ -336,7 +339,8 @@ model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they ar
   in-phase start to result about 35 us with the driver re-initialising the IADC each read (phase
   85 us), negligible once it keeps an unchanged configuration (`vendor/zephyr`
   `adc_silabs_iadc.c`); phases 53.1 / 53.9 us median, the bridge-off path and one poll step being
-  the rest. The model converts at the start command; silicon adds the IADC warm-up and conversion
+  the rest. The model converted at the start command then (it times conversions now: next
+  item); silicon adds the IADC warm-up and conversion
   time, which `OWO_STIM_SENSE_GUARD_US` (60 us, nominal) must cover.
 - **IADC timing in the pulse loop** [E, 2026-11-05]: method: a diagnostic image (not kept)
   recorded the cycle counter at the supervisor's conversion start, after the driver's start
@@ -364,7 +368,8 @@ model's M33 rate (1.84 cycles per instruction at 76.8 MHz, 23.96 ns), so they ar
   would fault in the report or leave the forced-off writes undone. The safe shutdown now
   enables the radio bus clocks itself (idempotent SET aliases) before touching the RAC. Not
   reproduced in this model (the boot miss comes after `radio_setup()`).
-- **Later failures after the safe shutdown are only counted** [E, open]: the radio's handler
+- **Later failures after the safe shutdown are only counted** [E, fixed in vendor/zephyr,
+  7ea7070: a report whose thread is suspended or dead is over]: the radio's handler
   suspends the job that reported, inside the kernel's report, so the kernel's "report in
   progress" guard is never cleared; a later late clock event (one in the sustained run, likely
   from a gdb pause, which moves virtual time) was counted but not handed to the policy. The
@@ -379,7 +384,8 @@ DAC part (full scale, clear code); the 0x69 part; battery chemistry and divider,
 under stimulation load (sets the gap between `OWO_STIM_BATTERY_START_MV` and `_STOP_MV`) and how
 the boost rail behaves as it sags; the sense reading against the command (sets
 `OWO_STIM_UNDER_MARGIN`); the output's rise time (`OWO_STIM_SETTLE_US`); the IADC's start-to-result
-time in the pulse loop (`OWO_STIM_SENSE_GUARD_US`); the time from reset to the early safe-off with
+time in the pulse loop (`OWO_STIM_SENSE_GUARD_US`; the driver's read path alone is measured,
+radio-tables.md 7.89); the time from reset to the early safe-off with
 the clocks the bootloader leaves; stock pulse timing on silicon (the model's instruction timing is
 not calibrated for these code paths); the stock boost/stop/battery behaviour on a unit; what
 expander P0 is (button or a charger's power-good) and whether the PCF8575-class part asserts /INT

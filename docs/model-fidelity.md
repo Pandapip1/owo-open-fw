@@ -37,6 +37,7 @@ logs (table C).
 | after this audit | 152 | 45 | 41 | 1 | 1 |
 | after the model-gaps pass (2026-11-01) | 156 | 45 | 38 | 0 | 1 |
 | after the model-gaps2 pass (2026-11-05) | 159 | 45 | 35 | 0 | 1 |
+| after the LO model (radio-tables 7.90: B7, B8) | 161 | 44 | 34 | 0 | 1 |
 
 The model-gaps pass (vendor/qemu `agent/model-gaps`, section "Model-gaps
 pass" below) closed C63 and B71, B79 and B115, and moved B76 and B78 to
@@ -317,7 +318,7 @@ Status of each reference-manual chapter in the model after this pass.
 | 8 | CMU | partial | RM, Si | status words beyond those measured |
 | 9 | Oscillators | yes | Si SS7.73 | HFXO warm restart [P] |
 | 10 | SMU | partial | Si | only the AHBRADIO attribution |
-| 11 | CRYPTOACC | partial (gaps) | RM; Si for RADIOAES | TRNG test mode, health-test failures, IRQ; PK engine; BA413/418/419 |
+| 11 | CRYPTOACC | partial (gaps) | RM; Si for RADIOAES and TRNG timing (SS7.89) | TRNG test mode, health-test failures, IRQ; PK engine; BA413/418/419 |
 | 12 | EMU (incl. DCDC) | partial | RM, Si | RSTCAUSE/RSTCTRL, DCDC REGULATION only: no BOD, voltage monitors, EM2/EM3/EM4 |
 | 13 | PRS | yes (gaps) | RM, Si SS7.71/7.73 (probe routes, gating, timing) | producers CMU/CORE/AGC/BUFC/FRC/PROTIMER/SYNTH/PDM/LFRCO and some USART/EUART signals; RAC, CMU, MODEM, CORE, DTI, USART, WDOG consumers |
 | 14 | GPCRC | yes | RM | - (no LDMAXBAR source; the LDMA feeds INPUTDATA by SWREQ) |
@@ -330,7 +331,7 @@ Status of each reference-manual chapter in the model after this pass.
 | 21 | USART | partial | RM | I2S, parity errors, TX sequencer delays, AUTOCS, secondary sync mode |
 | 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input |
 | 23 | I2C | partial | RM | follower mode |
-| 24 | IADC | yes (gaps) | RM [I] timing | bipolar output, SCALEx calibration, SUPPLY inputs, tailgating |
+| 24 | IADC | yes (gaps) | RM, Si SS7.89 timing | bipolar output, SCALEx calibration, SUPPLY inputs, tailgating |
 | 25 | GPIO | yes | RM | EM4 wake |
 | 26 | LDMA | yes (gaps) | RM, Si SS7.74 (error, EN) | own throughput [I]; not an interconnect manager (B81); DBGHALT |
 | 27 | WDOG | yes | RM, Si | EM2/EM3 run control |
@@ -436,7 +437,9 @@ past 64 virtual seconds (2^31 ticks of the 33.55 MHz scheduler clock) the
 advertiser logs "deadline late start ... deadline -2139858319" and makes a
 safe shutdown: apparently a signed 32-bit wrap in the firmware's deadline
 arithmetic (the deadline prints negative once the clock passes 2^31),
-reachable now that 60 s of wall time runs past 64 virtual seconds.  Both
+reachable now that 60 s of wall time runs past 64 virtual seconds
+(superseded by radio-tables.md 7.88: not a wrap; the report printed an
+unsigned deadline with `%d`).  Both
 are firmware findings, not model ones.
 
 Behaviour changes a firmware can see:
@@ -593,7 +596,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B60 | Receiver with synth/LNA/IF-ADC unpowered (SYEN 0, RFPATHEN 0, IFADCDBG 0x0C, SYNTH.STATUS 0x4) detects nothing (0 RXFRAME in 90 windows) | §7.80 silicon | yes | bg22.c:efr32_rx_chain_powered (~1904); RF: released-rx-chain-off-detects-nothing | Which enable is individually required is [I] |
 | B61 | SYNTH.FREQ = round(f*2^19/38.4 MHz) (0x01F46AAB/0x01F96AAB/0x0204AAAB = 2402/2426/2480); CHCTRL*CHSP adds [I] | §7.80 silicon / [I] | yes | bg22.c:efr32_rf_channel (~2087); RF: tx-offer-requires-matching-synth-channel | - |
 | B62 | Receive is channel-dependent on silicon: CRC ok ch37 77 %, ch38 1 %, ch39 0 % (cause open) | §7.80 silicon | no | - | RF/analog, not modelable without a cause; out of scope |
-| B63 | RX FIFO overflow: 512-octet FIFO full -> BUFC.IF 0x100, RAC in RXOVERFLOW (6) with no SEQIF event (IRQ6 never runs); RXDIS/SWRXEN off/BUFC CLEAR/FRC RXABORT/IF clear do not leave; FORCEDISABLE -> SHUTDOWN -> OFF | §7.80 silicon | yes | efr32_rac_rx_frame_end overflow branch (~1784), efr32_rac_set_state (no RXOVERFLOW event); RF: released-rx-fifo-overflow | Partial write of the overflowing frame is [I] |
+| B63 | RX FIFO overflow: 512-octet FIFO full -> BUFC.IF 0x100 and FRC.IF.RXOF, RAC in RXOVERFLOW (6) with no SEQIF event (IRQ6 never runs); RXDIS/SWRXEN off/BUFC CLEAR/FRC RXABORT/IF clear do not leave; FORCEDISABLE -> SHUTDOWN -> OFF | §7.80, §7.89 silicon | yes | efr32_rac_rx_frame_end overflow branch (~1784), efr32_rac_set_state (no RXOVERFLOW event); RF: released-rx-fifo-overflow | Partial write of the overflowing frame is [I] |
 | B64 | RXDIS in RXFRAME/RX2RX/RX2TX/TX2RX ignored | §7.72 [I]; RXFRAME confirmed §7.80 | yes (audit) | efr32_rac_seq_command | **RXFRAME case pinned:** qtest `rf/released-rx-frame-disables`. RX2RX/RX2TX/TX2RX stay [I] |
 | B65 | M0+ clock = SYSCLK/(RHCLKPRESC+1): 38.4 (stage 3), 19.2 (HFXO), 9.89 (FSRCO); independent of HCLKPRESC and EM01GRPA | §7.74/7.75 silicon | yes | bg22.c:efr32_cpu_clocks_update (~5770); T: core-clocks-per-cpu-rates | - |
 | B66 | M33 HCLK = 76.8 MHz = TIMER1 1:1 in stage 3 | §7.75 silicon | yes | efr32_cpu_clocks_update, efr32_hfrcodpll_hz | - |
@@ -645,7 +648,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B112 | MSC programming (WREN, ADDRB/INVADDR, ERASEPAGE, WDATA clears bits, PAGELOCK, MSC_LOCK) | §7.78 RM | yes | efr32_msc_* (~4732) | Erase/write durations and read stall [U] |
 | B113 | RTCC counts at RTCCCLKCTRL/CNTPRESC, writes immediate, IF.CCn when CNT becomes OCVALUE [I] | §7.78 RM/[I] | yes | efr32_rtcc_* (~3688); T: rtcc-counts-and-compares | Edge timing unmeasured |
 | B114 | EMU.RSTCAUSE: POR after power-up, SYSREQ on AIRCR.SYSRESETREQ, kept until RSTCAUSECLR | §7.78 RM/[I] | yes | T: emu-rstcause | - |
-| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK plus the measured first-result latency [F, 7.89]; T: iadc-single-conversion | silicon timing unmeasured (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
+| B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK plus the measured first-result latency [F, 7.89]; T: iadc-single-conversion | (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
 | B116 | Unidentified SEQRAM 0x4000 user (reads 0xe5ecc0de, 0x01010201, 0xaabbccdd) | §7.72 silicon | no | - | Owner unknown; nothing to model yet |
 | B117 | CMU gates RDMAILBOX/RDSCRATCHPAD/PRORTC/SYSCFG stop the stock M0+ lockups (§7.59 via §7.70) | §7.70 silicon (mechanism unknown) | partial | gate map B40 now covers them | Which access faulted for stock not identified |
 
@@ -678,7 +681,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C21 | **RAC XORETIMECTRL/DIGCLKRETIMECTRL ENRETIME (stock RXSEARCH limits) set in the RX tune wedges the debug port within ms of every boot**; per TODO DPIDR readable, AHB-AP and DCI dead; cause unknown | radio-tables.md §7.80 ~l.7423; TODO.md ~l.497; recover2.sh header, Si | yes (audit) | efr32bg22.c has no XORETIME/DIGCLKRETIME semantics (grep: none) | **Closed (mechanism unknown, see "The debug-port wedge"):** `efr32bg22.c` efr32_rac_retime_update -> `efr32-dap.c` dap_debug_wedge. qtest `dap/retime-wedges-debug-port`, `dap/retime-on-hfxo-sysclk-keeps-debug-port`, e2e step 7 |
 | C22 | Attached debugger: M33 WFI does not gate the core clock (DWT counts); EM2 never entered whatever EM2DBGEN | TODO Hardware/tooling "Debugger effects" (cross-core-findings), Si | no | - | SoC debug-attached state |
 | C23 | Each SWD AP access costs the M0+ ~1 cycle on the same target (SEQRAM, radio regs), up to ~5 on the peripheral bus (TIMER1); OpenOCD at 4 MHz ~17.6k accesses/s; M0+ SRAM loads under WFI +71 % attached vs +8.6 % detached | TODO "Debugger effects", Si | no | - | per-access bus cost of debug accesses |
-| C24 | Debug reads have no side effects (capture FIFOs do not pop); a debug write's bus error is reported on the next transaction | TODO "Debugger/chip quirks", Si | partial | efr32-dap.c:mem_ap_access -> STICKYERR then FAULT on the next access | no MemTxAttrs.debug path in efr32bg22.c for side-effect-free reads |
+| C24 | Debug reads have no side effects (capture FIFOs do not pop); a debug write's bus error is reported on the next transaction | TODO "Debugger/chip quirks", Si | partial | efr32-dap.c:mem_ap_access -> STICKYERR then FAULT on the next access | no MemTxAttrs.debug path in efr32bg22.c for side-effect-free reads (gaps2: TIMER CCn_ICF debugger reads do not pop, by requester id) |
 | C25 | A debugger-halted M0+ (not in WFI) stops RAC leaving OFF | TODO quirks list, Si | no | no AP3 | needs C3 |
 | C26 | Hardware single-step of the M0+ freezes the live counter at 0xa801c020 polled by stock IRQ11 | hardware-bringup.md, Si | no | no AP3 | needs C3 |
 | C27 | All-zero TARGET_HALTED context: OpenOCD cortex_m_poll artefact, not chip | debug-port-model.md quirk 5, Si + source | yes (reproduced) | n/a (OpenOCD patch) | - |
@@ -707,12 +710,12 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C50 | M0+ store to B alias 0xB8022028 -> HardFault at PC 0x106; M0+ uses A/AA | hardware-bringup.md, Si | partial | seq_memory maps no 0xb8 window (efr32bg22.c ~l.6801-6835), so the access is unassigned | no qtest; fault type not asserted |
 | C51 | Per-channel SYNTH.FREQ 0x01f46aab/0x01f96aab/0x0204aaab; RAIL writes the 2 MHz index to FRC.WCNTCMP2 and SYNTH.CHSP, CHCTRL = 0 | hardware-bringup.md, Si | yes | RF medium snapshots CHSP; rf/tx-offer-requires-matching-synth-channel | - |
 | C52 | BUFC WRITEDATA: one 32-bit store per octet advances write offset | hardware-bringup.md, Si | yes | bufc-data-port | - |
-| C53 | RXOVERFLOW sticks; only FORCEDISABLE (via SHUTDOWN) leaves it; FIFO full -> BUF1OF, no RXDONE | radio-tables §7.80, TODO, Si | yes | rf/released-rx-fifo-overflow | - |
+| C53 | RXOVERFLOW sticks; only FORCEDISABLE (via SHUTDOWN) leaves it; FIFO full -> BUF1OF and FRC.IF.RXOF, no RXDONE | radio-tables §7.80, §7.89, TODO, Si | yes | rf/released-rx-fifo-overflow | - |
 | C54 | RX2TX -> TX start 180.6 us modelled vs 180.5 us measured; HFXO 276 us, DPLL 302 us | TODO QEMU model, Si | yes | rf/* turnaround tests; dpll-lock, hfxo-ready-status | HFXO warm restart placeholder |
 | C55 | M0+ handler run time: TXWARM 91 us silicon vs 12.6 us model; TX2RX 123.5 vs 39 us | TODO QEMU model, Si | partial | per-core clocks (core-clocks-per-cpu-rates) | cross-core contention / bus model (TODO) |
 | C56 | M0+ clock = SYSCLK/(RHCLKPRESC+1); M33 wins arbitration; per-access costs (§7.74) | TODO, Si | partial | core-clocks-per-cpu-rates, core-clocks-radio-clock-stops-seq; (gaps) efr32-interconnect.c | contention modelled per B75-B79; M33 SRAM traffic (B77) not |
 | C57 | SYNTH LO-count BUSY window | TODO says unmodelled | yes | efr32bg22.c EFR32_SYNTH_LOCNTSTATUS ~l.108; rf/locnt-busy-window | TODO line is stale |
-| C58 | RTCC compare edge: model per RM figure (IF when CNT becomes OCVALUE); BURTC fires one edge later; BURTC.COMP reads old value while pending (RM says pending) | TODO, RM vs Si | partial | rtcc-counts-and-compares; burtc-compare-pending | RTCC edge unmeasured; CCV0MATCH/PRECNT/capture unmodelled |
+| C58 | RTCC compare edge: model per RM figure (IF when CNT becomes OCVALUE); BURTC fires one edge later; BURTC.COMP reads old value while pending (RM says pending) | TODO, RM vs Si | partial | rtcc-counts-and-compares; burtc-compare-pending | RTCC edge unmeasured; CCV0MATCH/PRECNT unmodelled (capture modelled in gaps2: prs-rtcc-capture) |
 | C59 | EM2/EM3 effect on M0+, SEQRAM/radio retention (SYSCFG_RADIORAMRETNCTRL), wake latencies | TODO, DS/RM | no | - | unmeasured |
 | C60 | RADIOAES run times at HCLK 76.8 MHz: ECB/CMAC 80 + 55 cycles per block, CCM 105 + 56 (ECB 1 block 133 cyc 1.73 us; CCM 27 B 495) | crypto.md §4, Si | yes | efr32-radioaes.c RADIOAES_START_NS ~l.104; no qtest (tests/crypto-port 330/330 in QEMU) | durations are fixed ns, valid only at 76.8 MHz HCLK |
 | C61 | Idle STATUS = 0; INCL_IPS_HW_CFG reads 0x00000001 (header says 0x11) | crypto.md §4, Si | yes | efr32-radioaes.c INCL_IPS_HW_CFG_RESET ~l.59 | no qtest |
@@ -724,7 +727,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C67 | Channel switches: USART0, 32-bit chain, latch on PC3, readback with CS high; latch type [I] | stock-stim-path.md, Dump | yes | owo-suit-parts.c; board/usart-spi-switch-readback | latch type [I] |
 | C68 | Expander PCF8575 at 0x40/0x20 on I2C0 PB4/PA7, /INT PC4; outputs weakly high from reset (datasheet); P2/P3 meaning [M] | suit-board.md, stock-stim-path.md, Dump/DS | yes | owo-suit-parts.c PCF8575; efr32-i2c.c; board/i2c-expander | TODO "I2C0 controller unmodelled" is stale |
 | C69 | Unknown I2C device at 0x69 | stim-simulation.md, Dump | partial | owo-suit.c unknown-0x69-present (acks only) | identity [U] |
-| C70 | Sense on PD2, battery on PD3 via 33/133, IADC 0xB2/0xB3, VDDX ref 3300 mV, OSR 2x | stock-stim-path.md (corrected), Dump | yes | owo-suit.c battery-div-num/den ~l.1006; board/iadc-scan-board-battery | (gaps) IADC conversion/warm-up time from the RM [I] (B115) |
+| C70 | Sense on PD2, battery on PD3 via 33/133, IADC 0xB2/0xB3, VDDX ref 3300 mV, OSR 2x | stock-stim-path.md (corrected), Dump | yes | owo-suit.c battery-div-num/den ~l.1006; board/iadc-scan-board-battery | - (IADC conversion/warm-up time measured on silicon, 7.89; B115) |
 | C71 | Boost PWM TIMER1 CC0 on PC7, 4 kHz 50 % | stock-stim-path.md, Dump | yes | board/timer-pwm-pin | rail physics [U] |
 | C72 | External DAC/expander keep state across MCU reset | stim-simulation.md (E), physics [I] | yes | owo-suit.c (parts not reset with SoC) | - |
 | C73 | USART frames take real time at the programmed baud; full RX buffer -> RXOF "as on silicon" | sim/README.md, RM | partial | efr32-usart.c ~l.40; usart-tx-polling, usart-frame-time | TODO: IRQ-line flag split / IF level semantics to calibrate on silicon; sync mode SPI exists for board; (gaps2) frame time no longer overflows above 8.4 MHz PCLK |

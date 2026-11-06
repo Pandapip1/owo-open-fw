@@ -10,7 +10,7 @@ power-aware system-timer driver:
 
 | CPU/power state | Clock-event backend | Purpose |
 | --- | --- | --- |
-| Active / EM1 | PROTIMER | high-resolution next-deadline interrupt |
+| Active / EM1 | TIMER0 (32-bit, EM01GRPACLK) | high-resolution next-deadline interrupt |
 | EM2 / EM3 / EM4-capable idle | BURTC | retained low-power wake alarm |
 
 The system timer, rather than a Bluetooth driver, chooses and changes the
@@ -18,38 +18,43 @@ clock-event backend.  It presents one monotonic kernel tick stream and one
 `sys_clock_set_timeout()` implementation.  The scheduler remains the sole
 owner of runnable-job selection.
 
-This document is a design contract, not a claim that the current partial
-PROTIMER model implements it.
+This design is implemented as the scheduler clock service
+(`vendor/zephyr/kernel/clock_event_sched.c`, `CONFIG_CLOCK_EVENT_SCHED`) with
+`CONFIG_CLOCK_EVENT_SYSTEM_TIMER` as the system timer (`prj.conf`). The active
+provider is TIMER0 (`CONFIG_COUNTER_SILABS_TIMER_CLOCK_EVENT`), not PROTIMER,
+whose start encoding is not public (`docs/radio-tables.md` 7.82); the deep-sleep
+provider is BURTC (`CONFIG_SILABS_BURTC_CLOCK_EVENT`). The sections below keep
+the design reasoning and say where the implementation differs.
 
 ## Current clock-event integration boundary
 
-The generic clock-event selector and deferred-release primitive are implemented
-independently of this design, but provider selection is currently exercised
-only by tests. `k_deferred_release_post_selected()` selects a registered
-provider (`vendor/zephyr/kernel/deferred_release.c:75-128`), and the BURTC
-driver registers its provider only when
-`CONFIG_COUNTER_SILABS_BURTC_CLOCK_EVENT` is enabled
-(`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:647`). The
-arbitration test binds two clock events directly to BURTC
-(`tests/burtc-arbitration-port/src/main.c:79-82`); selection is covered by
-`vendor/zephyr/tests/kernel/deferred_release`.
-The production configuration enables tickless mode and PM
-(`prj.conf:43-49`); the radio module selects the BURTC clock-event provider
-(`modules/efr32-radio/Kconfig:19-22`) but not deferred release.
+The service keeps one 64-bit logical timebase at
+`CONFIG_CLOCK_EVENT_SCHED_FREQUENCY` (2^25 Hz on Series 2, so a 32,768-Hz BURTC
+cycle is a whole number of logical cycles; `soc/silabs/silabs_s2/Kconfig.defconfig`).
+Clients bind with `k_clock_event_sched_init()` and never name a provider: an
+arm whose lead covers the deep provider's floor plus
+`CONFIG_CLOCK_EVENT_SCHED_DEEP_WAKE_NS` waits on BURTC, any other waits on
+TIMER0 while PM states deeper than runtime idle are locked
+(`kernel/clock_event_sched.c`, header comment). The board gives TIMER0 and BURTC
+to the service (`boards/owo_product.dtsi`). The radio module selects
+`CLOCK_EVENT_SCHED` (`modules/efr32-radio/Kconfig`); the ticker, the radio
+launch and the QEMU TIFS wake are three scheduler clock events
+(`modules/efr32-radio/hal/cntr.c`, `K_CLOCK_EVENT_DEFINE`), and the radio's
+persistent jobs are deadline events (`k_deadline_event_*`, `hal/ll_threads.c`).
+No radio code uses the Counter alarm. The generic deferred-release selector
+(`k_deferred_release_post_selected()`, `vendor/zephyr/kernel/deferred_release.c`)
+remains a tested primitive the radio does not use.
 
-Radio launch and the QEMU TIFS release are two independent BURTC clock events
-bound directly to the BURTC device (`modules/efr32-radio/hal/cntr.c:38-39,
-134-135`); only the LL ticker still uses the Counter alarm. The BURTC driver is
-the single owner of `COMP` and arbitrates the system clock, the Counter alarm
-and its clock-event clients (`counter_silabs_rearm_compare()`,
-`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:107`). Because `COMP` is
-shared, a latched `COMP` flag only says that *some* client matched: the ISR
-delivers each client only once its own deadline has passed (`:712`), a client
-already due without its own match is delivered by pending the IRQ rather than
-by writing a past `COMP` (`:163`), and only the programmed `COMP` value is
-clamped to the six-cycle LFSYNC floor. Delivering on the flag alone released
-the ticker alarm early after a cancelled clock event's match, which the radio
-then dropped; `tests/burtc-arbitration-port` covers that case.
+The BURTC provider (`vendor/zephyr/drivers/timer/silabs_burtc_clock_event.c`)
+owns `COMP` and requires the BURTC Counter driver to be off. Because `COMP` is
+shared, a latched `COMP` flag only says that *some* event matched: each event
+is delivered only once `CNT` has reached its own deadline, and an event already
+due without its own match pends the IRQ instead of having a past value written
+to `COMP` (that file's header comment). The older Counter-driver arbitration
+(`counter_silabs_rearm_compare()`, `drivers/counter/counter_silabs_burtc.c`)
+is still exercised by `tests/burtc-arbitration-port`: delivering on the flag
+alone had released the ticker alarm early after a cancelled clock event's
+match.
 
 With icount `sleep=on`, QEMU used to charge host wakeup latency to guest time
 whenever every vCPU idled: on macOS (no `ppoll`) BURTC compares were delivered
@@ -59,24 +64,14 @@ deadlines. The patched icount warp now stops at the next virtual deadline
 dual-endpoint harnesses additionally use `sleep=off` so a run's virtual
 timeline does not depend on host scheduling.
 
-Provider *selection* is still not used by the radio. Before it is, the
-caller must have a documented PM-policy mapping from its requested wake work to the
-`K_CLOCK_EVENT_POWER_ACTIVE` or `K_CLOCK_EVENT_POWER_DEEP_SLEEP` capability.
-The default PM policy selects a Zephyr `pm_state` from idle residency and
-state availability (`vendor/zephyr/subsys/pm/policy/policy_default.c:12-49`);
-the generic deferred-release API deliberately does not impose that mapping
-(`vendor/zephyr/include/zephyr/kernel/deferred_release.h:66-67`). Until those
-ownership and policy inputs exist, the selector is a tested generic primitive,
-not production radio scheduling policy.
-
 ## Why BURTC alone is insufficient for a reactive 150-us deadline
 
-On the BG22, the current BURTC driver deliberately enforces a six LF-clock
-cycle lead before a `COMP` change (`MIN_DELAY_CYC = 6` in
-`vendor/zephyr/drivers/counter/counter_silabs_burtc.c:28-31`).  At 32,768 Hz
-that is 183.1 us.  A 32,768-Hz Zephyr tick would improve normal kernel timeout
-granularity to 30.5 us (the current tests use 1,024 Hz, or 976.6 us), but does
-not remove the six-cycle write-visibility floor.  A deadline discovered only
+On the BG22, the BURTC provider enforces a five LF-clock cycle lead from the
+`CNT` read to a deadline (`MIN_DELAY_CYC` in
+`vendor/zephyr/drivers/timer/silabs_burtc_clock_event.c`; the older Counter
+driver used six).  At 32,768 Hz that is 152.6 us.  The 32,768-Hz Zephyr tick
+(`SYS_CLOCK_TICKS_PER_SEC` with `CLOCK_EVENT_SYSTEM_TIMER`) gives kernel
+timeouts 30.5-us granularity, but does not remove that write-visibility floor.  A deadline discovered only
 when a packet ends cannot therefore be programmed through BURTC for BLE's
 150-us TIFS.
 
@@ -84,9 +79,10 @@ This is a hardware synchronization constraint, not a reason for an RX/TX
 special case.  The active backend must be a clock-event source with a safely
 shorter arm latency.  The existing `silabs,protimer` Counter interface reports
 a 1-MHz timebase (`RAIL_TIMER_FREQ_HZ` in
-`vendor/zephyr/drivers/counter/counter_silabs_protimer.c:25-30`).  It is the
-candidate active backend, subject to proving its compare latency and ownership
-rules on hardware.
+`vendor/zephyr/drivers/counter/counter_silabs_protimer.c`).  It was the
+candidate active backend; TIMER0 took that role instead
+(`COUNTER_SILABS_TIMER_CLOCK_EVENT_MIN_LEAD_NS`, default 2,000 ns; 76.8 MHz
+on silicon, `docs/radio-tables.md` 7.82).
 
 The stock facts support treating PROTIMER as the active radio-clock candidate,
 but not yet treating it as a complete timer specification:
@@ -94,10 +90,10 @@ but not yet treating it as a complete timer specification:
 - `flash-stock.bin:0x29974..0x29a36` is the observed setup window; its first
   traced writes include `PROTIMER +0x008 = 0x00011102`, `+0x030 = 0x1233`,
   `+0x038 = 0x80015558`, and `+0x00c = 1`
-  (`docs/radio-firmware-plan.md:41`).
+  (`docs/radio-tables.md` §4.3).
 - The stock IRQ vector dispatches IRQ36 through the shared radio handler;
   archive offsets `rfhal_protimer.o:0x527c0..0x527cc` read `+0x014` and clear
-  the observed flag bank (`docs/radio-tables.md:973-981`).
+  the observed flag bank (`docs/radio-tables.md` §4.3).
 - The current RAIL Counter wrapper is not safe to make the kernel timer: its
   Kconfig explicitly says that RAIL must initialize first and owns/enables the
   radio clock (`vendor/zephyr/drivers/counter/Kconfig.silabs:11-23`).
@@ -111,11 +107,9 @@ route.  That route remains unproven.
    clock-event driver supports it.  It is a logical unit, not a promise of
    32,768 interrupts per second: tickless mode still arms only the earliest
    timeout.  The kernel documentation defines this setting as the minimum
-   timing granularity in tickless mode (`vendor/zephyr/kernel/Kconfig:728-746`).
-   The current BG22 configuration is 1,024 Hz, and the current BURTC driver
-   intentionally rejects a kernel tick shorter than its six-cycle arm lead
-   (`counter_silabs_burtc.c:458-465`).  Therefore simply changing Kconfig is
-   not an implementation of this design.
+   timing granularity in tickless mode (`SYS_CLOCK_TICKS_PER_SEC`, `vendor/zephyr/kernel/Kconfig:897-925`).
+   With `CLOCK_EVENT_SYSTEM_TIMER` the BG22 runs 32,768-Hz kernel ticks over
+   the 2^25-Hz logical timebase (`soc/silabs/silabs_s2/Kconfig.defconfig`).
 2. Keep a protected logical-clock state: last announced kernel tick, fractional
    LF remainder, selected backend, and an epoch sample for each hardware
    counter.  Both backend ISRs convert their raw count to that same logical
@@ -131,17 +125,17 @@ route.  That route remains unproven.
    from the backend just relinquished.
 4. `sys_clock_idle_enter()` and `sys_clock_idle_exit()` are precisely the
    upstream system-timer hooks intended for handing a deadline to a low-power
-   wake timer (`vendor/zephyr/include/zephyr/drivers/timer/system_timer.h:288-313`).
+   wake timer (`vendor/zephyr/include/zephyr/drivers/timer/system_timer.h:294-313`).
    Zephyr calls the former under `sys_clock_lock()` after subtracting declared
    PM exit latency (`vendor/zephyr/subsys/pm/pm.c:232-245`).  The driver must
    additionally reject an idle/deep-state hand-off whenever the next deadline
    is inside BURTC's synchronization lead plus oscillator/PM-exit budget.
 5. The active backend must be initialized before general scheduling and must
-   not depend on RAIL.  Therefore it needs a small direct PROTIMER clock-event
+   not depend on RAIL.  Therefore it needs a small direct clock-event
    driver or a validated always-available hardware interface; wrapping
-   `sl_rail_get_time()` is not sufficient.  QEMU must model its counter,
-   compare, flag/enable and IRQ36 semantics before it is selected for real
-   guest scheduling.
+   `sl_rail_get_time()` is not sufficient.  This is the TIMER0 provider in
+   `drivers/counter/counter_silabs_timer.c`; QEMU models TIMER0's counter and
+   compare (`docs/radio-tables.md` 7.73).
 
 `sys_clock_cycle_get_32()` must retain a stable declared frequency.  Switching
 the value it reports between 32-kHz and 1-MHz units would break scheduler
@@ -158,7 +152,7 @@ the logical clock, calls `sys_clock_announce()`, and lets normal Zephyr
 rescheduling select among ready persistent jobs.  TX, RX, and TIFS jobs can
 use ordinary priority/deadline configuration.  The kernel documentation is
 explicit that deadline ordering does not prove a job will meet a deadline
-(`vendor/zephyr/include/zephyr/kernel.h:1114-1141`).  Admission control,
+(`vendor/zephyr/include/zephyr/kernel.h:1380-1408`).  Admission control,
 priority assignment, and bounded job work remain required.
 
 Time arithmetic: the service keeps 64-bit logical time; every 32-bit value a
@@ -177,7 +171,7 @@ idle)` receives only the earliest timeout delta (`kernel/timeout.c:126-172`),
 not a job identity, a preparation time, or a latest-completion bound. More
 importantly, `z_add_timeout()` deliberately rounds a relative timeout *up* by
 a tick so that it cannot fire before the requested interval
-(`kernel/timeout.c:181-217`). Making that timeout's blocked thread ready early
+(`kernel/timeout.c:176-235`). Making that timeout's blocked thread ready early
 would silently break the kernel's public timeout semantics.
 
 The needed generic scheduler abstraction is therefore a separately declared
@@ -189,6 +183,11 @@ two-bound job request, rather than a radio exception or a new meaning for
 | `release` | Earliest time that running the CPU preparation is permitted. A job that is already released is runnable now. |
 | `deadline` | Latest useful completion/preparation time. It is not an instruction to defer execution until that instant. |
 | `emission` (optional) | A hardware-gated external action time. It must not be advanced merely because the CPU preparation job ran early. |
+
+The vendored kernel provides `release` and `deadline` as a deadline event's
+not-before bound and start-by deadline (`k_deadline_event_post_at()`, with
+admission control in `k_deadline_event_admit()`; `docs/radio-tables.md` 7.76,
+7.77); `emission` is the sequencer's timed command (7.82).
 
 The scheduler should run an eligible job immediately according to ordinary
 priority/deadline selection. A clock event is a last-chance wakeup only when
@@ -218,18 +217,23 @@ and wake/exit latency; a tick count alone is insufficient for a 32-kHz/1-MHz
 handoff.
 
 Even a correct high-resolution scheduler cannot guarantee a *newly discovered*
-150-us radio turnaround: a packet-end IRQ leaves less than BURTC's 183-us
+150-us radio turnaround: a packet-end IRQ leaves less than BURTC's 152.6-us
 write floor, and software dispatch/jitter consumes more budget.  If on-device
 measurement proves that a PROTIMER interrupt plus scheduler dispatch cannot
 meet the radio requirement, the only compliant answer is a documented
 hardware-controlled response (for example a validated sequencer/PRS route),
 while the resulting completion notification still merely readies a Zephyr job.
-It must not be papered over with a radio-private Counter queue.
+It must not be papered over with a radio-private Counter queue. That is the
+route taken: the M0+ sequencer launches timed commands and sends staged replies
+at T_IFS (`docs/radio-tables.md` 7.82, 7.87), and T_IFS matches the stock stack
+on silicon (7.71).
 
 ## Acceptance plan
 
 The implementation is ready to replace the temporary radio alarm path only
-after all of these pass:
+after all of these pass (status: 1 is the `clock_event_sched` kernel suite;
+4 passes in QEMU and on silicon with TIFS on the sequencer, `docs/radio-tables.md`
+7.71, 7.76, 7.82; 2 and 3 are open, and the radio stack never enters EM2, 7.84):
 
 1. A native/QEMU unit test exercises active-to-BURTC, BURTC-to-active, and a
    deliberately stale old-backend IRQ; uptime never moves backward and a

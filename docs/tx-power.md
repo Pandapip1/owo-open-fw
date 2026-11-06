@@ -77,7 +77,9 @@ Published outputs: the "act_deci-dBm" column of Silicon Labs' xG22 6 dBm dBm-to-
 table (`simplicity_sdk/platform/radio/rail_lib/plugin/sl_rail_util_pa_tables/efr32xg22/sl_rail_util_pa_dbm_powersetting_mapping_table_6dbm.h`),
 every distinct level it uses. They are Silicon Labs' measurements on their own reference design,
 not on the BGM220P explorer kit or the suit's BGM220PC22WGA: **all unverified here**. The
-datasheet publishes no per-level figure; the only datasheet figure is the module's maximum.
+EFR32BG22 datasheet publishes no per-level figure, only a curve (Figure 4.9: about -27 dBm at
+level 0, about 8.5 dBm at 127, flat above about 100); the module datasheet gives its maximum
+(docs/radio-tables.md 7.89).
 
 | PA level | RAMPLEV field | Published output (dBm) | Reported (dBm) | Status |
 |---:|---:|---:|---:|---|
@@ -103,7 +105,7 @@ datasheet publishes no per-level figure; the only datasheet figure is the module
 | 52 | 0x54 | 6.5 | 7 | unverified |
 | 73 | 0x69 | 7.5 | 8 | unverified |
 | 121 | 0x99 | 8.5 | 9 | unverified |
-| 127 (reset, `radio_tx_power_max_set()`, product) | 0x9F | not published | - | unverified; BGM220P datasheet Table 4.5 POUTMAX 8.2 dBm typical for the 8 dBm module is the only datasheet figure, and that it is this level's is [I] |
+| 127 (reset, `radio_tx_power_max_set()`, product) | 0x9F | not published | - | unverified; BGM220P datasheet Table 4.5 POUTMAX 8.2 dBm typical for the 8 dBm module, and that it is this level's is [I]; SoC datasheet Figure 4.9 about 8.5 dBm, saturated; laptop RSSI equal to level 121's (7.89) |
 
 ## 4. Amateur operation (47 CFR 97.313)
 
@@ -156,7 +158,7 @@ every transmission used level 127.
 
 * **Product**: `owo_suit` and `owo_suit -DOWO_HW=ON` build byte-identical images before and after
   (the option is off; `radio_tx_power_set()` and `radio_tx_power_max_set()` keep their code);
-  `scripts/check-hardware-ram.sh` 30540 B <= 31000 B.
+  `scripts/check-hardware-ram.sh` 30596 B <= 31000 B (master 918708d).
 * **QEMU** (`vendor/qemu`): MODEM.RAMPCTRL and RAMPLEV now have the public reset values and
   masks (they were unmasked latches reading 0); qtest `modem-pa-ramp-registers`. The medium
   carries no transmit power, so a level changes nothing else in the model.
@@ -164,13 +166,16 @@ every transmission used level 127.
   above; every whole dBm from -128 to 127 reports a value that selects the same level again and
   is not above the request; the ceiling caps the levels and the highest level, but not LE Read
   Transmit Power's range.
-* **On target in QEMU** (`tests/tx-power-port`, `run-qemu.sh`, 35 checks): RAMPLEV 0x9F9F9F
+* **On target in QEMU and on the explorer kit** (`tests/tx-power-port`, `run-qemu.sh`;
+  `prj-hardware.conf` on silicon; 43 checks, 43/43 on both): RAMPLEV 0x9F9F9F
   before any transmission; LE Read Transmit Power -27..9; the advertiser's +4 dBm default
   (RAMPLEV 0x3A3A3A), vendor Write Tx Power Level -10 (0x242424), -100 (selected -27, 0x202020)
   and no preference (back to +4) while advertising; the scanner's level kept; unknown connection
   and handle type refused; under amateur rules with a 0 dBm ceiling the +4 dBm advertiser at
   0x2E2E2E, a -10 dBm advertiser at its own 0x242424, the closing Morse identification at the
-  ceiling (0x2E2E2E); Part 15 again, +9 dBm at 0x999999. The connection paths (per-connection
+  ceiling (0x2E2E2E); again at a -27 dBm ceiling, the advertiser and a second identification at
+  0x202020; Part 15 again, +9 dBm at 0x999999. Under amateur rules every channel is on channel
+  37's 2402 MHz carrier, so on silicon the identifications stay there. The connection paths (per-connection
   level, Read Transmit Power Level) are the same code but not run: no connection in this test.
 * `tests/amateur-port/run-qemu-amateur-data-e2e.sh` (`MODE=short`) passes with the option
   selected.

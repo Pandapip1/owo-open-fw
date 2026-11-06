@@ -21,23 +21,31 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `boards/owo/owo_suit/` | The suit's control unit as an out-of-tree Zephyr board (`docs/suit-board.md`) |
 | `boards/<board>.overlay`, `boards/owo_product.dtsi` | What the product needs from a board: OTA hand-over word, open controller, scheduler clock, watchdog (plus the kit's flash map) |
 | `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
-| `vendor/zephyr/` | Pinned patched Zephyr submodule: Counter-backed timing backend and read-back verification for `ti,sn74hc595` |
+| `modules/efr32-radio/` | **Open Bluetooth controller lower layer** for Zephyr's split link layer: M33 radio driver (`hal/radio.c`), the radio coprocessor's ARMv6-M firmware built from source (`sequencer/radio_seq.S`), RADIOAES crypto (`docs/radio-firmware-plan.md`, `docs/zephyr-ll-port.md`) |
+| `crates/ble-ll/` | Rust link-layer reference crate (host tests only; the firmware uses Zephyr's controller) |
+| `vendor/zephyr/` | Pinned patched Zephyr submodule: scheduler clock and deadline scheduling (`docs/zephyr-dual-clock-scheduler.md`), Counter-backed timing backend, read-back verification for `ti,sn74hc595` |
+| `vendor/qemu/`, `sim/` | Pinned QEMU fork with the `efr32bg22` machine (M33 and radio M0+, radio, suit board); simulation scripts (`sim/README.md`, `docs/model-fidelity.md`) |
+| `vendor/cmsis_6/`, `vendor/hal_silabs/`, `vendor/mbedtls/`, `vendor/tf-psa-crypto/` | Pinned Zephyr modules the build needs |
+| `tests/` | Zephyr test applications (QEMU and silicon), `tests/native-sim` for the output stage |
 | `docs/ota.md`, `scripts/make-gbl.py` | Keeping the Silicon Labs OTA update working (flash map and boot-mode request in devicetree, OTA service in `src/ble.rs`) and packaging a GBL |
 | `docs/stock-stim-path.md` | What the stock firmware's output stage does, its interlocks, and the ones it lacks |
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in the fallback `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
-| `vendor/zephyr-lang-rust/` | Pinned patched Rust-for-Zephyr submodule (see above) |
-| `west.yml` | Pins Zephyr + `zephyr-lang-rust` and imports only the modules needed |
-| `flake.nix` | flake-parts dev shell (+ a `checks.owo-core` host-test check) |
+| `vendor/zephyr-lang-rust/` | Pinned Rust-for-Zephyr submodule (see "Rust together with the Silicon Labs sleeptimer") |
+| `west.yml` | Upstream Zephyr + `zephyr-lang-rust` revisions for a west workspace; not used by the build (the submodules are the pins) |
+| `flake.nix` | flake-parts dev shell (+ `checks.owo-core` and `checks.owo-stim` host tests, the patched OpenOCD, the sequencer probe) |
 
 ## Build
 ```
-nix develop                              # Rust (thumbv8m.main targets), west, Arm GCC 13, cmake, ninja, dtc, libclang
+nix develop                              # Rust (thumbv8m.main targets), Arm GCC 13, cmake, ninja, dtc, libclang; sets ZEPHYR_TOOLCHAIN_VARIANT/GNUARMEMB_TOOLCHAIN_PATH
 git init -q && git add -A                # flakes only see tracked files; skip if this is already in a repo
-git submodule update --init --recursive   # pinned QEMU, Zephyr, and Rust module revisions
-west blobs fetch hal_silabs              # Silicon Labs' radio libraries
-OWO_SERIAL=<your serial> west build -b bg22_ek4108a .      # dry run (no output)
-# bench only:  ... -- -DOWO_HW=ON   (adds boards/<board>_hw.overlay + owo-suit-hw.conf)
+git submodule update --init --recursive   # pinned QEMU, Zephyr, Zephyr modules and Rust module revisions
+export ZEPHYR_BASE=$PWD/vendor/zephyr    # no west workspace: the submodules are the tree
+cmake -GNinja -S . -B build/ek -DBOARD=bg22_ek4108a \
+  "-DZEPHYR_MODULES=$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs;$PWD/vendor/mbedtls;$PWD/vendor/tf-psa-crypto;$PWD/vendor/zephyr-lang-rust"
+OWO_SERIAL=<your serial> ninja -C build/ek   # dry run (no output); -DBOARD=owo_suit for the suit
+# bench only:  add -DOWO_HW=ON to the cmake line (adds boards/<board>_hw.overlay + owo-suit-hw.conf)
+scripts/check-hardware-ram.sh build/ek/zephyr/zephyr.map   # RAM budget (31000 B)
 cargo test --manifest-path crates/owo-core/Cargo.toml      # protocol + scheduler
 ./scripts/test-native-sim.sh                               # output stage on native_sim, no hardware (see tests/native-sim)
 cargo test --manifest-path modules/owo-stim/rust/Cargo.toml --workspace   # supervisor + part crates; or: nix flake check
@@ -57,7 +65,7 @@ drivers can be checked independently, and a new board (or a different MCU family
 
 | Part | Crate / code | Zephyr piece it sits on |
 |------|--------------|-------------------------|
-| Safety supervisor (all interlocks) | `owo-stim` | none: talks to the `Hw` trait; 21 host tests |
+| Safety supervisor (all interlocks) | `owo-stim` | none: talks to the `Hw` trait; 38 host tests |
 | H-bridge gates | `owo-hbridge` | GPIO; break-before-make; 3 host tests |
 | Channel switch (32-bit shift chain) | `owo-switch` (channel -> pin mask only) | stock `ti,sn74hc595` GPIO driver via `gpio_port_set_masked`; read-back is a Zephyr patch (`verify-readback`) |
 | Amplitude DAC (LTC262x-class) | `ltc2634` | Zephyr **DAC API**: `drivers/dac/dac_ltc2634.c` is the device, the logic is Rust; binding `lltc,ltc2634` |
@@ -92,12 +100,12 @@ phase widths come from the system clock's cycle counter.
   phase/gap limits, charge-balanced phases, fault latch + lockout, supply off when idle, supervisor-timed
   sensing (a zero check before each pulse, in-phase conversions that keep clear of the phase end, an ADC
   stall locks the output), under-delivery stop (open electrode, sense stuck at zero), battery start/stop
-  thresholds, phase-overrun check, break-before-make bridge, switch read-back.
+  thresholds, phase-overrun check, break-before-make bridge, switch read-back, stop on the power button (`stop-gpios`) and on a radio safe shutdown.
 - Kconfig: `OWO_STIM_UNVALIDATED_HARDWARE` (set by `-DOWO_HW=ON`), `OWO_STIM_HARD_MAX_LEVEL`,
   `OWO_STIM_DEADMAN_MS`, `OWO_STIM_MAX_PHASE_US`, `OWO_STIM_SOFT_START_MS`, `OWO_STIM_MAX_DUTY_PERMILLE`,
   `OWO_STIM_WIDTH_SCALE_PERCENT`, `OWO_STIM_SENSE_GUARD_US`, `OWO_STIM_SENSE_TIMEOUT_US`,
   `OWO_STIM_SETTLE_US`, `OWO_STIM_UNDER_MARGIN`, `OWO_STIM_BATTERY_START_MV`, `OWO_STIM_BATTERY_STOP_MV`,
-  `OWO_STIM_BATTERY_INTERVAL_MS`, `OWO_STIM_FAULT_LOCKOUT` (each help text says which values still need a
+  `OWO_STIM_BATTERY_INTERVAL_MS`, `OWO_STIM_MONITOR_INTERVAL_MS`, `OWO_STIM_STOP_INPUT_POLL_MS`, `OWO_STIM_FAULT_LOCKOUT` (each help text says which values still need a
   silicon measurement).
 
 ### Bench checklist (before any skin contact)
@@ -117,7 +125,7 @@ phase widths come from the system clock's cycle counter.
 8. Only then consider a person, and then start at the lowest level with the `HARD_MAX_LEVEL` ceiling in
    place. This is an electrical device that crosses the skin: stop immediately if anything is unexpected.
 
-## Rust together with the Silicon Labs sleeptimer (needs a patch)
+## Rust together with the Silicon Labs sleeptimer (needed a patch)
 Stock `zephyr-lang-rust` refuses systems whose timer reads its frequency at run time:
 `RUST_SUPPORTED` requires `!TIMER_READS_ITS_FREQUENCY_AT_RUNTIME` and `zephyr/src/time.rs` has a
 `compile_error!` for it, added as a precaution ("until this support can be added"). Zephyr's Silicon
@@ -140,13 +148,15 @@ reads e.g. ``non-primitive cast: `HwCyclesPerSecIsARuntimeValue_UseZephyrTimeHwC
 The `bench` and `embassy` samples in zephyr-lang-rust use the Kconfig value and would now stop compiling
 on such targets (they could not be built there before, since Rust was disabled).
 
-The pinned `vendor/zephyr-lang-rust` submodule removes both guards and adds that check. It is a local
-change, not upstream. With it,
-`prj.conf` keeps the sleeptimer and `CONFIG_PM=y`. Without it, Kconfig reports
+That patch (909555d0) was never pushed; the pinned `vendor/zephyr-lang-rust` (6823b690) keeps both
+guards. The product no longer needs it: `prj.conf` takes system time from the scheduler clock
+(`CONFIG_CLOCK_EVENT_SYSTEM_TIMER`, BURTC and TIMER0; `docs/zephyr-dual-clock-scheduler.md`) instead
+of the sleeptimer, so `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME` is not set and `CONFIG_PM=y` builds with
+the stock guards. With the sleeptimer selected, Kconfig would report
 `RUST ... was assigned the value 'y' but got the value 'n'`.
 
 Not shown by any of this: that the core actually reaches EM2/EM3 while connected and idle. That needs
-hardware and the Silicon Labs blobs; the energy-mode requirements the BLE stack holds are unknown.
+hardware; the radio HAL has no power-management path yet (`docs/radio-tables.md` §7.84).
 
 ## Why a bindgen step
 `zephyr-sys` binds only `<zephyr/bluetooth/bluetooth.h>`; `bt_conn_*` and `bt_gatt_*` are
@@ -158,17 +168,17 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 
 ## What was validated
 - **`tests/native-sim`** runs the real shim, the real Zephyr drivers (`ti,sn74hc595` with read-back, the Rust `ltc2634`, `regulator-fixed`, the async ADC sequence, the Counter API) and the supervisor on `native_sim`, with emulated GPIO/SPI/ADC/counter and a small circuit model (`src/test_hw.c`). It checks: safe state after init, a biphasic pulse (positive then negative, measured level, no shoot-through, everything back off), the dead-man, over-delivery tripping, a hung ADC never closing the bridge, and a switch read-back mismatch never closing the bridge and clearing the switch. It found a real bug in the `sn74hc595` read-back patch (the cached outputs stayed at the old value after a failed read-back, so the clear request was skipped), now fixed. The circuit model is mine, not the suit's: it proves the wiring and logic, not the electrical behaviour.
-- Host tests: `owo-stim` 19, `owo-hbridge` 3, `owo-switch` 4, `ltc2634` 3, all pass; clippy `-D warnings` clean. `owo-stim` tests: (supervisor against a mock output stage: bridge ordering, clamps, overdrive trip at the early and the mid-pulse sample, switch-verify failure, lockout, coverage window and dead-man, soft start, duty budget, open-circuit hint). Not run on hardware.
-- Both configurations compile and link for `bg22_ek4108a` (blobs excluded): dry-run ~135 KB flash / ~27 KB RAM, `-DOWO_HW=ON` ~144 KB / ~28 KB, with the pinned Zephyr submodule. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
+- Host tests: `owo-stim` 38, `owo-suit` 8, `owo-hbridge` 3, `owo-switch` 4, `ltc2634` 3, all pass (918708d); clippy `-D warnings` clean. `owo-stim` tests: (supervisor against a mock output stage: bridge ordering, clamps, overdrive trip at the early and the mid-pulse sample, switch-verify failure, lockout, coverage window and dead-man, soft start, duty budget, open-circuit hint). Not run on hardware.
+- The images compile and link with the pinned submodules and no Silicon Labs radio library (918708d): `bg22_ek4108a` 141932 B flash / 29612 B RAM, `owo_suit` 136240 B / 29212 B, `owo_suit -DOWO_HW=ON` 157048 B / 30596 B, against the 31000 B RAM budget of `scripts/check-hardware-ram.sh`. In the HW image the ELF contains the Rust DAC driver (`ltc2634_rs_*`), `ltc2634_api`, the sn74hc595 driver and the shim.
 - Channel switch table and the pin/DAC/ADC details in `docs/stock-stim-path.md` were obtained by reading the stock code and, for the table, by emulating its start-up with `unicorn`.
 - `owo-core`: 13 host tests pass (the vectors from the firmware analysis: frame/config/power/
   widths/pairing, plus scheduler behaviour: 100 wake-ups for a 500 ms, 100 Hz, 2-channel frame
   where a 1 kHz tick would need 500). Also via `nix flake check`.
-- Compile and link only: Zephyr `a915b2f` (4.5.0-rc2), board `bg22_ek4108a`, Rust 1.99.1, clippy
+- Earlier (2026-10-19, before the submodules and the open controller), compile and link only: Zephyr `a915b2f` (4.5.0-rc2), board `bg22_ek4108a`, Rust 1.99.1, clippy
   clean under Zephyr's `-D warnings` and mandatory `// SAFETY:` comments, ~126 KB flash / ~26 KB RAM with the earlier SysTick configuration.
   Done twice: with Ubuntu's gcc-arm-none-eabi 13.2.1, and from a fresh `west init -l` + `west
   update` workspace using this `west.yml`, inside `nix develop` (Arm GNU 13.3.Rel1).
-- With the pinned Rust module: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
+- Earlier, with the unpushed Rust module patch: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
   `TICKLESS_KERNEL=y` compiles and links (~134 KB flash / ~27 KB RAM), from a fresh `west init -l` +
   `west update` workspace with the pinned submodule; without it, Rust is disabled by Kconfig.
   Also checked: `hw_cycles_per_sec()` builds in that configuration; using the Kconfig constant fails to
@@ -177,13 +187,13 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 - The 128-bit UUIDs are present in the linked ELF in little-endian byte order.
 
 ## Not validated
-- **Not runnable:** the builds used Zephyr's CI-only `CONFIG_BUILD_ONLY_NO_BLOBS=y`, because
-  `west blobs fetch hal_silabs` was refused (HTTP 403) where this was built.
-- No on-air behaviour: pairing, attribute permissions, advertising, or whether the official apps
-  accept it. Attribute handles differ from stock (apps look up by UUID).
+- The product image has not run on silicon. Its open controller has, in the `tests/radio-port`
+  images on a BG22 kit: advertising, LE Secure Connections passkey pairing and encrypted GATT with a
+  laptop as Central (`docs/radio-tables.md` §7.84); the product image pairs in QEMU (§7.86).
+  Untested: whether the official apps accept it. Attribute handles differ from stock (apps look up by UUID).
 - The `BINDGEN_EXTRA_CLANG_ARGS` workaround in `flake.nix` (skip GCC's `arm_acle.h`, which clang
   rejects) was needed with both toolchains tried; it is a workaround, not a fix.
-- **The output stage (`owo-suit`, the overlay and the Rust DAC driver) is unvalidated on hardware.** `boards/owo_suit_hw.overlay` targets the suit's own board, `boards/bg22_ek4108a_hw.overlay` the stand-in kit; the SPI clock for the channel switch is the Zephyr USART driver's, not the stock bit rate. Open issues: expander P2/P3 and PA6 purpose; whether the SPI switch tolerates the slower bit-banged clock; sense calibration; the real pulse width (2x question); pin states between reset and `Suit::new`; whether `critical()` (PRIMASK off for <= ~0.5 ms) disturbs the BLE controller.
+- **The output stage (`owo-suit`, the overlay and the Rust DAC driver) is unvalidated on hardware.** `boards/owo_suit_hw.overlay` targets the suit's own board, `boards/bg22_ek4108a_hw.overlay` the stand-in kit; the SPI clock for the channel switch is the Zephyr USART driver's, not the stock bit rate. Open issues: expander P2/P3 and PA6 purpose; whether the SPI switch tolerates the slower bit-banged clock; sense calibration; the real pulse width (2x question); pin states between reset and the early safe-off (`owo_suit_early_safe_off`); whether `critical()` (PRIMASK off for <= ~0.5 ms) disturbs the BLE controller.
 - Idle power: nothing was measured.
 - Placeholders: battery level fixed at 100 (Zephyr's BAS default); channel status always "all open";
   the Extra 2 record after 0x25 is from the app decode; the config packet is parsed and stored but

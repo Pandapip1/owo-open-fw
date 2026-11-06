@@ -184,12 +184,16 @@ logged as unimplemented. Trace events: `config`, `enable`, `lock`, `clear` (with
   computes; the longest interval was 288 ms, and afterwards timeouts arrived only with the
   100 ms advertising events. With PM off the pump preempts key generation on time. Both match
   the boot-time deadline miss in `stim-simulation.md`.
-- **Kernel stall after the boot-time radio safe shutdown (`-DOWO_HW=ON`, PM off):** feeds stop
-  at 4103 ms, once stimulation has started; with the miss report bypassed (diagnostic) they
-  stop ~425 ms after boot instead.
-- Connections cannot be driven against the product image: the QEMU central discovers a
-  test-only characteristic, and the model runs the connection turnarounds past their
-  start-by deadlines, which the product answers with the radio safe shutdown.
+- **Kernel stall after the boot-time radio safe shutdown (`-DOWO_HW=ON`, PM off)** (resolved
+  since: the system timer no longer leaves the kernel timeout unarmed, 39b4165,
+  `stim-simulation.md`). Was: feeds stop at 4103 ms, once stimulation has started; with the
+  miss report bypassed (diagnostic) they stop ~425 ms after boot instead.
+- Connections could not be driven against the product image (resolved since: connections hold,
+  123ef54, `radio-tables.md` §7.79; the product's QEMU runs pair with LE Secure Connections,
+  §7.86). Was: the QEMU central discovers a test-only characteristic, and the model runs the
+  connection turnarounds past their start-by deadlines, which the product answers with the
+  radio safe shutdown.
 
-All measurements above therefore come from PM-off diagnostic images where PM-on ones fail.
-Until those are fixed, a product image in the model resets about every 0.5-0.6 s.
+The measurements above therefore come from PM-off diagnostic images where PM-on ones failed at
+the time; a later PM-on run (630 s, stimulation, longest interval 24.50 ms) is in
+`stim-simulation.md` (Results).

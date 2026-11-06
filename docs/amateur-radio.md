@@ -41,7 +41,8 @@ numeral, one to three letters), any carrier outside the bands with the emission'
 outside the radio's measured synthesizer range (`-ERANGE`, `efr32_amateur_last_error_channel()`
 names the channel), an existing connection (`-EBUSY`). `efr32_amateur_end_of_communication()`
 identifies at once instead of after the idle timeout. Kconfig: `EFR32_RADIO_AMATEUR_CW_WPM`
-(5-20, default 20), `EFR32_RADIO_AMATEUR_ID_LEAD_S` (default 30), and the test-only
+(5-20, default 20), `EFR32_RADIO_AMATEUR_ID_LEAD_S` (default 30),
+`EFR32_RADIO_AMATEUR_CW_TAIL_NS` (measured, section 5.1), and the test-only
 `EFR32_RADIO_AMATEUR_SYNTH_PROBE` (section 7).
 
 Identification method (section 5):
@@ -85,12 +86,12 @@ interval, speed limit, power ceiling and call-sign format. Only US Part 97 is pr
 | 97.119(b)(1) | "By a CW emission. When keyed by an automatic device used only for identification, the speed must not exceed 20 words per minute" | Morse by OOK, 20 WPM |
 | 97.119(b)(3) [R*] | "By a RTTY emission using a specified digital code when all or part of the communications are transmitted by a RTTY or data emission" | the optional data identification, **basis unconfirmed** (section 5.2) |
 | 97.309(a)(3), (4) [R*] | specified codes include "the 7-unit, International Alphabet No. 5, code ... (commonly known as 'ASCII')"; a station using a specified code "may use any technique whose technical characteristics have been documented publicly" | BLE-ASI carries the call sign in ASCII inside publicly specified Bluetooth framing |
+| 97.3(c)(8), 97.311 | SS: "bandwidth-expansion modulation emissions"; 97.311 (a)-(c): FCC-regulated areas, no obscuring, no harmful interference, Regional Director may require records | section 6 |
+| 97.313(a), (b) | "minimum transmitter power necessary"; "not ... exceeding 1.5 kW PEP" | section 6 |
 
 [R*]: from the rule text as summarised in section 5's first version and recalled, not re-fetched:
 the eCFR was not reachable from the machine that wrote section 5.2. Check the exact wording
 against the eCFR before relying on it.
-| 97.3(c)(8), 97.311 | SS: "bandwidth-expansion modulation emissions"; 97.311 (a)-(c): FCC-regulated areas, no obscuring, no harmful interference, Regional Director may require records | section 6 |
-| 97.313(a), (b) | "minimum transmitter power necessary"; "not ... exceeding 1.5 kW PEP" | section 6 |
 
 ## 3. Carriers: the channel plan
 
@@ -184,13 +185,16 @@ it (bits 8:6, public register model `MODEM_S_field.py`; OOK/ASK = 6 in the confi
 
 **Scheduling.** The identification is a job of the deadline scheduler (`k_deadline_event`,
 docs/radio-tables.md 7.76-7.82), with its own budget under admission control
-(`EFR32_RADIO_WCET_AMATEUR_ID_NS`, [P] 200 us, unmeasured). Its release is
+(`EFR32_RADIO_WCET_AMATEUR_ID_NS`, measured, 7.85). Its release is
 `EFR32_RADIO_AMATEUR_ID_LEAD_S` (30 s) before the latest start, or the end of the
 communication; earlier is allowed. Its run asks the controller's ticker for a radio slot as long
 as the identification (two user-extension ticker nodes, `BT_CTLR_USER_EXT`, the way Zephyr's
 flash driver borrows the radio): the ticker places it where no other event holds the radio,
 aborts what holds the radio when it starts, and the identification starts in the LLL context.
-Its CPU work is short; the 4.3 s on air are radio time reserved by the ticker, not CPU time. A
+Its CPU work is short; the 4.3 s on air are radio time reserved by the ticker, not CPU time. The
+Morse frame's part of the slot runs from its TXEN to the end of its completion: its air time plus
+the measured tail `EFR32_RADIO_AMATEUR_CW_TAIL_NS`, 7.261 ms on silicon and 0.363 ms in QEMU
+(7.89; without it a CW-only identification overran its slot on silicon). A
 timer watches the latest start: **if the identification has not started by then, the station
 would transmit unidentified, and the radio is stopped** (the module's safe shutdown: PA off, RAC
 forced off, M0+ reset, controller stopped, reported as a late start of
@@ -257,8 +261,8 @@ else safe shutdown), the same closing behaviour. The job's runs are admitted wit
   (`EFR32_RADIO_WCET_AMATEUR_ID_COMPLETION_NS`);
 * so the identification's span, from its first TXEN to the end of its last frame, is at most
   (parts - 1) x 10 ms + TX ready + the last part's airtime (`efr32_amateur_id_span_us()`): data
-  only 2 x 10 ms + 0.09 ms + 0.33 ms = 20.42 ms, data and CW 3 x 10 ms + 0.09 ms + 4.32 s =
-  4.35 s. The ticker slot reserves that span plus the controller's event overheads; the latest
+  only 2 x 10 ms + 0.09 ms + 0.33 ms = 20.42 ms, data and CW 3 x 10 ms + 0.09 ms + 4.32 s +
+  the CW tail (5.1) = 4.36 s on silicon. The ticker slot reserves that span plus the controller's event overheads; the latest
   start subtracts it. Measured spans are far below (7.85): 1.71 ms and 4.33 s.
 
 The identification's own transmissions do not count as the communication's (the radio's TX
@@ -329,6 +333,10 @@ Results [F] (docs/radio-tables.md 7.85):
 * So the firmware's range is the probed one, 2290-2500 MHz; the 13 cm segments 2302-2308 and
   2392-2448 MHz (with the 2 MHz guard) are all reachable. Every transmission made outside the
   plain Bluetooth plan for this is in the main checkout's `scratch/amateur/tx-log.txt`.
+* Later, receive only (docs/radio-tables.md 7.90): the LO settles on its programmed value over
+  2158-2644 MHz with the open sequencer's VCAPSEL 16. The firmware's range is unchanged,
+  2290-2500 MHz (`EFR32_AMATEUR_SYNTH_MIN/MAX_KHZ`, hal/radio.c): nothing was transmitted
+  outside it.
 
 ## 8. Not verified, and what to measure
 
@@ -372,7 +380,8 @@ distance; the same capture on a Bluetooth channel as the reference):
   20/20 (policy) and 19/20 + 1 skipped (without), built for 32-bit ARM and run under qemu-arm.
 * QEMU (`vendor/qemu`): the medium matches carriers on a 1 MHz raster; a carrier outside the
   synthesizer range never locks and reaches nobody; an OOK frame is not a Bluetooth packet and
-  lasts its symbols at the TXBR rate (qtests 101/101 and 35/35).
+  lasts its symbols at the TXBR rate (qtests 101/101 and 35/35 then; 123/123 and 43/43 at
+  master 918708d).
 * On target in QEMU (`tests/amateur-port`, `amateur-selftest`, 27 checks): Part 15 until
   switched; call signs refused (NULL, empty, foreign, malformed); the standard plan refused at
   channel 22 (2450 MHz); 2350 MHz and 2449 MHz refused; the switch; `-EALREADY`; encryption
@@ -388,10 +397,12 @@ distance; the same capture on a Bluetooth channel as the reference):
   each frame on air for its whole 4.32 s; 6 identifications in 62 virtual minutes, no
   shutdown.
 * Product: `owo_suit` and the `-DOWO_HW=ON` RAM probe build byte-identical images before and
-  after; `scripts/check-hardware-ram.sh` 30916 B <= 31000 B.
-* Transmitter power (`tests/tx-power-port`, QEMU, docs/tx-power.md section 6): with a 0 dBm
-  ceiling a +4 dBm advertiser is programmed at the 0 dBm level, a -10 dBm one at its own, and
-  the closing Morse identification at the ceiling; no ceiling again under Part 15.
+  after; `scripts/check-hardware-ram.sh` 30916 B <= 31000 B then (30596 B at master 918708d).
+* Transmitter power (`tests/tx-power-port`, QEMU and silicon, 43/43, docs/tx-power.md
+  section 6): with a 0 dBm ceiling a +4 dBm advertiser is programmed at the 0 dBm level, a
+  -10 dBm one at its own, and the closing Morse identification at the ceiling; at a -27 dBm
+  ceiling a second identification at level 0; no ceiling again under Part 15. Its plan puts
+  every channel on 2402 MHz, so on silicon the identifications stay on a Bluetooth carrier.
 
 Data identification (5.2):
 

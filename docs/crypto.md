@@ -8,8 +8,8 @@ licence in `vendor/hal_silabs`.
 ## 1. Why
 
 The product requires LE Secure Connections pairing with an authenticated (MITM) passkey and an
-encrypted link (`prj.conf`: `BT_SMP_SC_PAIR_ONLY`, `BT_SMP_ENFORCE_MITM`, `BT_APP_PASSKEY`, every
-characteristic `*_AUTHEN`). Before this change it could not work: PSA Crypto's software AES
+encrypted link (`prj.conf`: `BT_SMP_ENFORCE_MITM`, `BT_APP_PASSKEY`; every characteristic
+`*_AUTHEN` in `src/ble.rs`; the test pairing profiles add `BT_SMP_SC_PAIR_ONLY`). Before this change it could not work: PSA Crypto's software AES
 allocates its cipher context (ECB and CCM 280 B, AES-CMAC 316 B in two blocks [Q]) and the image
 has no heap, so ECB and CMAC failed with `PSA_ERROR_INSUFFICIENT_MEMORY` (the controller's
 `ecb_encrypt()` then hit its `LL_ASSERT`), and CCM was not even built (`PSA_ERROR_NOT_SUPPORTED`).
@@ -161,14 +161,16 @@ to a turnaround that has about 100 us.
   serial 000000000000, the product's "Test" characteristic): level 4, 360/360 rounds; the same
   with `-DOWO_HW=ON` and the suit board model (`MACHINE_OPTS=board0=owo-suit`, new `board0/1`
   properties of the dual machine): level 4, 210/210 rounds.
-* Silicon: `tests/crypto-port` as above. Pairing over the real radio is not possible yet (the
-  silicon receiver is not tuned, 7.77).
+* Silicon: `tests/crypto-port` as above, and pairing over the real radio (docs/radio-tables.md
+  7.84): LE Secure Connections passkey pairing with the laptop to security level 4, then 620 and
+  621 encrypted GATT rounds over about 10.7 min each, no miss, no CRC failure.
 
 ## 7. Open
 
 * P-256 on the BA414EP needs its operation codes and memory map, which are not public.
-* `tests/radio-port/prj-hardware.conf` still reserves a 3504-byte libc arena for PSA CMAC; it is
-  no longer needed, but changing the stage-3 hardware image wants a silicon run.
+* `tests/radio-port/prj-hardware.conf`'s 3504-byte libc arena: removed (arena 0, commit
+  `1a2ad57`; docs/radio-tables.md 7.84).
 * ULL worker: closed in docs/radio-tables.md 7.86 (no FP frame on the link-layer threads; the
   product sizes it from the 648 B silicon peak: 688).
-* Silicon connection-event times with encryption (7.79's list) once a silicon Peripheral receives.
+* Silicon connection-event times with encryption: measured in 7.84 (run C2: receive completion
+  108.7 us, TX->RX completion 147.6 us).
