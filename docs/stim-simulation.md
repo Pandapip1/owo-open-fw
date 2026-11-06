@@ -25,9 +25,8 @@ entry.
    pulse is handled when the pulse ends (the expander is read from the system work queue, which
    a pulse's scheduler lock holds off; a pulse is at most 2 x max phase + max gap). Start while
    P0 is held and frames after a press are refused; after release, Start stimulates again. While
-   armed the pump also checks the /INT level every `OWO_STIM_STOP_INPUT_POLL_MS` (100 ms, the
-   stock 10 Hz) and reads the expander when /INT is asserted: an /INT left asserted by a failed
-   read raises no further edge.
+   armed the pump also reads the expander every `OWO_STIM_STOP_INPUT_POLL_MS` (100 ms, the
+   stock 10 Hz), whatever /INT shows (finding 8).
 2. **A radio safe shutdown now stops stimulation** [E]. The radio module calls a registered
    function from its safe shutdown (`efr32_radio_shutdown_cb_set`, `radio_shutdown.h`; the
    module knows nothing of the output) right after the radio is forced off; the application
@@ -38,14 +37,14 @@ entry.
    172 us), the negative phase completes, DAC 0 +0.22 ms, supply off +1.31 / +1.99 ms after the
    pulse. Before: 125 live pulses to the end of the run, no way to send Stop. A disconnect
    already stopped it at once.
-3. **The radio already shuts down spontaneously at the start of a session in the model** [E],
-   on the silicon-timing image (whose miss policy is the radio's safe shutdown): a late delivery
-   of the kernel's timeout clock event, 91-100 us late with the pump running, about 25 ms after
-   the frame arrived. Master: 4 of 4 runs (release 4.02505 s, 99.9 us late), stimulating on for
-   the rest of the run with the radio dead; open firmware: about half the runs, each one stopped
-   at once by finding 2. The source of the ~100 us (close to three 32.768 kHz periods, as an
-   LF-synchronised register access would take) is open; if silicon shows it, every such session
-   start shuts the radio down.
+3. **The spontaneous radio safe shutdown at a session start** [E, fixed]: on the silicon-timing
+   image (whose miss policy is the radio's safe shutdown) the kernel's timeout clock event came
+   91-306 us late about 25 ms after the frame, held off by the pump's supply enable: the vendor's
+   blocking I2C transfer behind Zephyr's `i2c_silabs` (no DMA) polls the bus with BASEPRI
+   masking every kernel interrupt (finding 8). Master stimulated on with the radio dead (4 of 4
+   runs); the open firmware stopped at once by finding 2. The driver now moves leader transfers
+   on from the I2C interrupt (vendor/zephyr, `docs/radio-tables.md` 7.92): late deliveries in 16
+   of 30 session starts before, 0 of 30 after. Silicon is not checked.
 4. **A late conversion read as an open electrode** [E, fixed]. With the IADC timing the model
    samples a conversion when it completes; one started late in a phase (the loop delayed by an
    interrupt) completed after the bridge opened, read 0, and under-delivery locked the output:
@@ -75,15 +74,17 @@ entry.
 7. **The battery** [E/F]: sessions start at or above 7200 mV and stop below 6840 mV on single
    readings against the IADC's internal reference; 6.5 V stopped it 24.2 ms after the step, 6.8 V
    (after 7.0 V) 1047 ms after the first step. The stock filter ignores the sag.
-8. **Expander faults leave the boost supply as it was** in both firmwares [E]: with the expander
-   not acknowledging, or SDA stuck, stimulation goes on and the supply enable cannot be switched
-   off. Open item: an independent way to remove the rail. Related [F]: the vendor's blocking I2C
-   transfer (`sl_i2c_leader_*_blocking`, used by Zephyr's `i2c_silabs` without DMA) masks
-   interrupts for the whole transfer (about 0.3 ms per expander access at 100 kHz), and with SDA
-   stuck until its 1000 ms timeout, past the watchdog: an earlier variant of finding 1 that read
-   the expander every 100 ms while armed stopped the output in 44 ms on these faults but
-   reset-looped (35 resets) with SDA stuck. Expander accesses during a session should wait for a
-   driver that does not mask interrupts.
+8. **Expander faults stop the open firmware's output; the boost supply enable stays as it was**
+   [E]. The vendor's blocking I2C transfer (`sl_i2c_leader_*_blocking`, used by Zephyr's
+   `i2c_silabs` without DMA) masked interrupts for the whole transfer (about 0.3 ms per expander
+   access at 100 kHz) and, with SDA stuck, until its 1000 ms timeout, past the watchdog. The
+   driver is now interrupt-driven and bounds a transfer by `I2C_SILABS_TIMEOUT` (1 ms in
+   `owo-suit-hw.conf`), so the pump reads the expander every 100 ms while armed: with the
+   expander not acknowledging or SDA stuck the last live pulse is 23.7 ms after the fault, and
+   the longest watchdog feed interval with SDA stuck is 26.6 ms (no reset; an earlier variant on
+   the blocking driver reset-looped, 35 resets). Stock stimulates on. In both firmwares the
+   supply enable, an expander output, cannot be switched off with the expander dead. Open item:
+   an independent way to remove the rail.
 9. **External parts after an MCU reset: safe after 4.65 ms** [E], unchanged on the current
    model: gates driven 4.37-4.40 ms and boost supply off with the DAC cleared 4.65 ms after the
    watchdog reset (stock: 81.0 / 80.2 ms).
@@ -98,10 +99,12 @@ entry.
     Stock keeps stimulating 1.47 s after Stop and drives an open electrode at full level. With
     `gate-float-on` every MCU reset is a shoot-through in both firmwares (a PCB property nobody
     has measured).
-12. **The stock image no longer runs on the current model** [E]: on vendor/qemu 32e626a it never
-    initialises its watchdog or writes its expander (no WDOG or I2C activity in the trace) and
-    never stimulates; it did on 58ec437. The stock column below is the 2026-11-01 run on
-    58ec437. Open item for the model.
+12. **The stock image runs on the current model again** [E, fixed]. Three gaps stopped it
+    (`docs/radio-tables.md` 7.92): its TRNG start-up known-answer test waited forever without
+    the TRNG test mode (since vendor/qemu e6d6a85bb0), its radio set-up waited for PRORTC to
+    run, and its PendSV waited for RAC.EM1PCSR.RADIOEM1PACK (watchdog resets every 1.7-1.9 s).
+    Baseline scenario now: 1752 pulses, no resets (58ec437: 1709). The stock column below is
+    still the 2026-11-01 run on 58ec437.
 
 ## Architecture: emulated board and host passthrough
 
@@ -195,15 +198,17 @@ a recording), `stim_report.py` (comparison table).
 
 Open firmware: run 2026-11-05 on master 33f5e79's model (vendor/qemu 32e626a, with the IADC
 warm-up and conversion timing of e7242f1) with the safety3 changes. Stock firmware: the
-2026-11-01 run on vendor/qemu 58ec437 (instant conversions), because the stock image no longer
-runs on the current model (finding 12). Stimulus: wire channel 0, level 20, 50 Hz, table widths
+2026-11-01 run on vendor/qemu 58ec437 (instant conversions), because the stock image did not
+run on 32e626a (finding 12). Stimulus: wire channel 0, level 20, 50 Hz, table widths
 0x49 (phases 50 us, gap 50 us), 5 s frame from 4.0 s; faults at 5.0 s; runs end at 7.5 s. Open
 firmware: `owo_suit`, `-DOWO_HW=ON`, `sim/product-qemu.conf`, `CONFIG_OWO_SIM_INJECT=y` (PM on);
 the radio rows use the same image without `sim/product-qemu.conf` (silicon timing; its miss
 policy is the radio's safe shutdown, the QEMU profile only counts misses). Times are virtual;
 pulse timing reflects the model's instruction timing (icount shift 3) and its IADC (RM formulas,
-not measured silicon timing). Runs on this model are not reproducible run to run (the same
-scenario gave different schedules); the radio rows were repeated (finding 3). The per-run
+not measured silicon timing). Runs on 32e626a were not reproducible run to run (the same
+scenario gave different schedules); the radio rows were repeated (finding 3). Since vendor/qemu
+915f06c59f the gdb stops are deterministic: the same scenario gives identical recordings
+(`docs/radio-tables.md` 7.92). The per-run
 recordings are kept with the stock dump (`stim-sim-2026-11-05/`).
 
 ### Waveforms (no fault)
@@ -382,6 +387,7 @@ the boost rail behaves as it sags; the sense reading against the command (sets
 time in the pulse loop (`OWO_STIM_SENSE_GUARD_US`); the time from reset to the early safe-off with
 the clocks the bootloader leaves; stock pulse timing on silicon (the model's instruction timing is
 not calibrated for these code paths); the stock boost/stop/battery behaviour on a unit; what
-expander P0 is (button or a charger's power-good) and whether the PCF8575-class part asserts /INT
-on output writes (the model does; the NXP datasheet says input changes only); whether the
-~100 us late timeout delivery of finding 3 happens on silicon.
+expander P0 is (button or a charger's power-good) and whether the suit's PCF8575-class part
+asserts /INT on input changes only, as the NXP datasheet says and the model now does; the
+interrupt-driven I2C driver on silicon (finding 3); when RAC.EM1PCSR acknowledges the radio's
+EM1P mode (the model at once).

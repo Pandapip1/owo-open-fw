@@ -648,6 +648,9 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK plus the measured first-result latency [F, 7.89]; T: iadc-single-conversion | silicon timing unmeasured (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
 | B116 | Unidentified SEQRAM 0x4000 user (reads 0xe5ecc0de, 0x01010201, 0xaabbccdd) | §7.72 silicon | no | - | Owner unknown; nothing to model yet |
 | B117 | CMU gates RDMAILBOX/RDSCRATCHPAD/PRORTC/SYSCFG stop the stock M0+ lockups (§7.59 via §7.70) | §7.70 silicon (mechanism unknown) | partial | gate map B40 now covers them | Which access faulted for stock not identified |
+| B118 | CRYPTOACC TRNG test mode: TESTEN feeds TESTDATA to the conditioning function (AES-128 CBC-MAC under KEY0-3 over NB128BITBLOCKS blocks, NB 0 taken as 4), CONDBYPASS writes the blocks unconditioned | §7.92, stock start-up KAT (SP 800-38A F.2.1) | yes | efr32-trng.c; T: trng-conditioning-kat | NB 0 = 4 blocks [I]; TESTDATABUSY timing unmeasured |
+| B119 | PRORTC (0xA8000000) is a second RTCC: CMU.PRORTCCLKCTRL (0x248, reset LFRCO), IRQ 41, PRS producer SOURCESEL 0x09 (CCV0-1) | §7.92, public device header | yes | bg22.c RTCC instance struct; T: prortc-counts-and-compares | no PRS consumers |
+| B120 | RAC.EM1PCSR: RADIOEM1PACK follows RADIOEM1PMODE (the stock firmware waits for it in PendSV) | §7.92, public RAC_S field model | yes | bg22.c:efr32_rac_em1pcsr; T: rac-em1p-ack | ACK at once [I]; EM1P requests (REQ, HWREQ) not raised |
 
 ### C. Debug port, probes, reset, watchdog, crypto, OTA, suit board, TODO.md
 
@@ -722,7 +725,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C65 | Pins high-Z from reset until configured; gate state while floating unknown [M] | suit-board.md, stim-simulation.md finding 8 | partial | owo-suit.c gate-float-on (default off) [U] | measure on a unit |
 | C66 | DAC: USART1 SPI mode 0 8 MHz, 24-bit frame 0x3F hi lo, CS PA5, /CLR = expander P5; part LTC2634-class [I], full scale 2.5 V [I] | stock-stim-path.md, Dump | yes | owo-suit-parts.c LTC2634_* ~l.41 | part and full scale [I] |
 | C67 | Channel switches: USART0, 32-bit chain, latch on PC3, readback with CS high; latch type [I] | stock-stim-path.md, Dump | yes | owo-suit-parts.c; board/usart-spi-switch-readback | latch type [I] |
-| C68 | Expander PCF8575 at 0x40/0x20 on I2C0 PB4/PA7, /INT PC4; outputs weakly high from reset (datasheet); P2/P3 meaning [M] | suit-board.md, stock-stim-path.md, Dump/DS | yes | owo-suit-parts.c PCF8575; efr32-i2c.c; board/i2c-expander | TODO "I2C0 controller unmodelled" is stale |
+| C68 | Expander PCF8575 at 0x40/0x20 on I2C0 PB4/PA7, /INT PC4; outputs weakly high from reset (datasheet); /INT on input-pin changes only, reset by a read or write of the port (datasheet, §7.92); P2/P3 meaning [M] | suit-board.md, stock-stim-path.md, Dump/DS | yes | owo-suit-parts.c PCF8575; efr32-i2c.c; board/i2c-expander, expander-int-inputs-only | TODO "I2C0 controller unmodelled" is stale |
 | C69 | Unknown I2C device at 0x69 | stim-simulation.md, Dump | partial | owo-suit.c unknown-0x69-present (acks only) | identity [U] |
 | C70 | Sense on PD2, battery on PD3 via 33/133, IADC 0xB2/0xB3, VDDX ref 3300 mV, OSR 2x | stock-stim-path.md (corrected), Dump | yes | owo-suit.c battery-div-num/den ~l.1006; board/iadc-scan-board-battery | (gaps) IADC conversion/warm-up time from the RM [I] (B115) |
 | C71 | Boost PWM TIMER1 CC0 on PC7, 4 kHz 50 % | stock-stim-path.md, Dump | yes | board/timer-pwm-pin | rail physics [U] |
