@@ -34,20 +34,27 @@ static struct bt_conn *conn;
 /* Given when the link is up: the GATT loop then starts. */
 static K_SEM_DEFINE(link_up, 0, 1);
 
+/* Given at every connected and disconnected callback (reconnecting workload). */
+static K_SEM_DEFINE(link_changed, 0, 2);
+static uint8_t connect_err;
+
 static void connected(struct bt_conn *c, uint8_t err)
 {
 	ARG_UNUSED(c);
 	/* Zero: the host accepted the controller's connection complete event. */
 	printk("central_connected: %u\n", err);
+	connect_err = err;
 	if (err == 0U) {
 		k_sem_give(&link_up);
 	}
+	k_sem_give(&link_changed);
 }
 
 static void disconnected(struct bt_conn *c, uint8_t reason)
 {
 	ARG_UNUSED(c);
 	printk("central_disconnected: 0x%02x at %lld ms\n", reason, k_uptime_get());
+	k_sem_give(&link_changed);
 }
 
 #if defined(CONFIG_RADIO_RX_PORT_PAIRING)
@@ -124,10 +131,18 @@ static void scan_result(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	int err;
 
 	ARG_UNUSED(rssi);
-	ARG_UNUSED(adv_type);
 	ARG_UNUSED(buf);
-	if (addr == NULL || create_issued || addr->type == BT_ADDR_LE_ANONYMOUS) {
+	if (addr == NULL || create_issued || addr->type == BT_ADDR_LE_ANONYMOUS ||
+	    (adv_type != BT_GAP_ADV_TYPE_ADV_IND && adv_type != BT_GAP_ADV_TYPE_ADV_DIRECT_IND)) {
 		return;
+	}
+	if (CONFIG_RADIO_RX_PORT_PEER_ADDR[0] != '\0') {
+		bt_addr_t want;
+
+		if (bt_addr_from_str(CONFIG_RADIO_RX_PORT_PEER_ADDR, &want) != 0 ||
+		    !bt_addr_eq(&addr->a, &want)) {
+			return;
+		}
 	}
 	bt_addr_le_copy(&peer, addr);
 	create_issued = true;
@@ -389,6 +404,25 @@ void radio_rx_port_central_start(void)
 	       bt_conn_auth_info_cb_register(&auth_info_cb));
 #endif
 	printk("scan_start: %d\n", bt_le_scan_start(&scan, scan_result));
+	/*
+	 * Reconnecting workload: hold each link RADIO_RX_PORT_RECONNECT_MS, disconnect, scan and
+	 * connect again, so one boot repeats connection set-up.
+	 */
+	for (uint32_t cycle = 1U; CONFIG_RADIO_RX_PORT_RECONNECT_MS > 0; cycle++) {
+		(void)k_sem_take(&link_changed, K_FOREVER);
+		if (connect_err == 0U) {
+			k_sem_reset(&link_up);
+			if (k_sem_take(&link_changed, K_MSEC(CONFIG_RADIO_RX_PORT_RECONNECT_MS)) != 0) {
+				printk("central_cycle: %u disconnect %d\n", cycle,
+				       bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN));
+				(void)k_sem_take(&link_changed, K_FOREVER);
+			}
+		}
+		bt_conn_unref(conn);
+		conn = NULL;
+		create_issued = false;
+		printk("scan_start: %d\n", bt_le_scan_start(&scan, scan_result));
+	}
 	k_sem_take(&link_up, K_FOREVER);
 #if defined(CONFIG_RADIO_RX_PORT_PAIRING)
 	/* Pair (LE Secure Connections, passkey entry) and encrypt before any GATT access. */

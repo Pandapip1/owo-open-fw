@@ -38,6 +38,7 @@ logs (table C).
 | after the model-gaps pass (2026-11-01) | 156 | 45 | 38 | 0 | 1 |
 | after the model-gaps2 pass (2026-11-05) | 159 | 45 | 35 | 0 | 1 |
 | after the LO model (radio-tables 7.90: B7, B8) | 161 | 44 | 34 | 0 | 1 |
+| after the link model (radio-tables 7.91: B15; B20 narrowed) | 162 | 44 | 33 | 0 | 1 |
 
 The model-gaps pass (vendor/qemu `agent/model-gaps`, section "Model-gaps
 pass" below) closed C63 and B71, B79 and B115, and moved B76 and B78 to
@@ -548,12 +549,12 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B12 | MODEM TXRAMPDONE latches after a PAENCTRL.PARAMP change: set 0.44 us (one poll), clear 0.81-3.96 us (median 3.96); survives the handler's clear-after-PARAMP | §7.62/7.69/7.72 silicon | partial | bg22.c EFR32_PA_RAMP_UP_NS 440 / DOWN_NS 3960, efr32_pa_ramp_complete (~3624); T: pa-ramp-survives-clear-after-paramp; RF: synth-lock-and-pa-ramp-timing | Fixed 3.96 us (top of range) not the 0.81-3.96 distribution; latch is deferred to first MODEM.IF/SEQIF read ([I] mechanism) |
 | B13 | TX with SWRXEN asserted: RAC.STATUS 0x89400002, RAC goes TX -> TX2RX -> RXSEARCH by itself | §7.63 silicon | yes | efr32_rac_tx_complete; RF: released-tx-turns-around-to-rx | - |
 | B14 | RXSEARCH SYNTH.STATUS=0x6 (IFFREQEN+SYNTHREADY), never INLOCK in receive | §7.64/7.72 silicon | yes | SYNTH.STATUS read (~4982, synth_if_enabled) | - |
-| B15 | Demod correlates against MODEM.VTCORRCFG0 = ror(bitrev(AA),1); the complemented value (PHY table) receives nothing | §7.64 silicon | no | - (medium delivers regardless of access address) | No access-address match in the receiver; an inverted VTCORRCFG0 still receives in QEMU |
+| B15 | Demod correlates against MODEM.VTCORRCFG0 = ror(bitrev(AA),1); the complemented value (PHY table) receives nothing | §7.64, §7.91 silicon | yes (7.91) | bg22.c:efr32_rx_detects_sync (the TX snapshot carries MODEM.SYNC0; detected within VTCORRCFG1.EXPECTHT bits); RF: released-rx-follows-link | The EXPECTHT tolerance is [I] |
 | B16 | BUFC RX channel at reset has CTRL=0, ADDR=0x20000000; FRC then writes the received frame over the start of SRAM | §7.64 silicon | no | bg22.c:efr32_bufc_write_data_port (~1118) | Model BUFC ADDR resets to 0, so no guest-RAM write; the silicon corruption is not reproduced |
 | B17 | RXFRAME with TXEN latched and SWRXEN withdrawn -> RX2TX (STATUS 0x63400000); with SWRXEN still set the RAC returns to RX (TXEN dropped) | §7.65 silicon | yes | bg22.c:efr32_rac_rx_frame_end (~1731); RF: released-rx-frame-turns-around-to-tx, released-rx-frame-end-alternatives | RX2RX as the route is [I] |
 | B18 | RX2TX is held until acknowledged; TX follows with no TXWARM | §7.66/7.67/7.70 silicon | yes | efr32_rac_seq_evaluate RX2TX case | - |
 | B19 | RX FIFO layout: header, length, length payload octets, then TRAILRXDATA-selected trailer; TRAILRXDATA is configuration (RW, reset 0) | §7.66 silicon/public | yes | efr32_rac_rx_frame_end | - |
-| B20 | TRAILRXDATA.CRCOK appends one octet: bit 7 = CRC result ([I]), low bits vary with signal; corrupted RFCRC.INIT gives bit7=0 | §7.66 silicon + [I] | partial | efr32_rac_rx_frame_end writes 0x80 always (EFR32_FRC_TRAILER_CRCOK) | Always CRC-good, low bits 0; no CRC-INIT/whitening mismatch check between peers |
+| B20 | TRAILRXDATA.CRCOK appends one octet: bit 7 = CRC result ([I]), low bits vary with signal; corrupted RFCRC.INIT gives bit7=0 | §7.66 silicon + [I] | partial | efr32_rac_rx_frame_end writes 0x80 unless the frame fails (rate drift; since 7.91 a sender's RFCRC.INIT/POLY or FRC.WHITEPOLY/WHITEINIT other than the receiver's, efr32_rx_link_crc_fails); RF: released-rx-follows-link | Low bits 0 |
 | B21 | Without FRC.RXCTRL.ACCEPTCRCERRORS a CRC-failed frame is dropped silently (no RXDONE) | §7.66 silicon | no | - | Model has no CRC failures, so the drop path does not exist |
 | B22 | RAC.STIMER counts ~4.8 ticks/us (682 SysTick cycles = 85 ticks), 16-bit, restarts on every RAC state change | §7.66/7.68/7.75 silicon | yes | bg22.c:efr32_rac_stimer (~2278), EFR32_RAC_STIMER_TICKS_PER_10US 48; RF test (STIMER_TICKS_IN_INTERVAL) | Rate is fixed; RAC.PRESC.STIMER dependence not modelled |
 | B23 | SEQIF clear -> RAC.STATUS change 1.09-1.22 us (TX2RX, RXPD, TXPD, RX2TX) | §7.72 silicon | yes | EFR32_RAC_ACK_TO_TRANSITION_NS 1090, efr32_rac_seq_acknowledged (~1664) | Ack of any RAC IF/IEN/SEQIF/SEQIEN write arms the timer ([I] for writes that are not a clear) |

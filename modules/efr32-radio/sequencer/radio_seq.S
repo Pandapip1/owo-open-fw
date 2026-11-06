@@ -2190,10 +2190,10 @@ efr32_seq_conn_decide:
     /* The CONNECT_IND goes out unchanged and ends the event. */
     b 16b
 23: /* The SCAN_REQ: RxAdd the frame's TxAdd, AdvA the frame's; the SCAN_RSP
-     * receive follows it. */
+     * receive follows it.  OUTCOME is published once AdvA is read: the M33
+     * then re-arms the RX FIFO (and its offset word) for that receive. */
     movs r0, #(EFR32_SEQ_CONN_OUT_VALID | EFR32_SEQ_CONN_OUT_REPLY)
     orrs r6, r0
-    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
     ldr r2, [r7, #EFR32_SEQ_CONN_CUR]
     ldrb r0, [r2]
     movs r1, #(1 << EFR32_SEQ_ADV_RXADD_BIT)
@@ -2231,6 +2231,7 @@ efr32_seq_conn_decide:
     adds r1, #1
     cmp r1, #EFR32_SEQ_ADV_ADDR_LEN
     blo 2b
+    str r6, [r7, #EFR32_SEQ_CONN_OUTCOME]
     b 12b
 .Lscan_silent:
     /* Nothing is sent; the scanner listens on. */

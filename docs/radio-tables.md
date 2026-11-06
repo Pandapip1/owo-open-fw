@@ -8775,6 +8775,179 @@ taken as locked. qtests: `synth-locnt-counts-lo`, `synth-calibration-open-loop`,
 `synth-channel-and-offset-fields`, and the range qtests at the new edges; rf 43/43 and machine
 123/123 qtests pass, and the amateur dual-machine e2e passes.
 
+### 7.91 Silicon batch 2: the staged scanner and initiator on silicon, an open Central's link, data channels 11-21
+
+Tags as in 7.79 ([F] silicon, [Q] QEMU, [S] Core v6.1, [D] derived here, [I] inferred). Board:
+BGM220 explorer kit (J-Link OB 000440200548), the laptop's controller (hci0, BlueZ 5.87
+`bluetoothctl`) as the peer. Code: `hal/radio.c`, `sequencer/radio_seq.S`, `Kconfig`
+(1e63ecc, 9cecffb, 83193cf), `tests/radio-rx-port` (`src/central.c`, `Kconfig`, 333c8ee; the
+active-scan e2e script, 1fc31b2), vendor/qemu `hw/arm/efr32bg22.c`, `efr32-rf-medium.[ch]`, the rf
+qtest (d9b5e31). Tooling and logs: `scratch/sil2/` of the worktree (build.sh, hw.sh, adv.sh,
+prs.tcl, prsrun.sh, freerun.sh, clean.sh, batch2.sh, anc.sh, per.sh, asi.sh, ana.py, reqctx.py;
+`prs-*`, `dump-*`, `fr-*`, `vcom-*`, `cmp-*`, `hw-*`, `asi-*`). The work spanned three host
+crashes; every figure below is from a log that survived them.
+
+**Images.** Hardware profile (`prj-hardware.conf`, admission on, safe shutdown on a miss), board
+bg22_ek4108a, the laptop advertising as a standard legacy connectable advertiser on 37/38/39
+(`adv.sh`). Central: `prj-central.conf` with `RADIO_RX_PORT_PEER_ADDR` (the laptop) and
+`RADIO_RX_PORT_RECONNECT_MS` 2000 (each link held 2 s, then a local disconnect, 0x16, and a new
+scan, CONNECT_IND and first anchor: 18-30 connections per run). Active scanner:
+`RADIO_RX_PORT_ACTIVE_SCAN`. Measurement images add `EFR32_RADIO_TIMING_PROBE`,
+`SCHED_DEADLINE_STATS` and `EFR32_RADIO_RX_CHANNEL_STATS`. Probe clocks as in 7.84 (k_cycle
+33.554432 MHz; TIMER1 on HFRCODPLL 76.8 MHz, reload-started by PRS MODEMH.EOF, capturing
+MODEMH.SYNCSENT and MODEM.FRAMESENT; or free-running at 4.8 MHz for timelines). Runs `prs-*`
+polled the debug port during the run; `dump-*` ("clean") read it only at the end.
+
+**Fixes.**
+1. *An open Central was never answered [F].* `radio_phy_set()` wrote the PHY tables, which carry
+   their own MODEM.SYNC0, RFCRC.INIT/POLY, FRC.WHITEPOLY/WHITEINIT and VTCORRCFG0/1, after the
+   link layer had set the access address, CRC and whitening (OpenISA's Central sets them before
+   `radio_phy_set()`, `lll_central.c` `prepare_cb()`), so its packets went out on the tables'
+   link; and the Central's TX completion (`lll_conn.c` `isr_tx()`) called it again while the
+   receive for the reply was searching, which then detected nothing. Runs cen1 and anc1
+   (`vcom-cen1.txt`, `vcom-anc1.txt`): `conn ... failed to establish`, `central_disconnected:
+   0x3e` at 3.0 s, no connection-event receive committed (probe conn RX->TX 0). Fix (1e63ecc): the
+   tables are written only when the PHY changes, the link registers and the sync word
+   (`efr32_radio_sync_word_set()`, VTCORRCFG0 from SYNC0) are restored after them, RFCRC
+   re-initialised; the on-off keyed identification invalidates the record. Every Central run
+   since connected (below).
+2. *The staged receive re-arms the RX FIFO before the link layer's callback* (1e63ecc,
+   `efr32_conn_rx_rearm()`), not in the commit's `radio_pkt_tx_set()`: the frame after the reply
+   (the SCAN_RSP, the connection event's next packet) can then arrive whatever the callback
+   takes. The SCAN_REQ check keeps the received header and AdvA; the sequencer now publishes the
+   SCAN_REQ outcome only after copying AdvA. Scanner, commit start to the re-arm: 97.3 us with the
+   re-arm in the commit (scanA, scan1), 42.6-58.0 us after (below).
+3. *An abort from another context* (the scanner's next window, a preempting prepare, a ticker
+   stop) may find a reply the sequencer already sent and the link layer has not committed: it is
+   now abandoned with the stage; `radio_disable()`'s outcome assertion applies only inside the
+   receive's own callback. 7.93 recorded master's hardware active scanner hitting that
+   `LL_ASSERT` at 19.8 s (old model) and 41.5 s (new).
+4. *The Central's first anchor kept no sub-tick part* (`BT_TICKER_START_REMAINDER` now defaults on
+   for a Central, `Kconfig`): `ull_central.c` passes the anchor's remainder as the ticker's first
+   remainder only with it, and without it the first packet fell anywhere in one 30.5 us tick
+   (item 1, first anchor).
+5. *QEMU held the connection silicon refused* (d9b5e31): the RF medium delivered every frame to
+   every receiver on the carrier. The TX snapshot now carries MODEM.SYNC0, RFCRC.INIT/POLY and
+   FRC.WHITEPOLY/WHITEINIT; a released receiver detects a frame only when VTCORRCFG0 is within
+   VTCORRCFG1.EXPECTHT bits of ror(bitrev(SYNC0), 1) (7.64; the tolerance [I]) and fails its CRC
+   when CRC or whitening differ. qtest `rf/released-rx-follows-link` (matched link: CRC good;
+   complemented VTCORRCFG0: not detected; other RFCRC.INIT: CRC failed).
+   `docs/model-fidelity.md` B15 (now yes), B20 (narrowed).
+
+**Item 1: the staged scanner and initiator (7.87's silicon list) [F].**
+
+*T_IFS* (PRS EOF -> our SYNCSENT; ana.py `tifs`; SYNCSENT -> FRAMESENT identifies the PDU, 136 us
+for a SCAN_REQ, 312 us for a CONNECT_IND):
+
+| PDU | runs | n | EOF -> SYNCSENT |
+|---|---|---|---|
+| SCAN_REQ | prs-scan1, prs-cen1 (no outliers) | 2786 | 179.94-181.06 us |
+| SCAN_REQ | prs-cenA, prs-cenA2 (sequencer probe code in the image) | 4714 | 179.86-182.0 us, 7 above: 183.09-184.02 (5), 221.32, 221.91 |
+| SCAN_REQ | prs-cP1, prs-cP2, prs-sP1 (clean sequencer) | 8860 | 179.88-182.0 us, 6 above: 183.45-184.00 |
+| CONNECT_IND | prs-cen1, prs-cenA, prs-cenA2, prs-cP1, prs-cP2 | 79 | 180.07-180.95 us |
+
+The connection reply's 179.91-180.87 us (7.84; stock 180.2-181.1, 7.71) holds for both staged
+replies. The 221 us outliers went with the probe code. **Open:** 6 of 8860 SCAN_REQs (0.07 %) at
+183.4-184.0 us on the clean sequencer, about 3.4 us late, beyond the T_IFS tolerance (+2 us,
+Vol 6 Part B 4.1.1); cause not found (3.33 us is 16 STIMER ticks [I]). None in the Central's
+connection replies or CONNECT_INDs.
+
+*The sequencer's decision* (pre-crash probe words at SEQRAM 0x4F60, since removed: the latest
+SCAN/INIT decision's end in RAC.STIMER ticks, 4.8 MHz, from the RX2TX entry; `dump-scanA1`-`D1`,
+`prs-cen1`, `prs-anc1`, `prs-cenA`, `prs-cenA2`, `dump-cenH1`): active scanner **12.7-13.1 us**
+(4 runs, 10 461-17 993 decisions each); Central (scan and initiator) **25.0-25.6 us** (5 runs,
+116-9434 decisions). Against the 650-tick (135.4 us) RX2TX hold: at least 109.8 us to spare.
+
+*The slot check* (ana.py `slot`; probe tags at the check: STIMER, TIMER0, TIMER1 since the
+PRS-captured EOF): TIMER1 since EOF less the sequencer's estimate (STIMER x 16 + EOF_TO_EXIT
+3.3 us in TIMER0 counts) **+0.95 to +1.78 us, mean 1.31 us, n = 24** (prs-cenA2 22, prs-cen1 1,
+prs-cenA 1). The estimate is short, so the frame end it computes is late by that much and the
+CONNECT_IND rule errs on the safe side; the read order (TIMER1 after TIMER0) accounts for part.
+**Open:** its verdict against `isr_rx_pdu()`'s own `pdu_end_us` near the limit (no frame fell
+there).
+
+*Completion runs* (15 runs: Central cen1, anc1, cenA, cenA2, cenH, cP1, cP2, cC1, cC2; scanner
+scan1, scanA, scanB, sP1, sC1, sC2; logs `prs-<run>.txt` or `dump-<run>.txt`, `dump-cenH1`,
+`dump-scanA1`, `dump-scanB1`). Excluded: scanC and scanD, whose images carried ring
+instrumentation inside the commit path (`radio-with-rings.diff`). cen1 and anc1 ran before fix 1.
+
+| figure | Central | scanner | Kconfig (silicon) |
+|---|---|---|---|
+| scan commit run (RX->TX kind) | 80.6-143.3 us | 129.6-141.3 us | WCET_SCAN_COMMIT **143.3** (stand-in 109.3) |
+| commit start -> RX FIFO re-armed | 16.6-43.6 us (7 runs) | 42.6-58.0 us (scanB, sP1, sC1, sC2) | SCAN_COMMIT_TO_RESPOND **58.0** (stand-in 103.2) |
+| commit start -> next stage | 76.8-134.4 us | 98.2-132.4 us | SCAN_COMMIT_TO_STAGED **134.4** (stand-in 95.1) |
+| SCAN_REQ transmit completion (TX->RX kind) | 50.0-102.2 us | 75.6-117.8 us | WCET_COMPLETION_TX_RX **117.8** (was 62.0: overrun) |
+| CONNECT_IND transmit completion (TX kind) | 33.9-34.5 us | - | 39.6, within |
+| abort completion with its stage (ABORT kind) | 62.2-118.6 us | 136.9-137.8 us | 267.5, within |
+| connection: TX->RX / RX->TX / abort (Central, after fix 1) | 55.8-56.3 / 78.3-78.8 / 39.4-40.1 us | - | 179.2 / 109.3 / close 241.7, within |
+| connection: commit start -> RX FIFO re-armed (Central) | 16.5-16.8 us (7 runs) | - | (Peripheral not re-measured) |
+
+The re-arm row counts the 11 runs after fix 2 (scanA and scan1 re-armed in the commit, 97.3 us;
+cen1 and anc1 ran before fix 1). The SCAN_REQ's transmit completion is the TX->RX kind it shares
+with a scannable advertiser's ADV_IND (62.0 us, 7.84): that budget was short by up to 55.8 us in
+every scanner image, now the larger.
+
+*First anchor* (free-running TIMER1 at 4.8 MHz, SYNCSENT/FRAMESENT/EOF; ana.py `anchors`: the
+CONNECT_IND's FRAMESENT to the Central's next SYNCSENT): **before** fix 4 (fr-fanc1, n = 20)
+3777.3-3803.8 us; **after** (fr-fanc2 n = 17, fr-fanc3 n = 18) **3806.2-3807.7 us**. The window
+opens 1.25 ms + WinOffset 2 x 1.25 ms = 3750 us after the CONNECT_IND [S] and SYNCSENT follows the
+packet's start by preamble and access address, 40 us [D]: the first packet began up to **12.7 us
+before** the window before the fix, and **16.2-17.7 us inside** it after (WinSize 1.25 ms).
+
+**Item 2: data channels and PHYs.** *Channels 11-21: done [F].* The laptop's 26-channel map left
+them out (7.84); our own Central sets all 37. Per-channel receive (`efr32_radio_rx_channel_stats`):
+dump-cenH1 103-109 frames on every data channel 0-36, 0 CRC failures; vcom/dump-cenZ1 8-13 per
+channel, 0 failures; dump-kC1 812 good, 1 failed over all data channels. 7.83's rate rule holds on
+all 37. *2M and Coded: not feasible here.* `BT_LLL_VENDOR_EFR32` selects OpenISA's feature set
+(legacy advertising and scanning, one-PHY connections, `Kconfig`), so the host logs `PHY 0x02 not
+supported` at every connection; the sequencer's T_IFS hold and the air-time deadlines are 1M
+figures. Needs a feature port (the tables exist, 7.83), then silicon.
+
+**Item 3: the close/abort budget: partial [F].** The Central's connection abort completion ran
+**39.4-40.1 us** (9 runs above); 7.84's Peripheral last TX 52.2-63.4 us, abort 36.1-36.4 us.
+**Open:** no run identifies a connection event closing on a frame in reception, which takes
+7.89's FORCEDISABLE path; until one does, `EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS` keeps the
+QEMU 241.7 us.
+
+**Item 4: the Central's early anchor: done for this Central [F]** (item 1, first anchor: fixed by
+the sub-tick remainder). The laptop's 21.5 us early arrival at our Peripheral (7.84 item 3) cannot
+be attributed with one kit; a 30.5 us spread there matches the same tick [I].
+
+**Item 5: BLE-ASI reception: started, not analysed [F].** `tests/amateur-port` with
+`prj-hardware.conf`, `prj-dataid.conf`, `AMATEUR_PORT_PLAN_INBAND` (channels 37 and 38 on 2402 and
+2426 MHz, 39 on 2402 MHz), 0 dBm (`BT_CTLR_TX_PWR_0`), a FINAL identification every 5 s for 60 s,
+the laptop scanning with duplicate reports on (`asi.sh`; `btmon` needs privileges not held): run
+A1, 12 identifications on 2402000 kHz ending 5078-60090 ms (`vcom-A1.txt`); the timestamped scan
+(`asi-A1.scan`) holds 2 lines with the BLE-ASI UUID. **Open:** reception per identification
+(attribution by AdvA and time) and repeats.
+
+**Silicon runs with the committed figures [F]** (images without probes; clean; 0 misses, 0 late
+releases, 0 RX overflows in each): Central 120 s (dump-kC1, vcom-kC1: 30 connections, 3 host
+creation timeouts); active scanner 60 s (dump-kS1: 10 877 reports); Peripheral advertising while
+the laptop scanned actively 60 s (dump-kP1, scan-kP1.log: seen 11 times by name). Before the
+figures (cenZ1, 45 s): 10 attempts, 8 connected, 2 creation timeouts. Advertising channels,
+CRC-good / failed: cenZ1 903/311, 1006/225, 810/258 (37/38/39); kC1 2011/595, 1861/407, 1568/360;
+kS1 3362/1127, 3686/680, 3002/737. 7.80's open image received 1 % on 38 and 0 % on 39; all three
+now receive.
+
+**QEMU [Q]** (rebased on 6b57172, 7.93's model): qtests efr32bg22-test 127/127, rf 44/44, unit
+test-efr32-rf-medium 14/14. Against master (master's images on master's QEMU 9201a440a8, this
+branch's on its own; `cmp-*.log`): connection e2e at the default 8 s fails on both alike (link up,
+no GATT round printed before the end: 7.93's slower simulation); at 20 s both pass, 30/30 rounds
+(1328 answers master, 1388 here). The QEMU-profile active-scan pair (`QEMU_TIFS` seam) shuts down
+safely at start-up on both alike (`deadline late start: efr32_radio_completion_event`, 88 ms past,
+after 12 advertisements and 3 SCAN_REQs: 7.93's known failure); before the rebase it ran, 8 of 28
+SCAN_REQs answered after start-up (`e2e-act2.log`). Hardware-configuration pair, 60 s (`hw-*.con*`,
+reqctx.py): master 619/619 answered, this branch 604/604, and 626/626 with the new figures; no
+assertion, no shutdown. No regression against master. The active-scan e2e's matchers now take
+each boot's addresses and the 26-octet SCAN_RSP (87fa854) and no longer need xxd; on the saved
+pre-rebase trace they find the 8 exchanges.
+
+**Open.** The 183.4-184.0 us SCAN_REQ T_IFS outliers; the slot check's verdict near its limit;
+the connection close on a frame in reception (FORCEDISABLE) on silicon and the close budget;
+BLE-ASI reception per identification; 2M and Coded (a feature port first); the Peripheral's
+connection re-arm path on silicon; the QEMU-profile active-scan and dual e2e under 7.93's model.
+
 ### 7.92 Safety 4 (QEMU only): the session-start safe shutdown, interrupt masking by I2C, the stock image on the model, run-to-run determinism
 
 Tags as in 7.79. Everything here is emulation (the suit board model, `docs/stim-simulation.md`);
