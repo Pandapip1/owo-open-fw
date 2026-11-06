@@ -21,7 +21,7 @@ use owo_hbridge::{HBridge, State};
 use owo_stim::hw::{Bridge, Hw, HwError};
 use owo_switch::Switch;
 use zephyr_io::{
-    suit_handle, suit_param, suit_post, suit_stop_input, suit_stop_input_pending,
+    suit_handle, suit_param, suit_post, suit_stop_input,
     suit_stop_input_setup, suit_supply_handle, suit_switch_routes, AdcChannel, Dac, Gpio, Port, Pwm, FineCounter, Regulator, SuitHandle,
     SuitParam,
 };
@@ -93,13 +93,6 @@ pub fn set_stop_listener(f: fn()) {
 /// without one.
 pub fn stop_input_demands_stop() -> bool {
     STOP_INPUT.load(Ordering::Acquire) && suit_stop_input().unwrap_or(true)
-}
-
-/// The backstop for a lost change callback: an expander's /INT left asserted (by a change whose
-/// read failed) raises no further edge. Reads the input only while its controller's interrupt
-/// line is asserted, so a healthy idle input costs no bus transfer.
-pub fn stop_input_backstop_demands_stop() -> bool {
-    STOP_INPUT.load(Ordering::Acquire) && suit_stop_input_pending() && stop_input_demands_stop()
 }
 
 /// The stop input's controller saw it change (shim callback).

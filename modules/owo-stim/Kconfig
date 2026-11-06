@@ -169,10 +169,10 @@ config OWO_STIM_STOP_INPUT_POLL_MS
 	help
 	  The stop input (stop-gpios, the suit's power button on its expander) stops the output on
 	  its controller's change callback (the expander's /INT). While the output is armed the
-	  controller's interrupt line is also checked this often, and the input read when the line
-	  is asserted: that bounds a lost /INT edge (an /INT asserted while a read failed stays low
-	  and raises no further edge) without a bus transfer while nothing changed. The stock
-	  firmware samples the button at 10 Hz.
+	  input is also read this often: that bounds a lost /INT edge (an /INT asserted while a read
+	  failed stays low and raises no further edge), and a read that fails (a dead expander, which
+	  also holds the supply enables) stops the output. The stock firmware samples the button at
+	  10 Hz.
 
 config OWO_STIM_FAULT_LOCKOUT
 	int "Faults before the whole output locks out until restart"

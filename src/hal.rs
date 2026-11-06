@@ -198,12 +198,11 @@ mod real {
             if let Some(hw) = self.hw.as_mut() {
                 self.sup.poll(hw, now_us);
             }
-            // The expander's /INT edge is the prompt path; this bounds a lost one. It reads the
-            // expander only while /INT is asserted: an expander transfer holds interrupts off for
-            // its whole length (the vendor's blocking I2C transfer), which radio deadlines feel.
+            // The expander's /INT edge is the prompt path; this read bounds a lost one and stops
+            // the output when the expander (which also holds the supply enables) cannot be read.
             if self.sup.is_armed() && now_us >= self.stop_input_at {
                 self.stop_input_at = now_us + STOP_INPUT_POLL_US;
-                if owo_suit::stop_input_backstop_demands_stop() {
+                if owo_suit::stop_input_demands_stop() {
                     owo_suit::request_stop();
                     crate::stop_requested();
                 }
