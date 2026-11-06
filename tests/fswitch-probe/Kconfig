@@ -1,0 +1,40 @@
+menu "Synthesizer frequency-switch probe"
+
+config FSWITCH_PROBE_SET
+	hex "Experiments to run (bit mask)"
+	default 0x3
+	help
+	  Bit 0: LO-count characterisation in RXSEARCH. Bit 1: SYNTH.FREQ step
+	  response without recalibration. Bit 2: open-loop VCO tuning curve.
+	  Bit 3: retune with VCO calibration. Bit 4: frequency range sweep.
+	  Bit 5: demodulator frequency-offset estimate against LO offsets
+	  (frames from nearby advertisers). Bit 6: other small-step mechanisms
+	  (CHCTRL/CHSP, CALOFFSET, cap steps). Bit 8: E2 with the TX loop settings. Bit 9: what LOCNTTARGET follows. Bit 10: the first microseconds after a step.
+	  Bit 11: stepped LoRa-like chirps. Bit 12: the range edges at 2 MHz. Bit 13: E2 against E11 at 2399 MHz. Bit 14: large steps without
+	  recalibration over 2 ms.
+	  Every experiment is receive only.
+
+config FSWITCH_PROBE_TX
+	bool "E15: carrier steps while transmitting (in-band advertising on 2402 MHz)"
+	help
+	  Advertises on channel 37 only, at normal Bluetooth power, and steps
+	  SYNTH.FREQ by 500 kHz and back inside each PDU, measuring the LO and
+	  SYNTH.STATUS.INLOCK. Transmits only inside 2400-2483.5 MHz. Replaces
+	  the receive-only experiments.
+
+config FSWITCH_PROBE_RANGE_LOW_KHZ
+	int "Range sweep: lowest carrier (kHz)"
+	default 2000000
+
+config FSWITCH_PROBE_RANGE_HIGH_KHZ
+	int "Range sweep: highest carrier (kHz)"
+	default 2900000
+
+config FSWITCH_PROBE_RANGE_STEP_KHZ
+	int "Range sweep: step (kHz)"
+	default 10000
+
+endmenu
+
+osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
+source "Kconfig.zephyr"

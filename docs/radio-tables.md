@@ -8559,3 +8559,190 @@ for this OPN.
   arrival, data channels 11-21.
 
 **7. BLE-ASI reception gap (7.85).** Not investigated in this batch.
+
+### 7.90 Synthesizer frequency switching: mechanisms, settling, range; LoRa and scan viability
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548). Probe: `tests/fswitch-probe`
+(Kconfig `FSWITCH_PROBE_SET` selects experiments E1-E16, `FSWITCH_PROBE_TX` the one in-band
+transmit check; `prj-qemu.conf` runs it on the model). A passive scanner with a 10.24 s window brings the radio to RXSEARCH on 2402 MHz
+through the open sequencer (7.80); the M33 then locks its interrupts, so the link layer never
+ends the window, and measures the synthesizer directly. Receive only except E15. Register names:
+Silicon Labs' public xG22 register model (`SYNTH_S`/`RAC_S`/`MODEM_S` `_field.py`, Simplicity
+SDK v2025.6.1). Timebase: M33 DWT.CYCCNT, HFRCODPLL 76.8 MHz (7.74). Logs: `scratch/fswitch/`
+of the worktree (a1-a11 silicon, q1-q2 QEMU). QEMU: `hw/arm/efr32bg22.c`,
+`hw/arm/efr32-rf-medium.[ch]`, qtests in `tests/qtest/efr32bg22-rf-test.c`.
+
+**The instrument: the LO counter [F] (E1, E10).** `SYNTH.LOCNTSTATUS.LOCOUNT` (19 bits) after
+`LOCNTCTRL.RUN` holds the LO cycles in 2^(NUMCYCLE + 1) HFXO periods: 512576 at NUMCYCLE 12 in
+RXSEARCH on 2402 MHz = 2402.700 MHz, the carrier plus the IF (high side). NUMCYCLE saturates at
+12 (13-15 read and last the same, 213.8 us), so the finest resolution is 4.6875 kHz per count in
+213.3 us and the shortest window 26 ns (NUMCYCLE 0, 4.8 MHz per count). Above 2457.6 MHz LO the
+NUMCYCLE-12 count wraps. With the synthesizer running it counts only with
+`LOCNTCTRL.FCALRUNCLKEN` (bit 11; 0 without it); stopped, in the calibration state, it counts the
+open-loop VCO. `LOCNTTARGET` in the calibration state is the programmed LO's count for the
+NUMCYCLE of the last RUN; CAPCALSTART and CLEAR set the NUMCYCLE-0 value (125); closed loop it
+held 4004 (the NUMCYCLE-5 value) whatever the NUMCYCLE. Single short windows read about +0.25
+count high on average (a control with no step); every timing below subtracts a same-timing
+control or a settled reference. Hazard found on the way: an RXWARM recalibration started while
+the probe had left `FCALRUNCLKEN` set ended with `VCOTUNING` 0x0780 and the LO unlocked near
+2236 MHz; the sequencer's calibration needs `LOCNTCTRL` idle (the open firmware never sets that
+bit).
+
+**Mechanisms that move the carrier [F unless marked].**
+- `SYNTH.FREQ` (28 bits, f_HFXO / 2^19 = 73.24 Hz per unit), written while the loop runs: the LO
+  moves through the loop; no recalibration, no RAC state change (RXSEARCH / RXFRAME continued in
+  every experiment), frames kept arriving.
+- `CHCTRL.CHNO` x `CHSP` (6 and 18 bits): CHSP 13653 (1.000 MHz) moved the LO by 213-214 counts
+  (NUMCYCLE 12) per CHNO; the same loop path.
+- `CALOFFSET` (15-bit two's complement, FREQ units): 0x100, 0x1000, 0x4000, 0x7FFF moved it by
+  +5, +64, -256, 0 counts, i.e. +19 kHz, +300 kHz, -1.2 MHz, 0: a +-1.2 MHz fine offset.
+- `MODEM.DIGMIXCTRL.DIGMIXFREQ` (receive, digital): shifts what the demodulator sees without
+  touching the LO; the frequency-offset estimate follows it as it follows an LO offset (below).
+- `VCOTUNING` written closed loop, `CMD.VCOADDCAP` / `VCOSUBCAP` (VCAPSEL +-1, once): the loop
+  absorbed the change; not frequency steps.
+- `MODEM.AFCADJRX` / `AFCADJTX` are read-only (the AFC writes the synthesizer itself, LE Coded
+  only). `DIVCTRL.LODIVFREQCTRL` and the sub-GHz test divider (`SYTRIM1.SYLODIVSGTESTDIV`,
+  `SYLOEN.SYLODIVSGTESTDIVEN`) exist in the register model; not exercised. The FSK modulator
+  (TX deviation) also moves the synthesizer per symbol; not used here.
+
+**FREQ step response without recalibration [F] (E2, E11, E14; RXSEARCH, 2399 and 2402 MHz).**
+Staggered NUMCYCLE-3 windows (0.42 us) after the write, 64 repetitions, control subtracted;
+fraction of the step reached at the window's start (1 and +-4 MHz have the same shape):
+
+| after the write | 0.31 us | 0.76 us | 1.03 us | 1.32 us | 1.95 us | 2.6 us | 4 us |
+|---|---|---|---|---|---|---|---|
+| receive loop, +4 MHz | 0.39 | 0.65 | 0.79 | 0.99 | 1.13 | 1.19 | 1.14 |
+| receive loop, -4 MHz | 0.35 | 0.65 | 0.80 | 0.89 | 1.10 | 1.22 | 1.14 |
+| loop configured for TX, +4 MHz | 1.15 | 1.11 | 1.02 | 1.05 | 1.06 | 0.97 | 1.04 |
+
+Second-order fit over n = 240 windows each (rms 0.09 / 0.08 of the step): receive loop zeta 0.45,
+f_n 196 kHz (overshoot 20 %, peak 2.9 us, within 2 % after about 7 us; NUMCYCLE-5 traces stayed
+within +-2 % from 4-12 us on); TX configuration (the sequencer's `LPFCTRL1/2TX`, `DSMCTRLTX`,
+`SYNTHENCTRL.LPFBWSEL`, `SYEN.SYCHPLPEN` clear and the `SYTRIM0` TX value, applied while
+receiving) zeta 0.46, f_n 683 kHz (peak 0.8 us, within 5 % after about 1 us). The LO moves
+within 0.3 us of the write. Settled, the LO is exact: 1, 2, 10 and 24 MHz steps read the count of
+the programmed LO to the count.
+
+**Large steps without recalibration [F] (E16; one repetition, NUMCYCLE 10, 53 us windows).** From
+2399.7 MHz LO, steps up to +9.9 / -11.6 MHz arrive with the fast response (+8, +10, -8, -10 MHz:
+within 0.02 MHz by the second window); beyond, the LO jumps to that edge at once and covers the
+rest in uneven stages, on average 10.6 MHz/ms: +12 MHz in 0.33 ms, +16 in 0.65, +20 in 0.97,
++24 in 1.4 ms; -16 in 0.49, -24 in 1.4 ms; back from +24 in 1.1 ms. No interrupt flag changed
+(`IF` 0x204 throughout). One calibration covers -11.6 / +9.9 MHz at full speed and at least
++-24 MHz eventually.
+
+**Retune with calibration [F] (E4).** The M33 ran a port of the sequencer's TX->RX synthesizer
+half (SYNTHSTOP, FREQ, VCDAC and loop filter, CAPCALSTART, the 11-step successive approximation
+of `VCOTUNING`, SYNTHSTART; the sequencer's delay units taken as 1 us); n = 8 per row, steps of 1,
+2, 10, 24 and 78 MHz. Entry to the calibration state 5.1 us, approximation 22.3-22.4 us,
+SYNTHSTART at 27.4-27.6 us, sequence 32.6-32.7 us. With a cached code instead of the
+approximation: SYNTHSTART at 5.4 us, sequence 10.6 us. After the sequence (5.2 us after
+SYNTHSTART) the LO was 1.4-2.3 MHz off over the next 1.7 us, under 1 MHz at 3.4 us and within
+about 0.2 MHz by 10 us, the same for 1 and 78 MHz (the loop acquires from the calibrated code,
+not from the old carrier). The approximation's 11 counts are 9.4 us of hardware time; the rest is
+register traffic (the M0+ pays 4.25 cycles of 26 ns per radio access, 7.74, the M33 3.9-5.9 of
+13 ns). The code repeated within 2 (0x8332 against the sequencer's 0x8334 at 2402 MHz).
+
+**Range [F] (E3, E5, E13; receive only, nothing radiated but LO leakage).** Calibration codes
+(VCAPSEL 16, the sequencer's) fall about 4.7 per MHz: 2047 at 2160, 1880 at 2200, 1366 at 2300,
+824 at 2400, 621 at 2450, 420 at 2500, 83 at 2600, 0 at 2640 MHz. Open loop (calibration state,
+NUMCYCLE 8) the VCO spans 2165.7 MHz (code 2047) to 2631.3 MHz (code 0) at VCAPSEL 16, 2199.7 to
+2692.9 at VCAPSEL 0 and 2140.4 to 2586.7 at VCAPSEL 31; the code's top bit has a step of its own
+(code 1024 is 14 MHz above 960), as 7.85's 2370-2380 MHz jump suggested. Closed loop, 400 us
+after each calibration, the LO count against the programmed LO (carrier + 0.7 MHz IF), 10 MHz
+steps over 2000-2900 MHz and 2 MHz steps at the edges:
+
+| VCAPSEL | LO on the programmed value (within 4.7 kHz), carriers | LO stops at (beyond) |
+|---|---|---|
+| 16 (the sequencer's) | 2158-2644 MHz | 2156.47 / 2647.57 MHz |
+| 0 | 2192-2702 MHz | 2189.34 / 2703.76 MHz |
+| 31 | 2134-2596 MHz | 2134.12 / 2600.92 MHz |
+
+The synthesizer reaches 2134-2702 MHz with the VCAPSEL chosen per edge and 2158-2644 MHz with the
+open sequencer as it is. At the edges the calibration code sits at 2047 or 0 and the loop's own
+range covers the last 2-4 MHz. `STATUS` bit 16 (`VCOFREQACTIVE`) was set during calibration and,
+after it, wherever the LO missed its value and at the last edge points it still reached (7 of
+336), clear everywhere else: a near-the-edge flag. `STATUS.INLOCK` stays 0 in receive (7.64).
+Receive sensitivity off the 2.4 GHz band was not measured: there is no reference signal there.
+Nothing was transmitted outside the ISM band. `EFR32_AMATEUR_SYNTH_MIN/MAX_KHZ` (the amateur
+carrier policy, 7.85) is unchanged.
+
+**The demodulator's frequency-offset estimate [F] (E6; frames from nearby advertisers on 2402
+MHz, 1.5 s per offset).** `MODEM.FREQOFFEST` (13-bit two's complement) is live during a frame and
+reads 0 again by RXDONE. Sampled while the RAC is in RXFRAME, LO offsets of -300..+300 kHz
+(SYNTH.FREQ) moved it by -3.915 kHz per LSB (least squares, n = 1637 frames) and DIGMIXFREQ
+offsets by +3.937 kHz per LSB (n = 1468): within 0.6 % of each other, so the LO lands where it is
+programmed. [I] The LSB is 4 MHz / 2^10 (the 1M PHY's SRC output rate). Per-frame scatter for
+one device 1.7-5.6 LSB (7-22 kHz). Frames still passed CRC at every offset to +-300 kHz, LO or
+mixer. `TIMDETSTATUS.TIMDETFREQOFFEST` read 0 throughout.
+
+**Stepped chirps from the M33 [F] (E12, E14).** Two up-chirps around 2402 or 2399 MHz written on
+a DWT schedule (lateness <= 7 cycles, 91 ns), one LO count per repetition started at a chosen
+step, 32 repetitions, compared with the programmed staircase after a same-timing control: mean
+frequency error per window (NUMCYCLE 8: 13.3 us; 7: 6.7 us; 5: 1.7 us):
+
+| chirp | steps per symbol | step | error, receive loop | at the wrap (window after) |
+|---|---|---|---|---|
+| SF7, 812.5 kHz | 128 / 32 / 16 | 1.23 / 4.92 / 9.84 us | -14..+11 kHz | 0..+14 kHz |
+| SF7, 1625 kHz | 128 / 32 | 0.62 / 2.46 us | -24..+15 kHz | +64 / +72 kHz, then -55 / -28 |
+| SF7 406.25 kHz, SF7 203.125 kHz, SF8 812.5 kHz | 128 / 128 / 256 | 2.46 / 4.92 / 1.23 us | -19..+20 kHz | not resolved |
+| scaled: 12.8 MHz in 160 us | 128 | 1.25 us | -0.10..+0.19 MHz | +9.4 MHz, then -0.16 MHz |
+
+One count over 32 repetitions is 2.3 kHz at NUMCYCLE 8: the spread is the method's. No tracking
+lag is resolved; the scaled chirp, 16 times steeper, bounds it to within about 2 us. With the
+loop configured for TX: 812.5 / 1625 kHz -21..+18 / -39..+27 kHz, no wrap excess resolved; the
+scaled chirp's 12.8 MHz wrap, beyond the fast range, left -3.2 MHz 20 us later.
+
+**Transmit [F] (E15; in band: channel 37 advertising at normal power, a step to 2402.5 MHz and
+back inside each of 40 PDUs).** The RAC stayed in TX through every step (40 / 40) and `INLOCK`
+read 1 in all 1200 samples: the transmitter takes FREQ writes while transmitting without losing
+lock. The LO counter in TX read means 2-3 MHz below the carrier with +-1.5 MHz scatter between
+windows: not interpretable. Whether the radiated carrier follows needs an SDR.
+
+**What needs an SDR.** Phase continuity across FREQ writes (a VCO in a loop cannot jump in phase,
+but how the DSM takes a new word is unknown): I/Q of a carrier stepped by 1-800 kHz at known
+instants, >= 4 MS/s, phase residual against the programmed trajectory. The radiated frequency
+during stepped transmission (E15), a stepped chirp's spectrum and a gr-lora_sdr decode of a
+stepped-chirp frame. Spurs from the LO counter running closed loop. Receive sensitivity off the
+band and the LO leakage during a range sweep.
+
+**Viability [I from the measurements above].** LoRa symbol time 2^SF / BW: SF7 630 / 315 / 158 /
+79 us and SF8 twice that at 203 / 406 / 812 / 1625 kHz; one step per chip is 4.92 / 2.46 / 1.23 /
+0.62 us.
+- Stepped-chirp TX: timing is not the limit. The M0+ writes FREQ in 0.11 us; one step per chip is
+  possible at every bandwidth, and 16-32 steps per symbol keep the staircase's phase error small
+  (the loop smooths it further). The LO follows a stepped ramp without resolved lag. The weak point
+  is the symbol-boundary wrap (a -BW jump): 20 % overshoot settling in ~7 us in the receive loop
+  (4-9 % of a 158 / 79 us symbol), ~1 us in the TX one (under 2 %). Open: the radiated carrier and
+  its phase (SDR), and a modulator mode that sends an unmodulated carrier for a whole frame (the
+  OOK path of 7.85 holds the carrier at key-down).
+- De-chirp RX by LO sweep: the LO can be stepped while receiving without disturbing the RAC or the
+  demodulator, and static offsets land exactly (FREQOFFEST, LO count). The ~+-3 kHz holds once
+  settled: a 6.35 kHz step (SF7, 812.5 kHz) overshoots ~1.3 kHz and is within 2 % in ~7 us. The
+  wrap again costs ~7 us per symbol in the receive loop. The digital mixer (DIGMIXFREQ) shifts the
+  same way without analogue settling over at least +-300 kHz (frames decoded); a de-chirp could
+  sweep the mixer within the channel filter and move the LO only between symbols. Per-symbol
+  readout is the gap: FREQOFFEST has 3.9 kHz steps and updates only within a detected frame.
+- Spectrum scan: steps within -11.6 / +9.9 MHz settle to 2 % in ~7 us without recalibration;
+  beyond, a recalibration (SYNTHSTART 27.4 us after the start on the M33, 5.4 us with a cached
+  code) plus ~10-15 us. The 2400-2483.5 MHz band in 1 MHz steps is ~1 ms of tuning (84 x ~7 us
+  + 6 recalibrations); the span is 2158-2644 MHz with the sequencer's VCAPSEL, 2134-2702 MHz with
+  VCAPSEL chosen per edge. The RSSI time per point (AGC) was not measured.
+
+**QEMU.** The model now has the LO in time: the LO counter (FCALRUNCLKEN closed loop; the open-loop
+VCO in the calibration state from the measured curve and its VCAPSEL dependence; TARGET on RUN,
+CAPCALSTART and CLEAR; NUMCYCLE saturating at 12; the 19-bit wrap), so the sequencer's calibration
+converges to silicon-like codes (the probe in the model: 0x832f, 0x82c5, 0x81e3 at 2402, 2426,
+2480 MHz against silicon 0x8332-0x8334, 0x82cc, 0x81e5; counts 512576, 512789 and 514709 at
+2402, 2403 and 2412 MHz, as on silicon; LO on target 2160-2646 MHz at VCAPSEL 16, silicon
+2158-2644; the +-24 MHz slews within 0.2 ms of silicon's); the closed-loop LO follows carrier changes
+with the fitted second-order response (receive or TX loop by `LPFBWSEL`), the fast range and the
+slew beyond it, and stops at the measured VCO limits per VCAPSEL. `CHNO` x `CHSP` (6 / 18 bits;
+the CHSP mask was 6 bits) and `CALOFFSET` add to the carrier. The medium matches no receiver while
+a running LO is more than half the raster from its carrier. The lock range is 2158-2644 MHz (was
+2290-2500), compared to the kHz, and the medium's channel index is 16 bits (the 1 MHz raster from
+2158 MHz has 487 channels). [I] A SYNTHSTART with a code far from the carrier (no calibration) is
+taken as locked. qtests: `synth-locnt-counts-lo`, `synth-calibration-open-loop`,
+`synth-freq-step-settles`, `synth-large-step-slews`, `synth-lo-stops-at-vco-limit`,
+`synth-channel-and-offset-fields`, and the range qtests at the new edges; rf 43/43 and machine
+123/123 qtests pass, and the amateur dual-machine e2e passes.
