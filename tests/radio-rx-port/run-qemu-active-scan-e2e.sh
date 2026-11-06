@@ -83,9 +83,15 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     sed -n '1,120p' "$RUNTIME_DIR/guest.log" >&2
     exit "$status"
 fi
+# TRACE_OUT: keep the run's radio trace there for further analysis.
+if [ -n "${TRACE_OUT:-}" ]; then
+    cp "$RUNTIME_DIR/radio.trace" "$TRACE_OUT"
+fi
 
 console=$(sed -n 's/.*USART[01] TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-    "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')
+    "$RUNTIME_DIR/radio.trace" |
+    LC_ALL=C awk 'BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
+                  { printf "%c", byte[tolower($1)] }' | tr -d '\r')
 printf '%s\n' "$console" | grep -E '^(bt_enable|scan_callback_register|scan_start):' || true
 # Guest-console progress is informative only: ICOUNT's host pacing can delay
 # printk after the controller has already issued its RF request. The
@@ -94,26 +100,35 @@ printf '%s\n' "$console" | grep -E '^(bt_enable|scan_callback_register|scan_star
 # Each machine has a private address space, so its MMIO windows do not tag a
 # sender. The QEMU model does: endpoint 0 is the advertiser and endpoint 1 is
 # the scanner. Startup is deliberately unconstrained, but each accepted cycle
-# must be ordered advertisement -> SCAN_REQ -> SCAN_RSP. The scanner request
-# is 14 bytes (`c3 0c`, QEMU little-endian word `0x1a1a0cc3`) and the response
-# is eight bytes (`44 06`, word `0x743a0644`). These are QEMU snapshot
-# boundaries, not real RF airtime or hardware FRC/PROTIMER assertions.
+# must be ordered advertisement -> SCAN_REQ -> SCAN_RSP. Both devices take a
+# new random address at every boot, so the first word (QEMU little-endian) is
+# matched on the header only: the advertisement is 11 bytes (`40 09`), the
+# scanner request 14 bytes (`c3 0c`) and the response 26 bytes (`44 18`, the
+# staged scan response since 87fa854), whose AdvA must start as the
+# advertisement's. These are QEMU snapshot boundaries, not real RF airtime or
+# hardware FRC/PROTIMER assertions.
 #
 # A later advertisement supersedes an unmatched one. This avoids counting an
 # old startup advertisement with a request belonging to a newer advertising
 # event while still allowing the two CPUs to start in either order.
 exchange_summary=$(awk '
-    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
+    function adva(line) {
+        match(line, /first=0x[[:xdigit:]]+/)
+        return substr(line, RSTART + 8, 4)
+    }
+    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x[[:xdigit:]]+0940$/ {
         advertisement = NR
+        advertiser = adva($0)
         state = 1
         next
     }
-    state == 1 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
+    state == 1 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x[[:xdigit:]]+0cc3$/ {
         request = NR
         state = 2
         next
     }
-    state == 2 && /endpoint=0 TX snapshot sequence=.* bytes=8 first=0x743a0644/ {
+    state == 2 && /endpoint=0 TX snapshot sequence=.* bytes=26 first=0x[[:xdigit:]]+1844$/ &&
+    adva($0) == advertiser {
         count++
         printf "%d:%d:%d\n", advertisement, request, NR
         state = 0
@@ -166,7 +181,7 @@ tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
         }
         stage = 0
     }
-    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x743a0940/ {
+    /endpoint=0 TX snapshot sequence=.* bytes=11 first=0x[[:xdigit:]]+0940$/ {
         # A later advertisement supersedes an unpaired candidate.
         stage = 1
         req_seen = 0
@@ -187,7 +202,7 @@ tifs_summary=$(awk -v max_handoff_ns="$MAX_TIFS_JOB_HANDOFF_NS" '
     }
     # Both sides turn around in about one TIFS: the scanner request may be
     # traced before or after the advertiser reaches RX.
-    stage >= 2 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x1a1a0cc3/ {
+    stage >= 2 && /endpoint=1 TX snapshot sequence=.* bytes=14 first=0x[[:xdigit:]]+0cc3$/ {
         req_seen = 1
         if (stage == 4) {
             accept()
