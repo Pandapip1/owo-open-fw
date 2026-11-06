@@ -25,6 +25,23 @@ config RADIO_RX_PORT_CENTRAL
 	  turn-around to deliver CONNECT_IND to the advertiser and the first
 	  connection-event packet back. Do not select it for a hardware build.
 
+config RADIO_RX_PORT_PEER_ADDR
+	string "Address of the advertiser the Central connects to"
+	depends on RADIO_RX_PORT_CENTRAL
+	default ""
+	help
+	  "XX:XX:XX:XX:XX:XX": connect only to a connectable advertisement from this
+	  address (on silicon, where other advertisers are in range). Empty: the first
+	  connectable advertisement heard.
+
+config RADIO_RX_PORT_RECONNECT_MS
+	int "Hold each link this long, then disconnect and connect again (0: hold)"
+	depends on RADIO_RX_PORT_CENTRAL
+	default 0
+	help
+	  Nonzero: instead of the GATT rounds, the Central repeats connection set-up
+	  (scan, CONNECT_IND, first anchor) for measurements on silicon.
+
 config RADIO_RX_PORT_PAIRING
 	bool "Pair with LE Secure Connections and a passkey before the GATT rounds"
 	depends on RADIO_RX_PORT_CENTRAL && BT_SMP
