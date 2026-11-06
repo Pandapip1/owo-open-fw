@@ -8,8 +8,11 @@ licence in `vendor/hal_silabs`.
 ## 1. Why
 
 The product requires LE Secure Connections pairing with an authenticated (MITM) passkey and an
-encrypted link (`prj.conf`: `BT_SMP_ENFORCE_MITM`, `BT_APP_PASSKEY`; every characteristic
-`*_AUTHEN` in `src/ble.rs`; the test pairing profiles add `BT_SMP_SC_PAIR_ONLY`). Before this change it could not work: PSA Crypto's software AES
+encrypted link. `prj.conf` states the allowed pairing in full: LE Secure Connections only
+(`BT_SMP_SC_ONLY`, `BT_SMP_SC_PAIR_ONLY`), passkey entry with the unit's fixed passkey
+(`BT_SMP_ENFORCE_MITM`, `BT_APP_PASSKEY`), 16-octet keys, no legacy, Just Works, OOB or
+unauthenticated re-pairing; `src/ble.rs` requests security level 4 on connect and marks every
+characteristic `*_AUTHEN`. Before this change it could not work: PSA Crypto's software AES
 allocates its cipher context (ECB and CCM 280 B, AES-CMAC 316 B in two blocks [Q]) and the image
 has no heap, so ECB and CMAC failed with `PSA_ERROR_INSUFFICIENT_MEMORY` (the controller's
 `ecb_encrypt()` then hit its `LL_ASSERT`), and CCM was not even built (`PSA_ERROR_NOT_SUPPORTED`).

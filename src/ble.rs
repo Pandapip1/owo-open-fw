@@ -566,7 +566,7 @@ unsafe extern "C" fn connected(conn: *mut bt_conn, err: u8) {
         return;
     }
     info!("connected; requiring authenticated pairing");
-    let e = bt_conn_set_security(conn, BT_SECURITY_L3 as _);
+    let e = bt_conn_set_security(conn, BT_SECURITY_L4 as _);
     if e != 0 {
         warn!("set_security {}", e);
     }
