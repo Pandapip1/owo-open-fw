@@ -32,7 +32,6 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `build.rs` | Generates bindings for `conn.h` / `gatt.h` (see "Why a bindgen step") and bakes in the fallback `OWO_SERIAL` |
 | `owo_wrapper.h` | Header for that bindgen run |
 | `vendor/zephyr-lang-rust/` | Pinned Rust-for-Zephyr submodule (see "Rust together with the Silicon Labs sleeptimer") |
-| `west.yml` | Upstream Zephyr + `zephyr-lang-rust` revisions for a west workspace; not used by the build (the submodules are the pins) |
 | `flake.nix` | flake-parts dev shell (+ `checks.owo-core` and `checks.owo-stim` host tests, the patched OpenOCD, the sequencer probe) |
 
 ## Build
@@ -177,7 +176,7 @@ compiled wrapper), so e.g. `bt_gatt_notify_cb` is used instead of `bt_gatt_notif
 - Earlier (2026-10-19, before the submodules and the open controller), compile and link only: Zephyr `a915b2f` (4.5.0-rc2), board `bg22_ek4108a`, Rust 1.99.1, clippy
   clean under Zephyr's `-D warnings` and mandatory `// SAFETY:` comments, ~126 KB flash / ~26 KB RAM with the earlier SysTick configuration.
   Done twice: with Ubuntu's gcc-arm-none-eabi 13.2.1, and from a fresh `west init -l` + `west
-  update` workspace using this `west.yml`, inside `nix develop` (Arm GNU 13.3.Rel1).
+  update` workspace using the `west.yml` of the time (since removed), inside `nix develop` (Arm GNU 13.3.Rel1).
 - Earlier, with the unpushed Rust module patch: Rust + `SILABS_SLEEPTIMER_TIMER=y` + `TIMER_READS_ITS_FREQUENCY_AT_RUNTIME=y` + `PM=y` +
   `TICKLESS_KERNEL=y` compiles and links (~134 KB flash / ~27 KB RAM), from a fresh `west init -l` +
   `west update` workspace with the pinned submodule; without it, Rust is disabled by Kconfig.

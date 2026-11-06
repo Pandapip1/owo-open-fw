@@ -111,8 +111,10 @@ path can be tested; selectable power still requires the field definitions and
 DEVINFO/board calibration source.
 
 `generate-replay.py` can turn the JSON emitted by
-`../hardware-lockstep/trace_stores.py` into `replay-probe.S`; build it with
-`SOURCE=replay-probe.S BUILD_DIR=build-replay ./build.sh`.  The generated
+`../hardware-lockstep/trace_stores.py` into `replay-probe.S`.  Generated
+replays carry values traced from the stock controller, so they are kept in
+`owo-bg22-proprietary-baselines/sequencer-probe-replay/`, not here; build one
+with `SOURCE=<that path>/replay-probe.S ./build.sh build-replay`.  The generated
 program is intentionally a blind, characterized-only store replay: comments
 retain the source handler PC and trace step for every write, but it does not
 reproduce reads, waits, or branches.  On hardware the complete IRQ8/IRQ9 replay

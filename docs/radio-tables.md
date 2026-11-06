@@ -1479,7 +1479,7 @@ ref `sisdk-2025.6`): `SNIFFDCOUNT[4:0]`, `ACTIVETXFCD[5]`,
 `INTERLEAVEWRITEPAUSED[16]`, `FRAMEDETPAUSED[17]`, `FRAMELENGTHERROR[18]`,
 `DEMODERROR[19]`, `FSMSTATE[24:20]`.
 
-`tests/hardware-lockstep/stage2-working-irq8-frc.bin` (captured from the
+`owo-bg22-proprietary-baselines/hardware-lockstep/stage2-working-irq8-frc.bin` (captured from the
 confirmed-working stock controller at the AP3 IRQ8 breakpoint) reads
 `STATUS = 0x00000060`: `ACTIVETXFCD=1, ACTIVERXFCD=1`, everything else
 (including `FSMSTATE`) zero. `tests/hardware-lockstep/stage3-open-first-irq-frc.bin`
@@ -1500,7 +1500,7 @@ region reads a large nonzero value on stock and exactly `0` on open — look
 like accumulated steady-state activity, not reset state). `ACTIVETXFCD`
 matching `stage2`'s confirmed-working `IRQ9` capture too (same `0x60`) makes
 this less likely to be a cycle-count artifact for that specific bit, but it
-is not yet a first-cycle-to-first-cycle comparison. `tests/hardware-lockstep/stage2-first-frc.bin`
+is not yet a first-cycle-to-first-cycle comparison. `owo-bg22-proprietary-baselines/hardware-lockstep/stage2-first-frc.bin`
 /`stage3-first-frc.bin` (a true, pre-TXEN baseline pair) agree at `STATUS=0`
 on both sides, which is at least consistent with `ACTIVETXFCD` being a
 TXEN-driven transition on both systems, not a static config difference.
@@ -1554,7 +1554,7 @@ search / sniff), and is kept for that reason, not as a TX-path candidate.
 
 ### 7.5 A confirmed, missing SEQRAM-local write: `0xB0003EEC = 0x12`
 
-`tests/hardware-lockstep/stage2-rail-starttx.json` is a real, dynamic
+`owo-bg22-proprietary-baselines/hardware-lockstep/stage2-rail-starttx.json` is a real, dynamic
 single-step store trace of the working stock M33's own `RAC_SEQ_IRQn`
 (exception 54) handler immediately before it writes `RAC.CMD.TXEN`
 (captured earlier, analyzed here for the first time). At step 1081 it
@@ -3423,7 +3423,7 @@ precondition neither stack's software explicitly asserts.
 ### 7.24 The first concrete ordering test: `RAC.DIGCLKRETIMECTRL`/`XORETIMECTRL` positioned exactly as stock writes them -- still no change
 
 Pursued the ordering/timing hypothesis §7.23 pointed toward with the
-first genuinely testable case: `tests/hardware-lockstep/stage2-m33-tx-prepare.json`
+first genuinely testable case: `owo-bg22-proprietary-baselines/stage2-m33-tx-prepare.json`
 shows stock writing `RAC.XORETIMECTRL` then `RAC.DIGCLKRETIMECTRL`
 in a specific position -- between `SYNTH.FREQ` and `FRC.WCNTCMP2` --
 but this project's own `radio_freq_chan_set()` has never written either
