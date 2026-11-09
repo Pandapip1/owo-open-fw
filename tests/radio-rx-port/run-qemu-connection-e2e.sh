@@ -33,7 +33,11 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 TX_BUILD_DIR=${TX_BUILD_DIR:-"$ROOT/build/radio-port-conn-qemu"}
 RX_BUILD_DIR=${RX_BUILD_DIR:-"$ROOT/build/radio-rx-port-central-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
-RUN_SECONDS=${1:-8}
+# The run ends once the central reports its first CENTRAL_GATT_REPORT_EVERY GATT rounds (src/central.c:
+# 30 rounds at 1 s of guest time, after connection set-up and any pairing), or after
+# TIMEOUT_SECONDS of wall time, whichever comes first. No fixed run length is right on every host:
+# the ratio of guest to wall time depends on the host and on the model.
+TIMEOUT_SECONDS=${1:-300}
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-3}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
@@ -68,7 +72,12 @@ cd "$RUNTIME_DIR" && exec "$QEMU_BIN" \
 	>"$RUNTIME_DIR/guest.log" 2>&1 &
 qemu_pid=$!
 (
-	sleep "$RUN_SECONDS"
+	start=$(date +%s)
+	while [ $(($(date +%s) - start)) -lt "$TIMEOUT_SECONDS" ] &&
+	      ! grep -aq "gatt_rw: [0-9]* rounds" "$RUNTIME_DIR/console1" 2>/dev/null; do
+		sleep 1
+	done
+	echo $(($(date +%s) - start)) >"$RUNTIME_DIR/elapsed"
 	miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
 ) &
 watchdog_pid=$!
@@ -150,7 +159,8 @@ answers=$(awk '
 	handed && /endpoint=0 TX snapshot/ && !/bytes=11 / { count++ }
 	END { print count + 0 }
 ' "$RUNTIME_DIR/radio.trace")
-if [ "$answers" -lt "$RUN_SECONDS" ]; then
+run_seconds=$(cat "$RUNTIME_DIR/elapsed" 2>/dev/null || echo "$TIMEOUT_SECONDS")
+if [ "$answers" -lt "$run_seconds" ]; then
 	echo "connection-e2e: advertiser answered only $answers connection events" >&2
 	exit 1
 fi
