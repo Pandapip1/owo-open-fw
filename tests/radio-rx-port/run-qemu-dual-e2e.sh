@@ -81,7 +81,9 @@ miss_count_check radio-dual-e2e
 # board images use USART1, while accepting USART0 here keeps the harness from
 # silently dropping a future board-console choice.
 console=$(sed -n 's/.*USART[01] TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-    "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')
+    "$RUNTIME_DIR/radio.trace" |
+    LC_ALL=C awk 'BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
+                  { printf "%c", byte[tolower($1)] }' | tr -d '\r')
 printf '%s\n' "$console" | grep -E '^(bt_enable|scan_callback_register|scan_start|rx_callback):' || true
 
 if ! grep -q 'RAC.CMD=0x00000001' "$RUNTIME_DIR/radio.trace"; then

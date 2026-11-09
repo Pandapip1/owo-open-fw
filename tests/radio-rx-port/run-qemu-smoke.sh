@@ -62,7 +62,9 @@ fi
 miss_count_check radio-rx-smoke
 
 console=$(sed -n 's/.*USART1 TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
-    "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')
+    "$RUNTIME_DIR/radio.trace" |
+    LC_ALL=C awk 'BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
+                  { printf "%c", byte[tolower($1)] }' | tr -d '\r')
 printf '%s\n' "$console" | grep -E '^(bt_enable|scan_start):' || true
 if ! printf '%s\n' "$console" | grep -q '^bt_enable: 0$'; then
     echo "radio-rx: bt_enable did not report success"
