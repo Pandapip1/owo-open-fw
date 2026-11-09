@@ -9188,3 +9188,165 @@ the debugger could not read the cache registers in 7.75):
 **Open.** The placeholders above; instruction-cache misses; M33 SRAM occupancy still invisible to
 the interconnect, so M33 SRAM traffic does not slow the M0+ (B77); QEMU-timed Kconfig figures to be
 re-measured on this model.
+
+### 7.94 Silicon batch 3: the dev kit was withdrawn before the first flash; probes, analyses and a QEMU fix
+
+Tags as in 7.93: **[F]** silicon, **[I]** inferred, **[P]** placeholder, **[Q]** QEMU. QEMU branch
+`sil3` in vendor/qemu. Scratch: `scratch/sil3/` (images in `img/`, scripts, QEMU logs).
+
+**Status.** The dev kit became unavailable before this batch used it: the board lock was never
+taken and nothing was flashed. **No new silicon figure is in this section.** Every item below is
+prepared for the next kit session (probe images built, run scripts and decoders written and
+exercised in QEMU), analysed from the 7.91 logs, or a model fix that needed no new measurement.
+The 7.93 placeholders, its comparison tables and the QEMU cost model are therefore unchanged; the
+run list at the end is what the next session executes.
+
+**QEMU fix: the M0+ SysTick never counted.** The sequencer loads its SysTick reload from
+`SYST_CALIB.TENMS` x 25 (radio_seq.S reset, 7.9). The model wired no reference clock to the M0+
+SysTick, so CALIB read `NOREF` with TENMS 0, the reload was 0 and the counter stood still: every
+sequencer SysTick stamp read 0 in QEMU. On silicon CALIB reads `0xC0061A7F` with `RAC.STCTRL =
+0x01061a7f` written by the firmware (7.75): NOREF, SKEW = STSKEW (bit 24), TENMS = STCAL (bits
+23:0), the RAC_S register model's two fields. The M0+ SysTick's CALIB now follows RAC.STCTRL
+(`systick_set_calib`, `efr32_seq_systick_calib`); qtest `seq-systick-calib-follows-stctrl`. TICKINT
+stays clear, so no interrupt is added and icount determinism is unchanged. qtests 128/128, rf
+44/44, board 8/8; the connection e2e (20 s: 30/30 GATT rounds, 1290 Peripheral windows, 1241
+answers, no disconnection) passes.
+
+**Item 1, CPU model: prepared, owed on silicon.**
+- `tests/cpu-timing-port` now also measures, in the same image on silicon and in QEMU: M33
+  exception entry and return (`X` lines: SW0 pended through NVIC.ISPR at zero-latency priority,
+  DSB and ISB after the pending store; vectors in flash (Zephyr's table, VTOR at reset), in an
+  SRAM copy, and with handler and caller in SRAM; cold after an ICACHE flush and warm; the same
+  instructions with the line disabled as the control), and the M0+ on the sequencer core itself
+  (`kern0.S`, copied to SEQRAM and released with CPUWAITDIS while the M33 only spins on its own
+  clock, so no M33 SEQRAM access slows it, 7.74): `str`, `ldr` and `str` + ALU to SEQRAM and the
+  sequencer's delay pass with the loop's first instruction at each halfword offset mod 8
+  (`M ..._a0/2/4/6`), and IRQ 23 pended through the M0+ NVIC with four SysTick stamps (`MX`). The
+  rest of 7.93's list (multiplies, divides, LDM/STM/PUSH/POP, LDRD/STRD, branches, IT, load/store
+  interactions, literal loads, dual issue, NOP.W, MRS/MSR, barriers, `C` and `I` lines) was
+  already in the image.
+- The model's values of the new lines [Q] (`cpt-q1.con`): M33 entry 21, body 1, return 9 (10 with
+  the code in SRAM), control 4 cycles, the same for all three vector placements and cold or warm
+  (the model has no cache); M0+ SEQRAM `str` and `ldr` 2 cycles and the delay pass 7 cycles at
+  every alignment; M0+ IRQ 23 entry 20 (25 the first time), return 18, control 12 cycles. The `I`
+  lines read 0 hits and 0 misses: ICACHE0's counters are not modelled.
+- Radio paths: `EFR32_RADIO_ICACHE_PROBE` runs ICACHE0's counters (CMU.CLKEN1 bit 16 on) over
+  every completion run and keeps, per kind, the runs, summed cycles, hits, misses, the most misses
+  in one run and the misses of the longest run. With the `I` kernels' miss cost this tests whether
+  misses account for the 20-35 % the model is short on these paths (7.93).
+- Sequencer wake: `EFR32_SEQ_WAKE_PROBE` builds the sequencer with a SysTick stamp at exception
+  entry, copied for IRQ 23 at the timed command's first poll (`seq_abi.h EFR32_SEQ_TIMED_ENTRY_ST`,
+  `_POLL_ST`); the M33 keeps the last 16 (post to first poll in TIMER0 counts, entry and poll
+  SysTick). Without it the sequencer image is byte-identical to before. In QEMU [Q] (dual pair, 16
+  samples): post to first poll 197-202 counts, of which IRQ 23 entry to first poll is 97-103 M0+
+  cycles (194-206 counts at the 2:1 clock ratio, 7.75) and post to entry 1-7 counts. 7.93 has
+  silicon's whole post-to-first-poll at 136-140 counts and guessed the model's surplus to be the
+  end of another handler; in the model it is the M0+ path from the IRQ 23 entry to its first poll,
+  and the entry itself costs almost nothing. Which side is wrong needs the silicon split.
+
+**Item 2, the FORCEDISABLE close path: prepared.** `EFR32_RADIO_TIMING_PROBE` now counts
+`radio_disable()`'s FORCEDISABLE pulses on an RXFRAME (`fd_pulses`), keeps the longest wait for
+idle (`fd_wait`) and the longest completion run of each kind after a pulse (`completion_run_fd`),
+the run the 241.7 us close budget (`EFR32_RADIO_WCET_CONN_COMPLETION_CLOSE_NS`, still the QEMU
+figure) covers. None of the 7.91 logs carries it.
+
+**Item 3, the SCAN_REQ T_IFS outliers: analysed, cause not found, probe prepared.**
+- 7.91's clean-sequencer captures (`outliers.py` on `prs-cP1`, `prs-cP2`, `prs-sP1`; TIMER1 at
+  76.8 MHz reload-started by MODEMH.EOF; SCAN_REQs by their 136 us air time) [F]: 8860 SCAN_REQs.
+  8854 form one cluster, 179.88-181.3 us (to the nearest 0.25 us: 180.00 196, 180.25 1353, 180.50
+  4512, 180.75 2571, 181.00 218, 181.25 4); none between 181.4 and 183.4 us; the six outliers at
+  183.45, 183.63, 183.63, 183.82, 183.89 and 184.00 us. Each is a single event: the three
+  SCAN_REQs either side of each sit at 180.27-180.85 us, and the outliers' own air time is the
+  normal 135.91-135.96 us.
+- So an ordinary turnaround gets a step of +2.9 to +3.4 us, not a tail: a late handler, a
+  preemption or bus contention would spread the late ones from 181.3 us upwards [I].
+- Ruled out: the RX2TX handler overrunning its hold. The hold releases TX 650 STIMER ticks
+  (135.4 us) after RX2TX began whenever the handler runs, and the handler has the PA up 54.0-57.3
+  us after entry (7.84). Preemption of the hold loop: IRQ 7 (RX2TX) and IRQ 23 (the timed command)
+  both keep NVIC priority 0 (the reset sets only IRQ 8-10 to 1), so neither preempts the other and
+  IRQ 8-10 preempt neither.
+- Left: the RAC entering RX2TX late against the PRS EOF (its RXFRAME exit), or the TX chain after
+  the RAC's TX entry. `EFR32_RADIO_TIFS_PROBE` separates them on every reply rather than on a
+  debugger's sample of them: PRS async channels 9-11 carry MODEMH.EOF, RACL.TX and
+  MODEMH.SYNCSENT to TIMER1 (EOF reload-starts it), and each completion run that follows a reply
+  (the sequencer stamped its TX entry) takes EOF to TX entry and EOF to SYNCSENT with the
+  sequencer's RX2TX record (STIMER at entry, decision, lock and PA up, their SysTick copies, and
+  SysTick at the TX entry) into a histogram and the latest 16 samples above 182.0 us. QEMU [Q]
+  (dual pair, hardware configuration, 150 s): SCAN_REQ 181.60-181.63 us (n = 1532), the
+  advertiser's SCAN_RSP 181.55-181.65 us (n = 1532), EOF to TX entry 140.92-141.00 us, TX entry to
+  SYNCSENT 40.61-40.62 us. The model sits about 1 us above silicon's median (180.5 us).
+
+**Item 4, the slot check near its limit: prepared.** `isr_rx_pdu()`'s CONNECT_IND check now goes
+through `efr32_init_declined()`; with the timing probe it counts the sequencer's verdict against
+the link layer's own (`pdu_end_us` against its latest end) in a 2 x 2 table and keeps the least
+margin of a CONNECT_IND sent and the greatest margin of a frame the sequencer refused. A CONNECT_IND
+sent that the link layer declines is the dangerous disagreement; 7.91's +0.95 to +1.78 us estimate
+bias predicts refusals only, within about 1.8 us of the limit.
+
+**Item 5, BLE-ASI reception: analysed [F] (7.91 run A1); half explained; rate owed.**
+- Per identification (`asi.py`, `quiet.py` on `asi-A1.scan` and `vcom-A1.txt`; the
+  identification's address DB:F8:58:14:F9:7F; kit uptime placed on the laptop's clock by the first
+  reception, 0.173 s after reset + uptime): IDs 4, 6 and 8 received, each with the BLE-ASI service
+  data; the other nine not: **3 of 12**.
+- The laptop's discovery was interleaved BR/EDR and LE (plain `scan on`, with the user's headset
+  connected over BR/EDR). Its reports from all 58 advertisers in the log (496 RSSI reports) stop
+  for 2.2-5.0 s about every 10.5 s, and each LE phase opens with a burst from all of them (a new LE
+  scan clears the controller's duplicate filter). **All six odd IDs (1, 3, 5, 7, 9, 11) fall in
+  those silences**: the laptop was not scanning LE when they were sent. The even IDs fell in LE
+  phases: 3 of 6 received.
+- So the bluetoothctl log cannot give a rate per identification: the controller filters
+  duplicates within an LE scan (a second identification in one LE phase would go unreported) and
+  the interleaving hides half of them. 7.91's explanation (duplicate filtering) is the smaller
+  part; the inquiry phases are the larger.
+- The 3 of 6 in LE phases is not yet explained [I]. The identification sends one PDU per channel
+  index within about 1 ms, and under the in-band plan channel 39 goes out on 2402 MHz with channel
+  39's whitening (`radio_whiten_iv_set(39)`, docs/amateur-radio.md 5.2), which a standard scanner
+  on 2402 MHz dewhitens as channel 37 and drops on its CRC. A standard scanner can receive only two
+  of the three PDUs, each only while it listens on that carrier: about 2 in 3 for one rotating
+  over 37, 38 and 39, less with the BR/EDR link sharing its radio. Whether the third PDU should
+  take channel 37's whitening when the plan moves it onto 37's carrier is a design decision for
+  the amateur plan, not taken here.
+- Next run (`asi3.sh`): LE-only discovery (`transport le`), the scan restarted every 2.5 s so each
+  identification falls in its own scan with a fresh duplicate filter, `Discovering` lines marking
+  the gaps; 5 runs of 12 identifications for a rate with a range, against the 2-in-3 prediction.
+
+**Images for the next session** (`scratch/sil3/img/<name>`, board `bgm220_ek4314a`, none OWO_HW;
+`probe.conf` = TIMING_PROBE, ICACHE_PROBE, SEQ_WAKE_PROBE, TIFS_PROBE, SCHED_DEADLINE_STATS; the
+first 16 hex digits of zephyr.hex's sha256):
+
+| name | app and configuration | hex |
+|---|---|---|
+| cpt | tests/cpu-timing-port | aaa032ba8570d4d5 |
+| adv | tests/radio-port, prj-hardware, probe.conf | 3637d90538de4768 |
+| per | tests/radio-port, prj-hardware, prj-connection, probe.conf | fecc0137aefcbcb3 |
+| cen | tests/radio-rx-port, prj-hardware, prj-central, central.conf, reconnect.conf, probe.conf | f3cad009d078f6dc |
+| scan | tests/radio-rx-port, prj-hardware, active.conf, probe.conf | 99a6477cc295e36a |
+| asi | tests/amateur-port, prj-hardware, prj-dataid, asi.conf (in-band plan, 0 dBm) | 43fac4648fd9118e |
+
+**Run list for the next kit session** (`scratch/sil3/hw.sh`: lock, flash by image name, VCOM,
+reset, and `dump <img> <out>`, which reads and decodes `efr32_radio_probe`; J-Link 000440200548
+only):
+1. `hw.sh lock`; `hw.sh flash cpt`; `hw.sh vcom 120 cpt-s1.log` with `hw.sh reset`; twice more
+   (`cpt-s2`, `cpt-s3`). `cptcmp.py cpt-s1.log cpt-s2.log cpt-s3.log -- cpt-q1.con` lists every
+   figure's silicon range against the model; the 7.93 placeholders, the M33 exception costs and
+   the M0+ store and exception costs then go into vendor/qemu.
+2. `hw.sh flash scan`; 10 min with the laptop advertising (as 7.91's sP1); `hw.sh dump scan
+   scan-d1.txt`; three runs. T_IFS histogram and outlier records (EOF to TX entry and TX entry to
+   SYNCSENT locate the step; the STIMER and SysTick words show whether RX2TX began late); ICACHE
+   counters on the scanner's completion kinds.
+3. `hw.sh flash cen`; 10 min against the laptop's advertiser (7.91's kC1); three runs and `dump`:
+   slot verdicts and margins, `fd_pulses` and `completion_run_fd`, ICACHE counters, T_IFS of the
+   CONNECT_INDs and the connection replies.
+4. `hw.sh flash per`; 10 min connected from the laptop with GATT traffic (7.84's C1); `dump`:
+   ICACHE counters on the connection kinds, `fd_pulses`. With no pulse in any run of 3 and 4, the
+   FORCEDISABLE path does not occur in these roles and the close budget comes from the close runs
+   measured.
+5. `hw.sh flash adv`; 5 min with the laptop scanning actively; `dump` four times (16 wake samples
+   each): the wake split, ICACHE counters, SCAN_RSP T_IFS.
+6. `hw.sh flash asi`; `asi3.sh B1` .. `asi3.sh B5`.
+7. `hw.sh unlock "<last image>"`.
+
+**Open.** Everything 7.93 lists as a placeholder (unchanged); the FORCEDISABLE close path and the
+close budget; the SCAN_REQ outliers' cause; the slot check near its limit; the BLE-ASI rate per
+identification and the LE-phase losses; the model's M0+ path from the IRQ 23 entry to its first
+poll (97-103 cycles in QEMU [Q], against at most about 70 for silicon's whole post-to-poll, 7.93).
