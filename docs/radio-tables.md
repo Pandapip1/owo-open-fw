@@ -9350,3 +9350,163 @@ only):
 close budget; the SCAN_REQ outliers' cause; the slot check near its limit; the BLE-ASI rate per
 identification and the LE-phase losses; the model's M0+ path from the IRQ 23 entry to its first
 poll (97-103 cycles in QEMU [Q], against at most about 70 for silicon's whole post-to-poll, 7.93).
+
+### 7.95 EM2 between radio events (QEMU only): the firmware path, the EMU model, the wake-up lead
+
+Tags as in 7.79; **[DS]** EFR32BG22 data sheet, **[RM]** reference manual rev. 1.2, **[SDK]** public
+Simplicity SDK source in vendor/hal_silabs. Everything here ran in QEMU; no hardware was used.
+Branches: superproject `worktree-agent-ad1d1ba51c7c12be2`, vendor/qemu and vendor/zephyr `em2`.
+Stimulation runs are kept with the stock dump (`stim-sim-2026-11-09-em2/`).
+
+**Before.** `prj.conf` had `CONFIG_PM=y` with nothing locking EM2: the idle thread already chose
+EM2 (`EMU_EnterEM2(true)`) whenever the scheduler clock did not hold TIMER0, and the model treated
+that WFI as EM1. On silicon that image would have stopped TIMER0 and the M0+ under a radio
+deadline (the deep wake-up budget was 0, so a BURTC wake left 61 us for a 578 us HFXO/DPLL
+restart). The product has not run on silicon (7.84 used the radio-port images, PM off).
+
+**Model** (vendor/qemu `4091e7978b`, `48c5e8084c`).
+- Cortex-M sleep signals: the NVIC drives SLEEPING, SLEEPDEEP and WAKEUP (the level that wakes the
+  core); SCR.SLEEPDEEP is kept (it was RAZ/WI), shared by both Security states, RAZ/WI from
+  Non-secure under SLEEPDEEPS.
+- EMU: EM1 in WFI; EM2 5.23 us after a deep-sleep WFI (tEM2_ENT [DS 4.10]) when RAC is idle
+  ([RM 12.3.2.2], EMU_STATUS.RACACTIVE; [I] SHUTDOWN counts as idle) and no probe has powered the
+  debug domain (CTRL/STAT.CDBGPWRUPREQ; 7.74: EM2ENTERED stayed 0 with OpenOCD attached, whatever
+  EM2DBGEN). Otherwise the part sleeps in EM1 and enters EM2 when RAC goes idle. A wake-up before
+  5.23 us ends the sleep in EM1 [P].
+- In EM2 ([RM Table 12.2, 12.3.1.4]): both cores' clocks stop (the M0+ stopped whenever the M33 was
+  in EM2, 7.74), TIMER0-4 and the PROTIMER hold their counts, the HFXO has no requester, and the
+  hardware clears DPLL0.EN ([SDK] em_emu.c dpllState(): "the DPLL is disabled automatically when
+  entering EM2 ... won't re-enable automatically"). BURTC, RTCC/PRORTC, LETIMER, the IADC, the LF
+  oscillators and GPIO ports A/B run on; WDOG0 stops with CFG.EM2RUN = 0 ([RM 27.3.3]); ports C/D
+  hold their pads ([DS 3.3]) and, [I], their inputs, so an edge there sets its flag at the exit if
+  the level still differs. RAM, SEQRAM, FRCRAM and registers are kept: SYSCFG DMEM0RETNCTRL and
+  RADIORAMRETNCTRL reset to ALLON ([RM 6.6.1, 6.6.6.10]) and nothing writes them.
+- Exit: the NVIC's WAKEUP; the core runs 13.22 us later (tEM2_WU from flash, no voltage scaling
+  [DS 4.10]; 37.89 / 50.56 us with EMU_CTRL.EM23VSCALE one / two levels below), [P] the data
+  sheet's figure at 19 MHz HFRCO applied unchanged. SYSCLK and EM01GRPACLK then run from the
+  free-running HFRCODPLL, 76.748 MHz from a 76.8 MHz lock (7.74 [F]; [I] the same ratio from other
+  locks) until software enables the DPLL again, which requests the HFXO (5455 FSRCO cycles) and
+  locks 11588 HFXO cycles after (7.73). [I] A released M0+ resumes from its reset vector (7.74: found
+  in its idle loop with its reset handler's values). EMU_STATUS.EM2ENTERED sets at entry; [P] its
+  clear condition is not in the RM, so it stays set until a reset.
+- Accounting: virtual time in EM0/EM1/EM2 as QOM `em0-ns`/`em1-ns`/`em2-ns` on the peripheral
+  block, trace `efr32bg22_emu` at each EM2 transition and when the machine stops.
+- [U] Not modelled: LDMA requests and flash programming holding EM2 off, EM1P, peripheral wake-ups
+  to EM1, RAM power-down, EM3, EM4; USART/I2C/EUSART transfers in flight are not frozen (the
+  firmware never sleeps with one: their drivers lock EM2); the M33 SysTick keeps counting.
+- qtests (new): `emu-em2-entry-exit` (entry at 5.23 us, DPLL off, HFXO off, TIMER0 frozen 1 ms,
+  exit at 13.22 us, 7674-7675 TIMER0 counts per 100 us free-running, relock), `emu-em2-not-entered`
+  (early wake, debugger), `emu-em2-gpio-latch` (PA4 edge in EM2, PC4 edge at the exit),
+  `emu-em2-wdog` (EM2RUN), `emu-em2-wfi` (the M33's own WFI with SLEEPDEEP, BURTC wake-up).
+
+**Firmware** (`CONFIG_OWO_EM2`, on in the product; off locks EM2 from boot, `src/deep_sleep.c`).
+- What holds EM1 (`pm_policy_state_lock` on SUSPEND_TO_IDLE and STANDBY): the radio while the LLL
+  holds its power reference, from each event's prepare (`lll_clk_on()`) to its end
+  (`lll_clk_off()`); the count now starts at 0 between events, as OpenISA's `radio_setup()` leaves
+  it (it was pinned at 1); an armed stimulation session, with the same span as its watchdog lease
+  (`src/lib.rs`); the scheduler clock while a client waits on TIMER0 (already); I2C and UART
+  transfers (their drivers, already); an IADC sampling (vendor/zephyr `4ad30122959`: IADCCLK is
+  EM01GRPACLK on the xG22, which stops in EM2). The amateur identification holds no radio
+  reference, so `OWO_EM2` depends on `!EFR32_RADIO_AMATEUR`.
+- M0+ (7.74 left its state across EM2 open): on every state deeper than EM1 the radio's PM notifier
+  holds it in SEQRESET (FORCEDISABLE set, identity word and RX->TX decision word cleared) and on
+  the way out releases it with CPUWAITDIS as `radio_reset()` does; the next prepare's
+  `radio_reset()` finds its identity published. Correct whether silicon resets it, freezes it or
+  loses its context; the image stays in SEQRAM (retained by default, above).
+- HFXO/DPLL: `EMU_EnterEM2(true)` re-enables the DPLL and waits for its lock (HCLK /2 meanwhile)
+  before interrupts run; the scheduler clock then re-anchors TIMER0 on a BURTC edge
+  (`sched_pm_exit`), so TIMER0's lost count does not matter.
+- The wake-up lead: `CONFIG_CLOCK_EVENT_SCHED_DEEP_WAKE_NS` (root `Kconfig`, derived there):
+  tEM2_WU 13.22 + HFXO 276.71 (5480 FSRCO cycles at 19.804 MHz, the longest in 7.73) + DPLL 301.77
+  + re-anchor 30.52 (one BURTC cycle) + software 116.62 us = 738 837 ns. Software: in the model the
+  BURTC compare to the TIMER0 arm took 660.94-666.20 us (median 664.84, n = 2019 BURTC wake-ups
+  of the run below), less the model's 590.40 us of hardware = 75.80 us at most, its own re-anchor
+  wait included; the model runs the M33's paths up to 35 % short of silicon (7.93), so
+  75.80 / 0.65 [P until measured]. The scheduler adds two BURTC cycles (a compare may be that late):
+  a deep client wakes 799.9 us ahead and its deadline passes to TIMER0; in the model 131.7 us were
+  left at the worst arm. The prepare lead (XTAL 1500 + START 300) no longer has to cover the
+  restart (the 1505.7 us of 7.79): the ticker expiry that starts the chain is delivered on TIMER0
+  after it, and the chain is the 927.7 us of 7.79 [F silicon] / 1102.4 us [Q].
+- Bugs found on the way, fixed where they live:
+  1. vendor/zephyr `a7f0461f454` (pm): `pm_system_suspend()` chose the state, then programmed the
+     wakeup (`sys_clock_idle_enter()`); re-arming the timeout client could move it to TIMER0 and
+     lock EM2 after the choice. The part then entered EM2 with a TIMER0 deadline 169 us away,
+     slept until the watchdog's warning 46.9 ms later and reset. Now the state is checked again
+     after the wakeup is programmed.
+  2. vendor/zephyr `3136462975b` (soc: silabs): `EMU_EnterEM2()` leaves SCR.SLEEPDEEP set, so any
+     later `k_cpu_idle()` would enter EM2 outside the PM path; cleared after EM2/EM3.
+  3. vendor/zephyr `4ad30122959` (IADC, above).
+  4. The RX launch job overflowed its 408 B stack (STKOF in thread mode, then the watchdog): with
+     the wake budget its receive window's timeout waits on TIMER0 (lead < floor + budget), a deeper
+     path. 444 B measured, the same with EM2 off and only the budget set, so the budget, not EM2,
+     is the cause; `CONFIG_EFR32_RADIO_RX_LAUNCH_STACK_SIZE` 480 (444 + 36).
+- Safety while armed: EM2 is never entered while a session is armed (its inhibit is taken in
+  `on_frame()` before the supervisor arms and dropped by the pump only after the ordered safe-off,
+  as the watchdog lease). Not armed, the output is in its safe state (bridge low sides on, high
+  sides off, DAC 0, supplies off, boost PWM duty 0) and EM2 keeps it so: GPIO outputs are retained
+  ([RM 12.3.1.4]), the boost PWM's pin PC7 is latched at its level (low) and TIMER1 stops, the DAC
+  and expander are external. WDOG0 runs in EM2 (EM2RUN = 1, docs/watchdog.md) and its warning wakes
+  the part; the warning interrupt then runs after the DPLL relock (interrupts masked in
+  `pm_state_set()` until then, about 0.6 ms), inside the 15.6 ms to the reset. The power button
+  (expander /INT on PC4, port C, no EM2 wake-up) is seen at the next wake-up, at most the pump's
+  23.45 ms sleep cap later (docs/watchdog.md); while armed the part is in EM1, as before.
+
+**Verification** (QEMU, the build/qemu of this branch, `-icount shift=3,sleep=off`).
+- Link: the product (`owo_suit -DOWO_HW=ON`, `sim/product-qemu.conf`, `jump16000.S` stand-in,
+  suit board model) against the Zephyr Central with `prj-central-product-stim.conf`, 900 s wall:
+  LE Secure Connections to level 4, 840/840 encrypted GATT rounds, 85 stimulation cycles over the
+  link (widths, Start, frame, a bad frame answered, Stop), no disconnection, deadline misses 0,
+  late clock events 0, no watchdog warning, 39 757 EM2 entries. Virtual time 1196.2 s:
+
+| | EM0 | EM1 | EM2 |
+|---|---|---|---|
+| product (EM2 on) | 77.9 s (6.5 %) | 598.6 s (50.0 %) | 519.6 s (43.4 %) |
+| the Central (PM off, for scale) | 14.1 s (1.2 %) | 1182.1 s (98.8 %) | 0 |
+
+  EM1 remains half the time: between a radio event's prepare and end the radio holds EM1, deep
+  clients closer than 0.98 ms (floor 183 us + 799.9 us) wait on TIMER0, and each EM2 wake is
+  followed by 0.8 ms of EM1/EM0 restart.
+- Stimulation scenarios: the 31 scenarios of `sim/scripts/make_scenarios.py` (suit board model,
+  `CONFIG_OWO_SIM_INJECT`; the radio rows on the silicon-timing image), the product with EM2 on
+  this model against master (`3cf3057`, vendor/zephyr `7b29ba0f741`) on the model before it
+  (vendor/qemu `0e26291f4c`). Same outcome in every row compared: the same fault and latch
+  (SenseTimeout, BatteryLow, UnderDelivery, Overdrive, SenseNotZero, Hw), the same resets (the
+  hang rows, within 0.4 ms), the same final output state, no shoot-through. Baseline 173 / 173
+  pulses. The pulse train runs 2.27 ms earlier (boot timing), so where a command lands within one
+  pulse of it the count differs by one: stop 49 / 48, disconnect 49 / 48, early-stop 4 / 3,
+  expander-nack and i2c-stuck 52 / 51, battery-sag 100 / 101. radio-shutdown: 48 pulses, the last
+  drive ending at 4981.7 ms, as 7.92 / docs/stim-simulation.md; master's run could not inject it
+  (gdb found no callable miss report at that pause), and radio-shutdown-mid-pulse failed on both
+  trees (gdb, stopped in a Rust frame, cannot take `&efr32_radio_miss`): a harness limit, not
+  compared. The stock image on the EM2 model (it enters EM2 itself): 1752 pulses, no resets, as
+  7.92. master's own image on the EM2 model never stimulated (fired 0): its PM path entered EM2
+  with nothing handled (Before).
+- Stack high-water marks with EM2 (enlarged stacks, 90 s of the link run): idle 332 of 512, ISR 540,
+  LLL 656, ULL 532, completion 604, RX launch 444, TX launch 260.
+- RAM (`scripts/check-hardware-ram.sh`, 31 000 B limit): kit 29 716 B, suit 29 308 B, suit `-DOWO_HW=ON` 30 724 B (+96, +88, +80: the RX launch stack, the notifier and the locks).
+- qtests: efr32bg22-test 132/132 (5 new), efr32bg22-rf-test 44/44, efr32bg22-board-test 8/8,
+  efr32bg22-dap-test 13/13. `scripts/test-native-sim.sh`: all passed.
+
+**Silicon measurements needed** (each replaces a placeholder above):
+1. The wake path on the product: BURTC compare to the first instruction (tEM2_WU from the 76.8 MHz
+   free-running HFRCO, not the data sheet's 19 MHz), to DPLL lock and to the TIMER0 arm
+   (PRS BURTC -> TIMER1 capture, DWT stamps): replaces `OWO_EM2_WAKE_SOFTWARE_NS`.
+2. HFXO restart after EM2 (warm crystal; 7.73 has only the cold start) and the DPLL lock from it.
+3. HFRCODPLL's free-running rate after EM2 at the product's lock (7.74: 76.748 MHz).
+4. The M0+ across EM2: reset, frozen or context lost; and with the firmware's SEQRESET park, the
+   release-to-identity time.
+5. SEQRAM, FRCRAM and DMEM retention across EM2 (pattern test), and EMU_STATUS.EM2ENTERED's clear
+   condition.
+6. tEM2_ENT and a wake-up request during entry.
+7. A port C/D input edge during EM2: latched to the exit (the model) or lost.
+8. EM2 and average current of the product: advertising, connected idle, after a session (the
+   0.6 ms restart per wake-up and the pump's 42 wakes/s, docs/watchdog.md).
+9. The prepare chain from an EM2 wake on silicon (7.79 item 7, 7.84 item 8).
+
+**Open.** EM3/EM4; EM1P (radio in EM2); a pulse phase stretched by radio work: the
+same image with EM2 locked out (`CONFIG_OWO_EM2=n`) stopped every scenario at 4.52 s with
+PhaseOverrun (a 213 us phase: width 62.5 + `overrun_slack_us` 150 exceeded by 0.5 us), and at 85
+pulses on the earlier model too; master's timing and EM2's did not hit it in these runs. A meta-IRQ
+radio job inside a phase (LLL budget 249.1 us silicon, 266.9 us QEMU, 7.79) exceeds the slack, so
+whether a session survives depends on where the radio events fall: the slack and the radio budgets
+need reconciling (not changed here).

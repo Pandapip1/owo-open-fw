@@ -167,9 +167,9 @@ Implements, with RM citations in the source: CFG BusFault while enabled; CMD as 
 (`SYNCBUSY.CMD`, clear on completion after 4 cycles, BusFault on a second write and on
 disabling while pending); LOCK on EN and CFG; `CMU_WDOGLOCK` on the clock selection and
 `CMU_STATUS.WDOGLOCK`; the warning at WARNSEL quarters with IF as an INTFLAG (a clear does not
-clear IF.WARN); DEBUGRUN against the M33 debug unit's halt state. EM2RUN/EM3RUN = 1 is what the
-model does in every sleep (it does not distinguish sleep depths); enabling with either bit 0 is
-logged as unimplemented. Trace events: `config`, `enable`, `lock`, `clear` (with the count),
+clear IF.WARN); DEBUGRUN against the M33 debug unit's halt state; EM2RUN against the EMU's EM2
+(`docs/radio-tables.md` 7.95). EM3 is not modelled: enabling with EM3RUN = 0 is logged as
+unimplemented. Trace events: `config`, `enable`, `lock`, `clear` (with the count),
 `warning`, `timeout`, `bus-error`, `freeze`, `thaw`.
 
 ## Blockers (outside this change, found while measuring) [E]

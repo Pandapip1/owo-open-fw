@@ -32,6 +32,33 @@ const _: () = assert!(BUILD_SERIAL.len() <= SERIAL_LEN, "OWO_SERIAL is at most 1
 
 extern "C" {
     fn owo_serial_read(out: *mut u8) -> core::ffi::c_int;
+    #[cfg(CONFIG_PM)]
+    fn owo_deep_sleep_inhibit(inhibit: bool);
+}
+
+/// Keeps the part out of EM2 while it exists (src/deep_sleep.c): EM2 stops the output stage's
+/// clocks and the supervisor's cadence, so an armed session holds one.
+struct DeepSleepInhibit;
+
+impl DeepSleepInhibit {
+    fn new() -> Self {
+        // SAFETY: a lock count in the power manager; taken once per value.
+        #[cfg(CONFIG_PM)]
+        unsafe {
+            owo_deep_sleep_inhibit(true)
+        };
+        Self
+    }
+}
+
+impl Drop for DeepSleepInhibit {
+    fn drop(&mut self) {
+        // SAFETY: releases the count `new` took.
+        #[cfg(CONFIG_PM)]
+        unsafe {
+            owo_deep_sleep_inhibit(false)
+        };
+    }
 }
 
 pub(crate) struct Serial {
@@ -67,6 +94,9 @@ pub(crate) struct State {
     /// Held exactly while the stimulation supervisor is armed: its safety predicate must
     /// hold for every watchdog feed (src/wdt.rs).
     stim_watchdog: Option<wdt::Lease>,
+    /// Held with `stim_watchdog` while an output session is armed (a dry run, with nothing
+    /// to supervise, lets go at the pump's next pass).
+    deep_sleep: Option<DeepSleepInhibit>,
     /// Last-written values, returned on read (the stock firmware keeps them in RAM).
     pub v_widths: [u8; proto::WIDTHS_LEN],
     pub v_frame: [u8; proto::FRAME_LEN],
@@ -92,6 +122,7 @@ pub(crate) static STATE: Mutex<State> = Mutex::new(State {
     },
     out: hal::Output::new(),
     stim_watchdog: None,
+    deep_sleep: None,
     v_widths: [0; proto::WIDTHS_LEN],
     v_frame: [0; proto::FRAME_LEN],
     v_power: [0; proto::POWER_LEN],
@@ -181,6 +212,9 @@ pub(crate) fn on_frame(buf: &[u8]) -> Result<(), proto::Error> {
             proto::Error::Range
         })?);
     }
+    if s.deep_sleep.is_none() {
+        s.deep_sleep = Some(DeepSleepInhibit::new());
+    }
     let now = now_us();
     s.out.frame_received(now, f.total as u64 * 100_000, f.first);
     s.engine.push(&f, now).map_err(|_| proto::Error::Range)?; // queue full
@@ -244,8 +278,10 @@ pub(crate) fn stop_all() {
     s.engine.stop();
     s.out.all_off();
     let watchdog = s.stim_watchdog.take();
+    let deep_sleep = s.deep_sleep.take();
     drop(s);
     drop(watchdog);
+    drop(deep_sleep);
 }
 
 /// Establish the application safety baseline after every reset.
@@ -346,13 +382,13 @@ extern "C" fn rust_main() {
                 }
             };
             s.out.poll(now_us());
-            let watchdog = (!s.out.monitoring_required())
-                .then(|| s.stim_watchdog.take())
-                .flatten();
-            (wake, s.out.poll_interval_us(), watchdog)
+            let ended = !s.out.monitoring_required();
+            let watchdog = ended.then(|| s.stim_watchdog.take()).flatten();
+            let deep_sleep = ended.then(|| s.deep_sleep.take()).flatten();
+            (wake, s.out.poll_interval_us(), (watchdog, deep_sleep))
         };
         // The supervisor has already completed its ordered safe-off path; its feed predicate
-        // goes with the session.
+        // and its hold on EM1 go with the session.
         drop(watchdog);
         // The supervision pass is complete: feed if the feed condition holds (src/wdt.rs).
         if !wdt::feed() {

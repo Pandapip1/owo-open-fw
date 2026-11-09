@@ -71,6 +71,34 @@ config OWO_WATCHDOG_FREEZE_IN_DEBUG
 
 endif # OWO_WATCHDOG
 
+config OWO_EM2
+	bool "Deep sleep (EM2) between radio events and stimulation"
+	depends on PM
+	depends on !EFR32_RADIO_AMATEUR
+	help
+	  Let the idle thread enter EM2 whenever nothing needs EM0/EM1: no radio event between its
+	  prepare and its end (modules/efr32-radio hal/radio.c), no armed stimulation session and no
+	  conversion in flight (src/deep_sleep.c, modules/owo-stim), no clock event closer than the
+	  wake-up below (the scheduler clock locks EM2 out while it needs TIMER0), no I2C or UART
+	  transfer (their drivers' locks). Without it the product only ever idles in EM1. The
+	  amateur identification's radio slot holds no radio reference, so it excludes EM2.
+	  docs/radio-tables.md 7.95.
+
+# EM2 exit to a running active clock, what a BURTC wake-up must lead a deadline by
+# (docs/radio-tables.md 7.95): the wake-up from EM2 without voltage scaling, 13.22 us (data sheet
+# Table 4.10, tEM2_WU); the HFXO start, 5480 FSRCO cycles at 19.804 MHz = 276.71 us, and the
+# DPLL lock after it, 11588 HFXO cycles at 38.4 MHz = 301.77 us (7.73, the longest of each), as
+# the restore in EMU_EnterEM2() waits for them; the scheduler clock's re-anchor, at most one
+# BURTC cycle (30.52 us); and the software from the wake to the active provider's arm. That last
+# is the model's [Q]: over 2019 BURTC wake-ups of the product (pairing, GATT and stimulation over
+# the link) the compare-to-TIMER0-arm time was at most 666.20 us, less the model's 590.40 us of
+# hardware (tEM2_WU, HFXO 5455 cycles, DPLL), 75.80 us, its own re-anchor wait included (so
+# counted twice); the model runs the M33's paths up to 35 % short of silicon (7.93), so
+# 75.80 / 0.65. Unmeasured on silicon.
+OWO_EM2_WAKE_SOFTWARE_NS := 116616
+configdefault CLOCK_EVENT_SCHED_DEEP_WAKE_NS
+	default $(add,13220,276712,301771,30518,$(OWO_EM2_WAKE_SOFTWARE_NS)) if OWO_EM2
+
 # Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
 osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
 source "Kconfig.zephyr"

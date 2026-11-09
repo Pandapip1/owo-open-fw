@@ -19,6 +19,8 @@
 #include <zephyr/irq.h>
 #include <zephyr/kernel/clock_event.h>
 #include <zephyr/kernel/deadline_miss.h>
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/policy.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <soc.h>
@@ -955,12 +957,14 @@ static void efr32_radio_launch_disarm(void)
 }
 /*
  * OpenISA uses sleep/wake as a reference-counted clock-availability
- * contract.  xG22 radio power sequencing has not been characterized, so
- * this intentionally represents immediate software availability only; it is
- * not a claim that RAC idle, an EN bit, or any other MMIO state is powered
- * down.  radio_setup() establishes the initial caller-held reference.
+ * contract: the LLL holds a reference from each event's prepare to its end
+ * (lll_clk_on(), lll_clk_off()).  xG22 radio power sequencing has not been
+ * characterized, so this intentionally represents immediate software
+ * availability only; it is not a claim that RAC idle, an EN bit, or any
+ * other MMIO state is powered down.  While a reference is held the part
+ * stays out of EM2, which stops the radio chain (efr32_radio_pm_hold()).
  */
-static atomic_t efr32_radio_power_ref = ATOMIC_INIT(1);
+static atomic_t efr32_radio_power_ref = ATOMIC_INIT(0);
 static uint8_t MALIGN(4) pkt_empty[PDU_EM_LL_SIZE_MAX];
 /*
  * Largest payload length any radio_pkt_configure() caller declares in this configuration
@@ -1550,6 +1554,65 @@ static void efr32_radio_sequencer_install(void)
 	}
 	__DSB();
 }
+
+/*
+ * EM2 stops the radio chain, the M0+ included (RM Table 12.2; the M0+ stopped whenever the M33
+ * was in EM2, docs/radio-tables.md 7.74), and after an EM2 wake on silicon the M0+ was found in
+ * its idle loop with its reset handler's state (7.74): whether it is reset or loses its context
+ * is not known. So it is held in reset across every state deeper than EM1 and started from its
+ * reset vector on the way out, as radio_reset() starts it; the next radio_reset() waits for its
+ * identity. Its image stays in SEQRAM (retained: SYSCFG RADIORAMRETNCTRL resets to ALLON, RM
+ * 6.6.6.10, and nothing writes it). Events hold EM1 (efr32_radio_pm_hold()), so this runs only
+ * between them.
+ */
+static void efr32_radio_pm_hold(bool hold)
+{
+#if defined(CONFIG_PM)
+	if (hold) {
+		pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+	} else {
+		pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_IDLE, PM_ALL_SUBSTATES);
+		pm_policy_state_lock_put(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+	}
+#else
+	ARG_UNUSED(hold);
+#endif
+}
+
+#if defined(CONFIG_PM)
+static void efr32_radio_pm_entry(enum pm_state state)
+{
+	if (state == PM_STATE_RUNTIME_IDLE) {
+		return;
+	}
+	__ASSERT_NO_MSG(atomic_get(&efr32_radio_power_ref) == 0);
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH | EFR32_RAC_CTRL_FORCEDISABLE |
+		EFR32_RAC_CTRL_SEQRESET;
+	if (efr32_radio_seq_image_is_open) {
+		*radio_reg32(EFR32_SEQ_IDENTITY_ADDRESS) = 0U;
+		*radio_reg32(EFR32_SEQ_RX2TX_DECISION_ADDRESS) = EFR32_SEQ_RX2TX_IDLE;
+	}
+}
+
+static void efr32_radio_pm_exit(enum pm_state state)
+{
+	if (state == PM_STATE_RUNTIME_IDLE) {
+		return;
+	}
+	*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_CTRL_OFFSET) =
+		EFR32_RAC_CTRL_ACTIVE_HIGH | EFR32_RAC_CTRL_PA_ENABLE_HIGH |
+		EFR32_RAC_CTRL_LNA_ENABLE_HIGH | EFR32_RAC_CTRL_FORCEDISABLE |
+		EFR32_RAC_CTRL_CPUWAITDIS;
+}
+
+static struct pm_notifier efr32_radio_pm_notifier = {
+	.state_entry = efr32_radio_pm_entry,
+	.state_exit = efr32_radio_pm_exit,
+};
+#endif
 
 static void efr32_radio_sequencer_wait_ready(void)
 {
@@ -3805,8 +3868,18 @@ void radio_setup(void)
 	 * for the image copy, verify and core start ahead of its launch. */
 	radio_reset();
 
-	/* Match OpenISA's initially available radio-clock contract. */
-	atomic_set(&efr32_radio_power_ref, 1);
+	/* As OpenISA's radio_setup() leaves it: no reference held between events. */
+	if (atomic_set(&efr32_radio_power_ref, 0) > 0) {
+		efr32_radio_pm_hold(false);
+	}
+#if defined(CONFIG_PM)
+	static bool pm_registered;
+
+	if (!pm_registered) {
+		pm_registered = true;
+		pm_notifier_register(&efr32_radio_pm_notifier);
+	}
+#endif
 
 	/* Never leave BUFC's RX channel at its reset ADDR (0x20000000, start of
 	 * RAM); see efr32_hw_rx_fifo_preconfigured. */
@@ -5929,6 +6002,9 @@ uint32_t radio_sleep(void)
 			return (uint32_t)-EALREADY;
 		}
 	} while (!atomic_cas(&efr32_radio_power_ref, previous, previous - 1));
+	if (previous == 1) {
+		efr32_radio_pm_hold(false);
+	}
 
 	return 0;
 }
@@ -5936,7 +6012,9 @@ uint32_t radio_sleep(void)
 /* [software] Immediate reference-counted availability; hardware wake is unknown (T1, T2). */
 uint32_t radio_wake(void)
 {
-	atomic_inc(&efr32_radio_power_ref);
+	if (atomic_inc(&efr32_radio_power_ref) == 0) {
+		efr32_radio_pm_hold(true);
+	}
 	return 0;
 }
 
