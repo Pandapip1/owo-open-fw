@@ -17,17 +17,22 @@ BUILD_DIR=${BUILD_DIR:-"$ROOT/build/radio-rx-port-qemu"}
 QEMU_BIN=${QEMU_BIN:-"$ROOT/build/qemu/qemu-system-arm"}
 RUN_SECONDS=${1:-3}
 IMAGE="$BUILD_DIR/zephyr/zephyr.bin"
+ELF=${ELF:-"$BUILD_DIR/zephyr/zephyr.elf"}
 
-if [ ! -x "$QEMU_BIN" ] || [ ! -f "$IMAGE" ]; then
-    echo "missing QEMU binary or scanner image" >&2
+if [ ! -x "$QEMU_BIN" ] || [ ! -f "$IMAGE" ] || [ ! -f "$ELF" ]; then
+    echo "missing QEMU binary, or the scanner image or ELF" >&2
     exit 2
 fi
 
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-rx-port-qemu-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+IMAGE=$(realpath "$IMAGE")
 
-"$QEMU_BIN" -M efr32bg22,flash="$IMAGE" \
-    -display none -monitor none -icount shift=5 -d guest_errors \
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$RUNTIME_DIR" && exec "$QEMU_BIN" -M efr32bg22,flash="$IMAGE" \
+    -display none -monitor none $MISS_QMP_ARGS -icount shift=5 -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
@@ -36,9 +41,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 qemu_pid=$!
 (
     sleep "$RUN_SECONDS"
-    kill -TERM "$qemu_pid" 2>/dev/null || exit 0
-    sleep 1
-    kill -KILL "$qemu_pid" 2>/dev/null || true
+    miss_count_end "$qemu_pid" "$ELF"
 ) &
 watchdog_pid=$!
 
@@ -55,6 +58,8 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     sed -n '1,80p' "$RUNTIME_DIR/guest.log" >&2
     exit "$status"
 fi
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_count_check radio-rx-smoke
 
 console=$(sed -n 's/.*USART1 TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
     "$RUNTIME_DIR/radio.trace" | xxd -r -p | tr -d '\r')

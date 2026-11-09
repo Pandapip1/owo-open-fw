@@ -15,14 +15,28 @@ RUN_SECONDS=${1:-300}
 MIN_IDS=${MIN_IDS:-2}
 OUT=${OUT:-"$ROOT/build/amateur-periodic"}
 
+ELF=${ELF:-"${IMAGE%.bin}.elf"}
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
-timeout "$RUN_SECONDS" "$QEMU_BIN" -M "efr32bg22,flash=$IMAGE" \
-    -display none -monitor none -icount shift=3,sleep=off \
+RUNTIME_DIR=$OUT
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+IMAGE=$(realpath "$IMAGE")
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$OUT" && exec "$QEMU_BIN" -M "efr32bg22,flash=$IMAGE" \
+    -display none -monitor none $MISS_QMP_ARGS -icount shift=3,sleep=off \
     -serial null -serial "file:$OUT/console.raw" \
     -trace enable=efr32bg22_ook_tx -trace enable=efr32bg22_rac_state \
-    -trace file="$OUT/radio.trace" >"$OUT/qemu.log" 2>&1 || true
+    -trace file="$OUT/radio.trace" >"$OUT/qemu.log" 2>&1 &
+qemu_pid=$!
+sleep "$RUN_SECONDS"
+miss_count_end "$qemu_pid" "$ELF"
+wait "$qemu_pid" || true
 tr -d '\r' <"$OUT/console.raw" >"$OUT/console.txt"
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_status=0
+miss_count_check amateur-periodic || miss_status=1
 
 python3 - "$OUT" "$MIN_IDS" <<'EOF'
 import re, sys
@@ -62,3 +76,4 @@ for i, l in enumerate(lines):
 print("amateur-periodic:", "FAIL" if fail else "PASS")
 sys.exit(1 if fail else 0)
 EOF
+exit "$miss_status"

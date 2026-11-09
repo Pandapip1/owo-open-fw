@@ -39,6 +39,10 @@ CALLSIGN=${CALLSIGN:-KD3APL}
 APP_NAME=${APP_NAME:-owo-app}
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-3}
 OUT=${OUT:-"$ROOT/build/amateur-data-$MODE"}
+TX_ELF=${TX_ELF:-"${TX_IMAGE%.bin}.elf"}
+RX_ELF=${RX_ELF:-"${RX_IMAGE%.bin}.elf"}
+RUNTIME_DIR=$OUT
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
 
 for f in "$QEMU_BIN" "$TX_IMAGE" "$RX_IMAGE"; do
     if [ ! -e "$f" ]; then
@@ -57,17 +61,28 @@ grep -a --line-buffered -E 'TX snapshot sequence|OOK TX|addr=0x(a|b)8018034 ' \
     <"$OUT/trace.fifo" >"$OUT/radio.trace" &
 FILTER=$!
 
-timeout "$RUN_SECONDS" "$QEMU_BIN" \
+QEMU_BIN=$(realpath "$QEMU_BIN")
+TX_IMAGE=$(realpath "$TX_IMAGE")
+RX_IMAGE=$(realpath "$RX_IMAGE")
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$OUT" && exec "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" \
+    -display none -monitor none $MISS_QMP_ARGS -icount "shift=$ICOUNT_SHIFT,sleep=off" \
     -serial null -serial "file:$OUT/console0.raw" -serial null -serial "file:$OUT/console1.raw" \
     -trace enable=efr32bg22_tx_snapshot \
     -trace enable=efr32bg22_ook_tx \
     -trace enable=efr32bg22_endpoint_radio_write \
-    -trace file="$OUT/trace.fifo" >"$OUT/qemu.log" 2>&1 || true
+    -trace file="$OUT/trace.fifo" >"$OUT/qemu.log" 2>&1 &
+qemu_pid=$!
+sleep "$RUN_SECONDS"
+miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
+wait "$qemu_pid" || true
 wait "$FILTER" || true
 rm -f "$OUT/trace.fifo"
 fi
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_status=0
+miss_count_check amateur-data-e2e || miss_status=1
 
 for ep in 0 1; do
     tr -d '\r' <"$OUT/console$ep.raw" >"$OUT/console$ep.txt" 2>/dev/null || : >"$OUT/console$ep.txt"
@@ -175,3 +190,4 @@ else:
 print("amateur-data-e2e (%s): %s" % (mode, "FAIL" if fail else "PASS"))
 sys.exit(1 if fail else 0)
 EOF
+exit "$miss_status"

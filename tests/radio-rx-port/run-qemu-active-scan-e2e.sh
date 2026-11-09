@@ -28,9 +28,12 @@ ICOUNT_SHIFT=${ICOUNT_SHIFT:-3}
 MAX_TIFS_JOB_HANDOFF_NS=${MAX_TIFS_JOB_HANDOFF_NS:-100000}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
+TX_ELF=${TX_ELF:-"$TX_BUILD_DIR/zephyr/zephyr.elf"}
+RX_ELF=${RX_ELF:-"$RX_BUILD_DIR/zephyr/zephyr.elf"}
 
-if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ]; then
-    echo "active-scan-e2e: missing QEMU binary, advertiser image, or active scanner image" >&2
+if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ] ||
+   [ ! -f "$TX_ELF" ] || [ ! -f "$RX_ELF" ]; then
+    echo "active-scan-e2e: missing QEMU binary, or an advertiser or active scanner image or ELF" >&2
     exit 2
 fi
 
@@ -43,10 +46,16 @@ esac
 
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-active-scan-e2e-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+TX_IMAGE=$(realpath "$TX_IMAGE")
+RX_IMAGE=$(realpath "$RX_IMAGE")
 
-"$QEMU_BIN" \
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$RUNTIME_DIR" && exec "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
+    -display none -monitor none $MISS_QMP_ARGS \
+    -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
@@ -64,9 +73,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 qemu_pid=$!
 (
     sleep "$RUN_SECONDS"
-    kill -TERM "$qemu_pid" 2>/dev/null || exit 0
-    sleep 1
-    kill -KILL "$qemu_pid" 2>/dev/null || true
+    miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
 ) &
 watchdog_pid=$!
 
@@ -87,6 +94,8 @@ fi
 if [ -n "${TRACE_OUT:-}" ]; then
     cp "$RUNTIME_DIR/radio.trace" "$TRACE_OUT"
 fi
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_count_check active-scan-e2e
 
 console=$(sed -n 's/.*USART[01] TX=0x\([[:xdigit:]][[:xdigit:]]\).*/\1/p' \
     "$RUNTIME_DIR/radio.trace" |

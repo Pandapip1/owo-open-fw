@@ -25,9 +25,8 @@
 # the whole run and the central reports no disconnection. The Peripheral tracks
 # the Central's anchor from the received frames' end, dated from RAC.STIMER
 # (docs/radio-tables.md 7.79). What it does not prove: spec timing in QEMU. The
-# model runs lll_conn's turnaround callbacks past their spec-derived start-by
-# deadlines, so these QEMU-only profiles count misses instead of shutting the
-# radio down (7.79 attributes every one); nor anything about silicon.
+# QEMU-only profiles count deadline misses instead of shutting the radio down,
+# and the run fails on any (qemu-miss-count.sh); nor anything about silicon.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -38,18 +37,27 @@ RUN_SECONDS=${1:-8}
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-3}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
+TX_ELF=${TX_ELF:-"$TX_BUILD_DIR/zephyr/zephyr.elf"}
+RX_ELF=${RX_ELF:-"$RX_BUILD_DIR/zephyr/zephyr.elf"}
 
-if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ]; then
-	echo "connection-e2e: missing QEMU binary, advertiser image, or central image" >&2
+if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ] ||
+   [ ! -f "$TX_ELF" ] || [ ! -f "$RX_ELF" ]; then
+	echo "connection-e2e: missing QEMU binary, or an endpoint's image or ELF" >&2
 	exit 2
 fi
 
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-connection-e2e-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+TX_IMAGE=$(realpath "$TX_IMAGE")
+RX_IMAGE=$(realpath "$RX_IMAGE")
 
-"$QEMU_BIN" \
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$RUNTIME_DIR" && exec "$QEMU_BIN" \
 	-M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE${MACHINE_OPTS:+,$MACHINE_OPTS}" \
-	-display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
+	-display none -monitor none $MISS_QMP_ARGS \
+	-icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
 	-D "$RUNTIME_DIR/qemu.log" \
 	-chardev file,id=soc0.usart1,path="$RUNTIME_DIR/console0" \
 	-chardev file,id=soc1.usart1,path="$RUNTIME_DIR/console1" \
@@ -61,9 +69,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 qemu_pid=$!
 (
 	sleep "$RUN_SECONDS"
-	kill -TERM "$qemu_pid" 2>/dev/null || exit 0
-	sleep 1
-	kill -KILL "$qemu_pid" 2>/dev/null || true
+	miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
 ) &
 watchdog_pid=$!
 
@@ -80,6 +86,9 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
 	sed -n '1,120p' "$RUNTIME_DIR/guest.log" >&2
 	exit "$status"
 fi
+
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_count_check connection-e2e
 
 # Each endpoint's console (USART1, the boards' zephyr,console) goes to its own file, so the
 # two guests' lines cannot interleave.
@@ -172,4 +181,3 @@ if ! printf '%s\n' "$console" | grep -aq 'gatt_rw: [0-9]* rounds, [0-9]* ok, 0 f
 fi
 
 echo "connection-e2e: QEMU connection established and sustained (CONNECT_IND delivered, central err 0, $post_handoff_rx Peripheral windows, $answers answers, no disconnection)"
-echo "connection-e2e: not a timing claim: the profiles count deadline misses (docs/radio-tables.md 7.79)"

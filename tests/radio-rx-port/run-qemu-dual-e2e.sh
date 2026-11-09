@@ -23,18 +23,27 @@ MIN_DESCRIPTOR_ACKS=${MIN_DESCRIPTOR_ACKS:-65}
 ICOUNT_SHIFT=${ICOUNT_SHIFT:-1}
 TX_IMAGE="$TX_BUILD_DIR/zephyr/zephyr.bin"
 RX_IMAGE="$RX_BUILD_DIR/zephyr/zephyr.bin"
+TX_ELF=${TX_ELF:-"$TX_BUILD_DIR/zephyr/zephyr.elf"}
+RX_ELF=${RX_ELF:-"$RX_BUILD_DIR/zephyr/zephyr.elf"}
 
-if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ]; then
-    echo "missing QEMU binary, advertiser image, or scanner image" >&2
+if [ ! -x "$QEMU_BIN" ] || [ ! -f "$TX_IMAGE" ] || [ ! -f "$RX_IMAGE" ] ||
+   [ ! -f "$TX_ELF" ] || [ ! -f "$RX_ELF" ]; then
+    echo "missing QEMU binary, or an advertiser or scanner image or ELF" >&2
     exit 2
 fi
 
 RUNTIME_DIR=$(mktemp -d "$ROOT/build/radio-dual-e2e-runtime.XXXXXX")
 trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+TX_IMAGE=$(realpath "$TX_IMAGE")
+RX_IMAGE=$(realpath "$RX_IMAGE")
 
-"$QEMU_BIN" \
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$RUNTIME_DIR" && exec "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
+    -display none -monitor none $MISS_QMP_ARGS \
+    -icount "shift=$ICOUNT_SHIFT,sleep=off" -d guest_errors \
     -D "$RUNTIME_DIR/qemu.log" \
     -trace enable=efr32bg22_usart_tx \
     -trace enable=efr32bg22_radio_write \
@@ -47,9 +56,7 @@ trap 'rm -rf "$RUNTIME_DIR"' EXIT HUP INT TERM
 qemu_pid=$!
 (
     sleep "$RUN_SECONDS"
-    kill -TERM "$qemu_pid" 2>/dev/null || exit 0
-    sleep 1
-    kill -KILL "$qemu_pid" 2>/dev/null || true
+    miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
 ) &
 watchdog_pid=$!
 
@@ -66,6 +73,9 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     sed -n '1,120p' "$RUNTIME_DIR/guest.log" >&2
     exit "$status"
 fi
+
+# Every guest that counts deadline misses must have none (qemu-miss-count.sh).
+miss_count_check radio-dual-e2e
 
 # The tracepoint is emitted for every modeled USART instance.  The current
 # board images use USART1, while accepting USART0 here keeps the harness from

@@ -26,17 +26,29 @@ for f in "$QEMU_BIN" "$TX_IMAGE" "$RX_IMAGE"; do
         exit 2
     fi
 done
+TX_ELF=${TX_ELF:-"${TX_IMAGE%.bin}.elf"}
+RX_ELF=${RX_ELF:-"${RX_IMAGE%.bin}.elf"}
 rm -rf "$OUT"
 mkdir -p "$OUT"
+RUNTIME_DIR=$OUT
+. "$ROOT/tests/radio-rx-port/qemu-miss-count.sh"
+QEMU_BIN=$(realpath "$QEMU_BIN")
+TX_IMAGE=$(realpath "$TX_IMAGE")
+RX_IMAGE=$(realpath "$RX_IMAGE")
 
-timeout "$RUN_SECONDS" "$QEMU_BIN" \
+# shellcheck disable=SC2086 # MISS_QMP_ARGS is two words
+cd "$OUT" && exec "$QEMU_BIN" \
     -M "efr32bg22-dual,flash0=$TX_IMAGE,flash1=$RX_IMAGE" \
-    -display none -monitor none -icount "shift=$ICOUNT_SHIFT,sleep=off" \
+    -display none -monitor none $MISS_QMP_ARGS -icount "shift=$ICOUNT_SHIFT,sleep=off" \
     -serial null -serial "file:$OUT/console0.raw" -serial null -serial "file:$OUT/console1.raw" \
     -trace enable=efr32bg22_tx_snapshot \
     -trace enable=efr32bg22_ook_tx \
     -trace enable=efr32bg22_endpoint_radio_write \
-    -trace file="$OUT/radio.trace" >"$OUT/qemu.log" 2>&1 || true
+    -trace file="$OUT/radio.trace" >"$OUT/qemu.log" 2>&1 &
+qemu_pid=$!
+sleep "$RUN_SECONDS"
+miss_count_end "$qemu_pid" "$TX_ELF" "$RX_ELF"
+wait "$qemu_pid" || true
 
 # Console of each machine (USART1; serial ports 0-1 are machine 0's USART0-1, 2-3 machine 1's).
 for ep in 0 1; do
@@ -47,6 +59,7 @@ echo "--- scanner"; grep -aE 'amateur|scan_|bt_enable|SAFE|efr32-radio' "$OUT/co
 echo "--- scanner names: $(grep -ac "^rx_name: $CALLSIGN addr=" "$OUT/console1.txt" || true)"
 
 fail=0
+miss_count_check amateur-e2e || fail=1
 grep -aq 'amateur-selftest: PASS' "$OUT/console0.txt" || { echo "FAIL: advertiser self-test"; fail=1; }
 grep -aq '^amateur: enable 0' "$OUT/console0.txt" || { echo "FAIL: advertiser enable"; fail=1; }
 grep -aq '^amateur: enable 0' "$OUT/console1.txt" || { echo "FAIL: scanner enable"; fail=1; }
