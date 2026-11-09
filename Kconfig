@@ -99,6 +99,20 @@ OWO_EM2_WAKE_SOFTWARE_NS := 116616
 configdefault CLOCK_EVENT_SCHED_DEEP_WAKE_NS
 	default $(add,13220,276712,301771,30518,$(OWO_EM2_WAKE_SOFTWARE_NS)) if OWO_EM2
 
+# The system work queue runs only the host's own items in the product: 420 B on silicon (7.86)
+# + 36 for an interrupt's basic frame. OWO_SIM_INJECT's 1 ms mailbox item reaches the GATT write
+# path from it, 708 B (QEMU, 7.86) + 36.
+configdefault SYSTEM_WORKQUEUE_STACK_SIZE
+	default 744 if OWO_SIM_INJECT
+	default 456
+
+# The controller's RX threads: 408 B and 416 B on silicon (7.86), the largest of every source,
+# + 36 each. Ahead of the radio module's own default for the priority thread.
+configdefault BT_CTLR_RX_STACK_SIZE
+	default 448
+configdefault BT_CTLR_RX_PRIO_STACK_SIZE
+	default 456
+
 # Module defaults that must precede Zephyr's own (modules/efr32-radio/Kconfig.defaults).
 osource "$(ZEPHYR_EFR32_RADIO_MODULE_DIR)/Kconfig.defaults"
 source "Kconfig.zephyr"

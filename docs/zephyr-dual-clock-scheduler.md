@@ -281,9 +281,18 @@ recurring jobs at any time: a one-shot job the simulation starts at s starts by 
 x = s + B + R(x) + W(s, x) (R the reservations' work in an interval of length x, W the one-shot
 work released after s that runs ahead of it); a recurring job starts within the least x with
 x = blocking + B + O + R(x) after its release (O every admitted one-shot job at its priority or
-above). B is one blocker the policy does not switch from. Interference counted from the check
-covers every phase, so the bound is pessimistic for releases far ahead of the check; a bound per
-busy period is the next refinement (`docs/safety-scheduling.md`).
+above). B is one blocker the policy does not switch from.
+
+For a one-shot job the bound runs per busy period, not from the check. The simulation records
+which priority ran when. The level-p busy period (p the job's priority) in which the job really
+starts begins at a time u at which nothing at p or above ran; interference only delays work, so
+the simulation, which has done at least as much by any time, was idle at level p there too, and
+u is the check or the start of one of the simulation's level-p busy periods at or before s. From
+each such u the job starts within the least fixed point of w = L(u, s) + B + R(w) + W(s, u + w),
+L the level-p work the simulation ran in [u, s); the bound is the largest u + w
+(`sim_one_shot_start()`). A release far ahead, after the CPU has gone idle, is charged the
+interference of its own busy period, not of the whole wait (test
+`busy_period_bound_for_a_far_release`).
 
 **Cooperative runs.** Interference can reorder non-preemptive runs: a run delayed past a later
 release lets that release start first and hold the CPU, so a job can wait longer than the
