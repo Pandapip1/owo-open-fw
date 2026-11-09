@@ -7,7 +7,9 @@
  * N = 10 and N = 110 iterations; "iter" is the DWT.CYCCNT cost of one iteration in
  * millicycles, "op" that less the empty loop, divided by the 8 copies of the body. Then
  * library and firmware functions (cold call after an instruction-cache flush, then warm), and
- * straight-line blocks for the instruction cache's size and miss cost.
+ * straight-line blocks for the instruction cache's size and miss cost. Then exception entry
+ * and return on the M33, and the M0+'s kernels and exception run on the radio sequencer core
+ * (src/kern0.S, 7.94).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,6 +17,9 @@
 #include <zephyr/sys/printk.h>
 #include <string.h>
 #include <soc.h>
+#include <zephyr/irq.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/sys_io.h>
 
 #define N_LO 10U
 #define N_HI 110U
@@ -316,6 +321,186 @@ static void run_icache(void)
 	}
 }
 
+/*
+ * Exception entry and return on the M33 (7.94): SW0, a software-only line, pended through
+ * NVIC.ISPR at zero-latency priority (so irq_lock() leaves it), its handler x_isr reached
+ * through the flash vector table (Zephyr's, VTOR at reset), through a copy in SRAM, and with
+ * the caller and handler themselves in SRAM. "ctl" is the same sequence with the line disabled.
+ * Cycles: entry = the handler's first CYCCNT less the caller's, body = its last less its first,
+ * ret = the caller's after the return less the handler's last.
+ */
+#define X_IRQ SW0_IRQn
+#define X_REPS 6U
+#define VTOR_WORDS (16U + CONFIG_NUM_IRQS)
+extern volatile uint32_t x_stamp[4];
+extern uint32_t x_pend(volatile uint32_t *ispr, uint32_t bit, volatile uint32_t *stamps);
+extern void x_isr(void);
+static uint32_t sram_vectors[128] __aligned(512);
+BUILD_ASSERT(VTOR_WORDS <= ARRAY_SIZE(sram_vectors));
+
+typedef uint32_t (*pend_fn)(volatile uint32_t *ispr, uint32_t bit, volatile uint32_t *stamps);
+
+static uintptr_t sram_alias(uintptr_t fn)
+{
+	return (uintptr_t)sram_code + ((fn & ~1U) - (uintptr_t)kern33_start) + 1U;
+}
+
+static void x_once(pend_fn pend, bool enabled, uint32_t out[4])
+{
+	unsigned int key = irq_lock();
+
+	NVIC_ClearPendingIRQ(X_IRQ);
+	if (enabled) {
+		NVIC_EnableIRQ(X_IRQ);
+	} else {
+		NVIC_DisableIRQ(X_IRQ);
+	}
+	x_stamp[1] = 0U;
+	x_stamp[2] = 0U;
+	(void)pend(&NVIC->ISPR[X_IRQ / 32U], BIT(X_IRQ % 32U), x_stamp);
+	NVIC_DisableIRQ(X_IRQ);
+	NVIC_ClearPendingIRQ(X_IRQ);
+	for (int i = 0; i < 4; i++) {
+		out[i] = x_stamp[i];
+	}
+	irq_unlock(key);
+}
+
+static void x_case(const char *vectors, bool sram_code_too)
+{
+	pend_fn pend = (pend_fn)(sram_code_too ? sram_alias((uintptr_t)x_pend) : (uintptr_t)x_pend);
+	const char *where = sram_code_too ? "sram" : "flash";
+	uint32_t s[4], ctl = UINT32_MAX, entry = UINT32_MAX, body = UINT32_MAX, ret = UINT32_MAX;
+
+	for (uint32_t r = 0; r < X_REPS; r++) {
+		if (r == 0U) {
+			icache_flush();
+		}
+		x_once(pend, true, s);
+		if (r == 0U) {
+			printk("X vectors %-5s code %-5s cold entry %4u body %4u ret %4u\n", vectors,
+			       where, s[1] - s[0], s[2] - s[1], s[3] - s[2]);
+		}
+		entry = MIN(entry, s[1] - s[0]);
+		body = MIN(body, s[2] - s[1]);
+		ret = MIN(ret, s[3] - s[2]);
+		x_once(pend, false, s);
+		ctl = MIN(ctl, s[3] - s[0]);
+	}
+	printk("X vectors %-5s code %-5s warm entry %4u body %4u ret %4u ctl %4u\n", vectors,
+	       where, entry, body, ret, ctl);
+}
+
+static void run_exceptions(void)
+{
+	uint32_t vtor = SCB->VTOR;
+
+	IRQ_DIRECT_CONNECT(X_IRQ, 0, x_isr, IRQ_ZERO_LATENCY);
+	printk("X VTOR 0x%08x CONTROL 0x%08x CCR 0x%08x\n", vtor, __get_CONTROL(), SCB->CCR);
+	x_case("flash", false);
+	memcpy(sram_vectors, (const void *)vtor, VTOR_WORDS * sizeof(uint32_t));
+	SCB->VTOR = (uint32_t)sram_vectors;
+	__DSB();
+	__ISB();
+	x_case("sram", false);
+	sram_vectors[16U + X_IRQ] = sram_alias((uintptr_t)x_isr);
+	__DSB();
+	x_case("sram", true);
+	SCB->VTOR = vtor;
+	__DSB();
+	__ISB();
+}
+
+/*
+ * The M0+ kernels (src/kern0.S) on the radio sequencer core: held in RAC.CTRL.SEQRESET for
+ * the copy into SEQRAM and released with CPUWAITDIS, as hal/radio.c's radio_reset() does.
+ * While it runs this core only waits on its own clock: an M33 SEQRAM access during the run
+ * would slow the M0+'s (7.74).
+ */
+#define RAC_EN 0xB8020004U
+#define RAC_CTRL 0xB8020014U
+#define RAC_CTRL_SEQRESET BIT(24)
+#define RAC_CTRL_CPUWAITDIS BIT(26)
+#define SEQRAM_M33 0xB0000000U
+/* kern0.S's result layout and parameters. */
+#define K0_RESULTS 0x3000U
+#define K0_RESULTS_END 0x3710U
+#define K0_RES_KERN 8U
+#define K0_RES_X 0x200U
+#define K0_DONE_MAGIC 0x4E44304BU
+#define K0_N_LO 10U
+#define K0_N_HI 110U
+#define K0_XREPS 4U
+#define K0_COUNT_MASK 0xFFFFFFU
+/* 19 kernels x 2 N x 3 runs x at most 110 x 40 cycles is 52 ms at the slowest M0+ clock in
+ * 7.75, 19.2 MHz (HFXO SYSCLK / 2); four times that. */
+#define K0_RUN_US 200000U
+extern uint8_t kern0_start[], kern0_end[];
+
+static const char *const k0_name[] = {
+	"empty",     "nop",       "alu",       "str_a0",    "str_a2",    "str_a4",    "str_a6",
+	"ldr_a0",    "ldr_a2",    "ldr_a4",    "ldr_a6",    "stralu_a0", "stralu_a2", "stralu_a4",
+	"stralu_a6", "delay_a0",  "delay_a2",  "delay_a4",  "delay_a6",
+};
+
+static uint32_t seqram_rd(uint32_t off)
+{
+	return sys_read32(SEQRAM_M33 + off);
+}
+
+static void run_m0(void)
+{
+	size_t bytes = kern0_end - kern0_start;
+
+	sys_write32(1U, RAC_EN);
+	sys_write32(RAC_CTRL_SEQRESET, RAC_CTRL);
+	__DSB();
+	for (size_t i = 0; i < bytes; i += 4U) {
+		sys_write32(sys_get_le32(&kern0_start[i]), SEQRAM_M33 + i);
+	}
+	for (uint32_t off = K0_RESULTS; off < K0_RESULTS_END; off += 4U) {
+		sys_write32(0U, SEQRAM_M33 + off);
+	}
+	__DSB();
+	sys_write32(RAC_CTRL_CPUWAITDIS, RAC_CTRL);
+	k_busy_wait(K0_RUN_US);
+	if (seqram_rd(K0_RESULTS) != K0_DONE_MAGIC) {
+		printk("M0 not done: 0x%08x\n", seqram_rd(K0_RESULTS));
+		sys_write32(RAC_CTRL_SEQRESET, RAC_CTRL);
+		return;
+	}
+
+	uint32_t count = seqram_rd(K0_RESULTS + 4U);
+	int32_t base = 0;
+
+	printk("M0 image %u B, kernels %u\n", (unsigned int)bytes, count);
+	for (uint32_t k = 0; k < count && k < ARRAY_SIZE(k0_name); k++) {
+		uint32_t lo = seqram_rd(K0_RESULTS + K0_RES_KERN + 8U * k);
+		uint32_t hi = seqram_rd(K0_RESULTS + K0_RES_KERN + 8U * k + 4U);
+		int32_t it = (int32_t)((hi - lo) * 1000U / (K0_N_HI - K0_N_LO));
+
+		if (k == 0U) {
+			base = it;
+		}
+		printk("M %-10s lo %6u hi %6u iter %6d op %6d\n", k0_name[k], lo, hi, it,
+		       (it - base) / 8);
+	}
+	for (uint32_t r = 0; r < 2U * K0_XREPS; r++) {
+		uint32_t o = K0_RESULTS + K0_RES_X + 16U * r;
+		uint32_t t0 = seqram_rd(o), e1 = seqram_rd(o + 4U), e2 = seqram_rd(o + 8U);
+		uint32_t t3 = seqram_rd(o + 12U);
+
+		if (r & 1U) {
+			printk("MX enabled entry %4u body %4u ret %4u total %4u\n",
+			       (t0 - e1) & K0_COUNT_MASK, (e1 - e2) & K0_COUNT_MASK,
+			       (e2 - t3) & K0_COUNT_MASK, (t0 - t3) & K0_COUNT_MASK);
+		} else {
+			printk("MX ctl total %4u\n", (t0 - t3) & K0_COUNT_MASK);
+		}
+	}
+	sys_write32(RAC_CTRL_SEQRESET, RAC_CTRL);
+}
+
 int main(void)
 {
 	/* Bus clocks of every target (the radio blocks, TIMER1, GPIO, the cache's registers). */
@@ -341,6 +526,8 @@ int main(void)
 	run_kernels();
 	run_calls();
 	run_icache();
+	run_exceptions();
+	run_m0();
 	printk("cpu-timing-port: done\n");
 	return 0;
 }
