@@ -92,6 +92,23 @@ and start-by deadline, before the setup job closes anything:
 The radio's guarantees stay intact the same way: the pulse chain is admitted against them, and a
 radio release that arrives later is admitted against the chain.
 
+### Job kinds of the safeties
+
+The scheduler distinguishes one-shot, armed (sporadic) and periodic jobs
+(`zephyr-dual-clock-scheduler.md`, "Job kinds"; vendor/zephyr 5504cebb61b). Arming is the only
+point that can fail; activations, re-arms and periodic re-sleeps cannot.
+
+- S1-S4 are one-shot jobs of a pulse chain admitted as a whole before the bridge closes. A
+  refused chain is a pulse not fired.
+- S5 (dead-man check), S6 (stop-input read), S7 (battery read while pulses fire) and S10 (the
+  watchdog feed) are periodic, armed when the state that needs them is entered (S10 at boot, the
+  others when a session is armed) and disarmed when it is left. Their freshness limits above are
+  their periods plus their deadlines.
+- The phase end (S1) gets a meta-IRQ priority of its own, above the radio's: its release from the
+  scheduler clock event enters the scheduler, which switches to it at once from anything below
+  it, the radio's cooperative bodies included. Nothing below it then blocks it, so `d_pe` is
+  bounded by the release path and the interrupts admission declares, not by the radio's runs.
+
 ## Scheduler gaps (must be closed first)
 
 Found in `vendor/zephyr/kernel/deadline_admission.c`, `include/zephyr/kernel.h`, the radio's

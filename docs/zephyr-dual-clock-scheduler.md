@@ -228,6 +228,83 @@ route taken: the M0+ sequencer launches timed commands and sends staged replies
 at T_IFS (`docs/radio-tables.md` 7.82, 7.87), and T_IFS matches the stock stack
 on silicon (7.71).
 
+### Job kinds: one-shot, armed, periodic
+
+Admission (`vendor/zephyr/kernel/deadline_admission.c`) guarantees what it accepts: a job it
+admits starts by its deadline, and a request that would break that is refused when it is made,
+never by revoking earlier work (`docs/safety-scheduling.md`, G5). Three kinds of job differ in when
+that one check happens:
+
+| Kind | API | Checked | After a run |
+|---|---|---|---|
+| One-shot | `k_deadline_event_post()`, or `k_deadline_event_admit()` ahead of a timed release | at the release, or when the timed release is admitted | its capacity is released |
+| Armed (sporadic) | `k_deadline_event_arm()`, then `k_deadline_event_post()` for each activation | once, when armed | back to armed, keeping its reservation; no check |
+| Periodic | `k_deadline_event_arm_periodic()`; the kernel releases it | once, when armed | asleep until its next period, keeping its reservation; no check |
+
+**Arming.** A reservation (`struct k_deadline_reservation`) states the model of the job's
+releases: budget C, minimum inter-arrival T (the period of a periodic job), start-by deadline D
+from each release, and the budget of the interrupt handler that releases it. Arming checks the
+job released at the worst moment against everything admitted, and adds the reservation to every
+later check, so no later request can eat into it. The arrival model: at most one run outstanding,
+no two releases closer than T (`D <= T` and `C + handler <= T` are required). In any interval of
+length t the job then has at most floor((t + jitter) / T) + 1 releases; jitter is 0 for an armed
+job (its spacing is enforced at the release) and one kernel tick for a periodic one (a release is
+announced up to a tick after its tick). That bound is sound because the model is enforced: a
+release while a run is outstanding, or sooner than T after the previous one, is refused and
+reported as `K_DEADLINE_MISS_OVERRUN`.
+
+**Activation outside the model.** Refused at its source, not latched and not run late: a second
+activation while a run is outstanding is demand no reservation covers, and latching it would let
+it delay jobs whose guarantees assumed it could not exist. The report is the source's contract
+broken, handled by the miss policy like any other failure (the product: safe shutdown). A
+periodic release that finds its previous run outstanding is the same and is dropped; the next
+period is still scheduled.
+
+**Recurring jobs cannot fail to re-arm.** Finishing a run only changes the event's state; the
+reservation stays in the admission state until `k_deadline_event_disarm()`, and every check proves
+it still holds. A periodic job's next release is scheduled when the current one is made, not when
+its run ends.
+
+**Release is a scheduling point.** Releasing a job enters the scheduler (the post that readies it
+reschedules), so it takes the CPU at once from any lower-priority job the policy lets it preempt,
+with no separate preemption mechanism. That holds when the released job is a meta-IRQ thread
+(meta-IRQs preempt cooperative threads) or the running job is preemptible. It does not hold for:
+a running cooperative thread against a non-meta-IRQ release; a same-priority cooperative run
+(cooperative threads are not preempted by their own priority, which the radio's jobs rely on for
+mutual exclusion); sections with interrupts masked or the scheduler locked; interrupt handlers.
+Admission's bound counts a lower-priority blocker only in those cases (`preempts()`,
+`sim_blocker()`).
+
+**The bound with reservations.** Without reservations the simulation of the admitted jobs is
+exact and is all a check does. With them, each job is also bounded against releases of the
+recurring jobs at any time: a one-shot job the simulation starts at s starts by the least x with
+x = s + B + R(x) + W(s, x) (R the reservations' work in an interval of length x, W the one-shot
+work released after s that runs ahead of it); a recurring job starts within the least x with
+x = blocking + B + O + R(x) after its release (O every admitted one-shot job at its priority or
+above). B is one blocker the policy does not switch from. Interference counted from the check
+covers every phase, so the bound is pessimistic for releases far ahead of the check; a bound per
+busy period is the next refinement (`docs/safety-scheduling.md`).
+
+**Cooperative runs.** Interference can reorder non-preemptive runs: a run delayed past a later
+release lets that release start first and hold the CPU, so a job can wait longer than the
+interference that delayed it. Within a cooperative priority B therefore includes the largest
+same-priority job released before it with a later deadline. Release being a scheduling point does
+not remove that term inside one cooperative priority; it removes it between priorities: an urgent
+job given a meta-IRQ priority of its own above the long cooperative bodies (the radio's LLL
+prepares) is never blocked by them.
+
+**Mapping.**
+
+| Work | Kind |
+|---|---|
+| Radio: the sequencer's staged replies and T_IFS turnarounds, each completion while an event is live | armed for the event's duration, disarmed at its end |
+| Radio: LLL prepares (ticker expiries) | one-shot timed releases admitted ahead, or periodic for a connection's fixed interval |
+| Safety S1-S4 per pulse (`docs/safety-scheduling.md`) | one-shot jobs of an admitted pulse chain |
+| Safety S5 (dead-man check of the coverage window), S6 (stop input read), S7 (battery), S10 (watchdog feed) | periodic |
+| An interrupt that releases an armed job | that job's reservation: its handler budget, at the job's rate |
+
+Not yet mapped in code: the radio and the product still post one-shot releases only.
+
 ## Acceptance plan
 
 The implementation is ready to replace the temporary radio alarm path only
