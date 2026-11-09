@@ -23,6 +23,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(CONFIG_OWO_SIM_INJECT)");
     println!("cargo::rustc-check-cfg=cfg(CONFIG_OWO_WATCHDOG)");
     println!("cargo::rustc-check-cfg=cfg(CONFIG_BT_LLL_VENDOR_EFR32)");
+    println!("cargo::rustc-check-cfg=cfg(CONFIG_PM)");
     println!("cargo:rerun-if-env-changed=OWO_SERIAL");
     println!("cargo:rerun-if-changed=owo_wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
