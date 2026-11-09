@@ -199,6 +199,12 @@ impl ResourceLeaseGate {
     }
 }
 
+impl Default for ResourceLeaseGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceLease<'_> {
     /// True once failure has revoked this resource.  Call from every bounded
     /// work checkpoint; the caller is responsible for promptly safeing off.
