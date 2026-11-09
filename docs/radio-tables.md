@@ -483,6 +483,8 @@ Two adjacent OpenISA helpers have a deliberately narrower contract than their na
 
 The public FRC completion latches make a narrow status implementation safe: `IF.TXDONE` is bit 0 and `IF.RXDONE` bit 4 (`revB2/FRC_S_field.py:1197-1254`). `radio_is_done()` consequently observes either latch, while `radio_status_reset()` acknowledges exactly those two bits through the standard CLR alias; this does not decide which IRQ should invoke the LLL callback or how receive completion is produced. QEMU's 150-us TX timer remains a simulator abstraction, but on expiry it now raises the public `FRC.IF.TXDONE` latch and returns RAC to OFF; `TXDIS`/`RXDIS` cancel that pending synthetic completion. Its regression verifies the visible latch and final RAC state.
 
+*Superseded by §7.72: the QEMU TX now lasts its LE 1M airtime (0.65 + 40 + 8·(PDU + 3) + 0.9 us) and raises TXDONE at TX exit.*
+
 The stock TXDONE hand-off can be traced one step further in the same archive.
 In `generic_phy.o:FRC_IRQHandler`, the enabled FRC mask is retained in `r7`
 after the read/AND at section offset `0x0006` (archive offset `0x5275e`) and
@@ -587,7 +589,7 @@ names `RAC_NS.CMD`. QEMU models this command and has a focused TX-command
 regression. Its fixed completion remains an explicit simulator abstraction
 rather than a claim that it executes the RAIL transmit pipeline.
 
-This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. In the retained stock trace, `radio-trace.log:201` writes `RXDIS = 0x100`, `:203` reads `STATUS`, `:208` writes `TXDIS = 0x20`, and `:207` is the preceding `STATUS` read. That is an observed ordering fact, not a claim that the two commands are interchangeable. The QEMU model uses this source- and trace-matched RAC map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims.
+This identifies every previously observed stock write: the recovered image reaches radio initialization at about 98.5 ms virtual time, polls `STATUS.STATE`, writes `RXCAL`, `RXDIS`, and `TXDIS`, and waits for TX state 9 before disabling. In the retained stock trace, `radio-trace.log:201` writes `RXDIS = 0x100`, `:203` reads `STATUS`, `:208` writes `TXDIS = 0x20`, and `:207` is the preceding `STATUS` read. That is an observed ordering fact, not a claim that the two commands are interchangeable. The QEMU model uses this source- and trace-matched RAC map. Its packet modulation and fixed 150 us completion are still simulator abstractions, not hardware timing claims (the completion is superseded by §7.72).
 
 The same trace records the reset prefix independently of a transmit request.
 At byte offsets `0x00000a26`, `0x00000a56`, and `0x00000a86` in

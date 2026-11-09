@@ -154,7 +154,7 @@ the default `owo_suit` build. **[E]**
 | `owo_suit` | 136 240 B of 221 184 B (61.6 %) | 29 212 B (89.2 %) | passes, 3 548 B free |
 | `owo_suit`, `-DOWO_HW=ON` | 157 048 B of 221 184 B (71.0 %) | 30 596 B (93.4 %) | passes, 2 164 B free |
 
-`bg22_ek4108a` with `-DOWO_HW=ON` was not re-measured; on 2026-10-31 it was 156 316 B / 30 988 B.
+`bg22_ek4108a` with `-DOWO_HW=ON` (2026-11-09, master 9e0567e): 158 172 B of 417 792 B flash (37.9 %), 30 900 B RAM (94.3 %); the reserve check passes, 100 B free. On 2026-10-31 it was 156 316 B / 30 988 B.
 
 What made the output-stage image fit on 2026-10-31 (each number measured as the linker's RAM total
 before and after): four PSA key slots instead of sixteen (-1 248 B; two since eaac76d, the bound

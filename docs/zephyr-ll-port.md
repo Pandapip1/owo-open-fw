@@ -19,7 +19,7 @@ unless stated.
   dtsi chooses it as `zephyr,bt-hci` (`boards/silabs/explorer_kits/xg22/xg22_explorer_kit.dtsi:15`). The overlay in
   `tests/radio-port/boards/bg22_ek4108a.overlay` (and the product's `boards/owo_product.dtsi`) disables that node, adds the sw-split node under `&radio` and re-points `zephyr,bt-hci`.
 * **[F]** The lower link layer ("LLL" vendor) is selected only by `BT_LLL_VENDOR_NORDIC` (`Kconfig.ll_sw_split:8`, needs
-  `SOC_COMPATIBLE_NRF`) or `BT_LLL_VENDOR_OPENISA` (`Kconfig.ll_sw_split:88`, needs `SOC_OPENISA_RV32M1`), and `CMakeLists.txt:193-221`
+  `SOC_COMPATIBLE_NRF`) or `BT_LLL_VENDOR_OPENISA` (`Kconfig.ll_sw_split:88`, needs `SOC_OPENISA_RV32M1`), and `CMakeLists.txt:195-220`
   adds the matching include directories and `add_subdirectory(ll_sw/nordic|openisa)`. No other Kconfig/CMake code
   mentions these symbols (`grep -rn BT_LLL_VENDOR` over subsys/include/drivers/soc/dts finds only those two files),
   so a third vendor does not need a Zephyr patch: define a Kconfig symbol with the same `select`s and add the include
@@ -49,7 +49,7 @@ unless stated.
 * **[F]** Needed from the SoC: one radio interrupt, one tick-counter compare interrupt, two software-pendable interrupts
   (`hal_swi_lll_pend/worker_pend/job_pend`). EFR32BG22 has `SW0..SW3_IRQn` = 52..55 and the radio lines
   `AGC 31, BUFC 32, FRC_PRI 33, FRC 34, MODEM 35, PROTIMER 36, RAC_RSM 37, RAC_SEQ 38, RDMAILBOX 39, RFSENSE 40, PRORTC 41, SYNTH 42`
-  (`gecko_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h:94-105,115-118`).
+  (`vendor/hal_silabs/simplicity_sdk/platform/Device/SiliconLabs/EFR32BG22/Include/efr32bg22c224f512im40.h:95-106,116-119`).
 * **Done** (`include/hal/efr32/swi.h`, `ll_irqs.h`): radio-LLL = SW0, ULL-low = SW1, worker = SW2 (pended from the counter alarm callback),
   and `LL_RADIO_IRQn = FRC_IRQn`. The software interrupts only ring a doorbell: the LLL and ULL
   contexts run in persistent meta-IRQ threads (`hal/ll_threads.c`, replacing RV32M1's `mayfly.c`;
@@ -60,7 +60,7 @@ unless stated.
 ### 2.2 Tick counter and ticker (`hal/cntr.h`, `hal/ticker.h`, `ticker/ticker.c`)
 * **[F]** Contract: `cntr_init/start/stop/cnt_get/cmp_set` (`hal/cntr.h`), 32-bit counter at 32768 Hz
   (`HAL_TICKER_CNTR_CLK_UNIT_FSEC 30517578125`, `openisa/hal/RV32M1/ticker.h`), refcounted start, compare interrupt that
-  runs `ticker_trigger(0)` (`openisa/lll/lll.c:78-95`). `mayfly.c`/`ticker.c` glue (`hal/RV32M1/mayfly.c`, `ticker.c`) is
+  runs `ticker_trigger(0)` (`openisa/lll/lll.c:78-97`). `mayfly.c`/`ticker.c` glue (`hal/RV32M1/mayfly.c`, `ticker.c`) is
   generic and is reused by derivation.
 * **Done** (`hal/cntr.c`): implemented on the kernel's scheduler clock service (docs/zephyr-dual-clock-scheduler.md): the
   32.768 kHz ticker count is derived from the service's 2^25 Hz logical timebase, and the ticker compare, the LLL launch and the QEMU TIFS
@@ -82,7 +82,7 @@ unless stated.
 The API is declared in `openisa/hal/RV32M1/radio/radio.h:13-108`. How OpenISA uses the hardware (this is the model to follow):
 * **[F]** One radio interrupt for *TX done*, *RX header watermark* and *timer 2 (timeout)*; the handler (`radio.c:313-400`) timestamps AA and end,
   copies the PDU on the watermark interrupt (`pkt_rx`, `radio.c:233`), and starts the next RX/TX in software at `end + T_IFS - wake-up` by loading a compare timer
-  (`radio.c:376-385`), then calls the LLL callback. `radio_switch_complete_and_rx/tx/disable` (`radio.c:928-950`) only record `next_radio_cmd`.
+  (`radio.c:388-395`), then calls the LLL callback. `radio_switch_complete_and_rx/tx/disable` (`radio.c:928-950`) only record `next_radio_cmd`.
 * **[F]** Timer API: `radio_tmr_start*` (`radio.c:1101-1140`) arms a compare at an absolute 32.768 kHz tick + remainder converted to the radio timer;
   `radio_tmr_hcto_configure` (`radio.c:1164`) arms the header-complete timeout; `radio_tmr_aa_capture/end_capture/sample` (`radio.c:1176-1223`) capture timestamps.
 * **EFR32 blocks that correspond**: PROTIMER (timebase/compare/capture), RAC (RX/TX commands, state), FRC (frame: CRC, whitening, length, sync word), BUFC (RX/TX buffers),
@@ -177,7 +177,7 @@ RV32M1 reference copies two header octets plus its bounded payload at
 `hal/RV32M1/radio/radio.c:233-260,288-297`). Advertising and data PDUs both
 use that shape. Encrypted connection input additionally retains the four-byte
 MIC in the length and lets the HAL's CCM path remove it after decryption
-(`lll_conn.c:441-447`, `hal/radio.c:1288-1332`). A future delivery interface
+(`lll_conn.c:441-447`, `hal/radio.c:5828-5839,5886-5914`). A future delivery interface
 therefore needs normalized bytes, exact byte count, and separate CRC status;
 it must not encode an inferred FRC layout.
 
@@ -417,7 +417,8 @@ and by the documented unresolved FRC/BUFC producer contract.
 ### Active-scan QEMU exchange harness
 
 The opt-in active-scanner profile adds `CONFIG_RADIO_RX_PORT_ACTIVE_SCAN=y`
-and `CONFIG_EFR32_RADIO_QEMU_TIFS=y` (`tests/radio-rx-port/prj-active-scan.conf:1-5`).
+and turns `CONFIG_EFR32_RADIO_QEMU_TIFS` and `CONFIG_EFR32_RADIO_QEMU_RX_DESCRIPTOR`
+off: the sequencer stages the `SCAN_REQ`, as on silicon (`tests/radio-rx-port/prj-active-scan.conf:1-7`).
 Build that scanner separately, preserving the passive scanner as the ordinary
 RX test:
 
@@ -439,10 +440,10 @@ meet on silicon, and the miss check panics (`run-qemu-active-scan-e2e.sh`,
 interleaving, not a calibrated radio clock or a statement about EFR32 timing.
 
 The active harness requires endpoint-tagged QEMU snapshots in this strict
-logical order: advertiser `ADV_IND` (endpoint 0, 11 bytes beginning
-`0x743a0940`), scanner `SCAN_REQ` (endpoint 1, 14 bytes beginning
-`0x1a1a0cc3`), then advertiser `SCAN_RSP` (endpoint 0, 8 bytes beginning
-`0x743a0644`; `run-qemu-active-scan-e2e.sh:70-103`). Endpoint tags are model
+logical order: advertiser `ADV_IND` (endpoint 0, 11 bytes, header
+`0x0940`), scanner `SCAN_REQ` (endpoint 1, 14 bytes, header
+`0x0cc3`), then advertiser `SCAN_RSP` (endpoint 0, 26 bytes, header
+`0x1844`, same AdvA; `run-qemu-active-scan-e2e.sh:104-145`). Endpoint tags are model
 identifiers—not guest MMIO facts—and the snapshots prove only that the staged
 LL PDUs crossed the QEMU RAC/BUFC/medium boundary in the expected order. They
 do not establish over-air reception, CRC/FRC production, packet-end timing,
@@ -497,7 +498,7 @@ only (`modules/efr32-radio/Kconfig`; docs/radio-tables.md 7.72, 7.80).
 `radio_tx_chain_delay_get()` and `radio_rx_chain_delay_get()` remain explicit
 TODO stubs returning zero (`hal/radio.c`): only their sum d_tx + d_rx is
 measured (7.71). Their units are microseconds:
-the OpenISA ULL stores their results in `ready_delay_us` when reserving radio
+the OpenISA ULL stores their results in `ready_delay` when reserving radio
 slots (for example `vendor/zephyr/subsys/bluetooth/controller/ll_sw/ull_conn.c:1329-1372`),
 and uses the chain values as additions/subtractions in its microsecond HCTO
 calculation (`vendor/zephyr/subsys/bluetooth/controller/ll_sw/openisa/lll/lll_conn.c:363-375`).
@@ -510,7 +511,7 @@ watermark/ISR-latency expression for the RX chain delay
 (`vendor/zephyr/subsys/bluetooth/controller/ll_sw/openisa/hal/RV32M1/radio/radio.c:775-798`).
 The local EFR32 RAIL headers instead document configurable state-turnaround
 and PA-ramp inputs; they warn that changing ramp time can change the minimum
-turnaround (`vendor/hal_silabs/simplicity_sdk/platform/radio/rail_lib/common/sl_rail.h:2744-2751,2957-2969`).
+turnaround (`vendor/hal_silabs/simplicity_sdk/platform/radio/rail_lib/common/sl_rail.h:2744-2752,2957-2969`).
 They do not establish the EFR32 PHY-, PA-, or capture-path-specific values of
 these four hooks. In particular, the xG22 PA utility's configured 2-us ramp is
 not a radio-ready or chain-delay measurement. QEMU's frame timing (once a
