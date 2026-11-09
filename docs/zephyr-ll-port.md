@@ -30,7 +30,7 @@ unless stated.
 * **[F]** Two complete vendor implementations exist. Nordic's is PPI/DPPI hard-wired (`ll_sw/nordic/hal/nrf5/radio/radio.c`,
   2843 lines, ~95 `radio_*` functions incl. extended advertising, ISO, DF, hardware TIFS and CCM). OpenISA's
   (`ll_sw/openisa/hal/RV32M1/radio/radio.c`, 1622 lines, 78 `radio_*`) uses **software TIFS**, software AES-CCM, legacy
-  advertising/scanning/connections, one PHY at a time, and has its LLL sources in `ll_sw/openisa/lll/*` (6453 lines).
+  advertising/scanning/connections, one PHY at a time, and has its LLL sources in `ll_sw/openisa/lll/*` (5083 lines of `.c` and `.h` in vendor/zephyr at 5504cebb61b).
   The EFR32 radio has no PPI; the OpenISA split is the closer fit and is what the module reuses.
 * **[F]** Consequence found while building (`tests/radio-port`): OpenISA's LLL is **bit-rotted** against current Zephyr. Two
   places do not build outside RV32M1 and are patched in the derived copy by `modules/efr32-radio/CMakeLists.txt`:
