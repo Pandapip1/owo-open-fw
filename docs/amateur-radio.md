@@ -393,9 +393,11 @@ distance; the same capture on a Bluetooth channel as the reference):
   after 8 s the advertiser stops and returns to Part 15 with one closing identification, decoded
   from the OOK frame as KD3APL at 200 Bd, 4.32 s.
 * QEMU, periodic (`tests/amateur-port/run-qemu-amateur-periodic.sh`): an advertiser that never
-  stops identifies every 574.3 s (latest start 600 s - 4.32 s airtime, released 30 s early),
-  each frame on air for its whole 4.32 s; 6 identifications in 62 virtual minutes, no
-  shutdown.
+  stops ends an identification every 570.0 s: released 30 s
+  (`CONFIG_EFR32_RADIO_AMATEUR_ID_LEAD_S`) before its latest start, 600 s - 4.32 s airtime after
+  the previous one ended, so 565.68 s plus the 4.32 s frame. Each frame was on air for its whole
+  4.32 s; 8 identifications in 76 virtual minutes, no shutdown, 0 deadline misses (2026-11-09,
+  master 2beb976; an earlier note gave 574.3 s, which the arithmetic does not support).
 * Product: `owo_suit` and the `-DOWO_HW=ON` RAM probe build byte-identical images before and
   after; `scripts/check-hardware-ram.sh` 30916 B <= 31000 B then (30596 B at master 918708d).
 * Transmitter power (`tests/tx-power-port`, QEMU and silicon, 43/43, docs/tx-power.md
