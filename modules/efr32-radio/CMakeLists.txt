@@ -43,10 +43,14 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
       COMMENT "Embedding diagnostic proprietary EFR32 radio-coprocessor image"
     )
   else()
+    set(SEQ_DEFS "")
+    if(CONFIG_EFR32_SEQ_WAKE_PROBE)
+      list(APPEND SEQ_DEFS -DEFR32_SEQ_WAKE_PROBE)
+    endif()
     add_custom_command(
       OUTPUT ${SEQ_C}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}/sequencer
-      COMMAND ${CMAKE_C_COMPILER} -mcpu=cortex-m0plus -mthumb -nostdlib
+      COMMAND ${CMAKE_C_COMPILER} -mcpu=cortex-m0plus -mthumb -nostdlib ${SEQ_DEFS}
               -I${CMAKE_CURRENT_LIST_DIR}/include
               -Wl,--build-id=none -Wl,-T,${SEQ_LD}
               ${SEQ_SRC} -o ${SEQ_ELF}

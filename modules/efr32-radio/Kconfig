@@ -754,6 +754,28 @@ config EFR32_RADIO_TIMING_PROBE
 	  in TIMER0 counts), for a debugger or the QEMU monitor to read.
 	  Measurement builds only (docs/radio-tables.md 7.79).
 
+config EFR32_RADIO_ICACHE_PROBE
+	bool "Count instruction-cache hits and misses over each completion run"
+	depends on EFR32_RADIO_TIMING_PROBE
+	help
+	  Turn ICACHE0's bus clock on (CMU.CLKEN1 bit 16) and run its
+	  performance counters (STARTPC/STOPPC) around each completion run;
+	  keep per kind the runs, their summed cycles, hits and misses, the
+	  most misses in one run and the misses of the longest run in struct
+	  efr32_radio_probe. Tests whether instruction-cache misses explain
+	  the model's shortfall on the radio paths. Measurement builds only
+	  (docs/radio-tables.md 7.93, 7.94).
+
+config EFR32_SEQ_WAKE_PROBE
+	bool "Sequencer: SysTick at the timed-command IRQ's entry and first poll"
+	depends on EFR32_RADIO_TIMING_PROBE
+	help
+	  Build the sequencer with a SysTick stamp at its exception entry and
+	  at the timed command's first poll (seq_abi.h EFR32_SEQ_TIMED_ENTRY_ST,
+	  EFR32_SEQ_TIMED_POLL_ST), so the post-to-first-poll wake splits into
+	  the M0+'s exception entry and the run before its first poll.
+	  Measurement builds only (docs/radio-tables.md 7.93, 7.94).
+
 config EFR32_RADIO_TEST_QEMU_COUNT_LL_MISSES
 	bool "Test only (QEMU): count link-layer deadline misses, stop on broken rules"
 	depends on EFR32_RADIO_TIMING_QEMU && SCHED_DEADLINE_MISS_CUSTOM

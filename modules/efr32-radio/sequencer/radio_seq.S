@@ -338,6 +338,13 @@ efr32_radio_seq_reset:
 
 .thumb_func
 efr32_radio_seq_exception:
+#if defined(EFR32_SEQ_WAKE_PROBE)
+    /* Diagnostic only (seq_abi.h EFR32_SEQ_TIMED_EXC_ST): SysTick at entry. */
+    ldr r0, =EFR32_SYSTICK_CVR
+    ldr r0, [r0]
+    ldr r1, =EFR32_SEQ_TIMED_BLOCK
+    str r0, [r1, #EFR32_SEQ_TIMED_EXC_ST]
+#endif
     /* Acknowledge only enabled state-transition events.  The M0+ does not
      * turn them into a new radio command; policy remains on the M33. */
     /* Diagnostic only: a wrapping per-IRQ entry count, one byte per external
@@ -1905,6 +1912,13 @@ efr32_seq_timed_command:
     ldr r3, =EFR32_SEQ_TIMER0_CNT_NS
     ldr r4, [r3]
     str r4, [r0, #EFR32_SEQ_TIMED_ENTRY]
+#if defined(EFR32_SEQ_WAKE_PROBE)
+    ldr r4, =EFR32_SYSTICK_CVR
+    ldr r4, [r4]
+    str r4, [r0, #EFR32_SEQ_TIMED_POLL_ST]
+    ldr r4, [r0, #EFR32_SEQ_TIMED_EXC_ST]
+    str r4, [r0, #EFR32_SEQ_TIMED_ENTRY_ST]
+#endif
     movs r4, #EFR32_SEQ_TIMED_ENTRY_T1
     bl efr32_seq_timed_stamp_t1
 1:  ldr r4, [r0, #EFR32_SEQ_TIMED_OP]

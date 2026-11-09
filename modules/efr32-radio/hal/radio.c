@@ -332,6 +332,26 @@ struct efr32_radio_probe {
 	uint32_t conn_outcome_after_eof;
 	/* RAC.STIMER (from the RX2TX entry) when the sequencer took the stage, ticks. */
 	uint32_t conn_taken_at;
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+	/*
+	 * ICACHE0's performance counters over each completion run, per kind as completion_run:
+	 * runs, their cycles, hits and misses summed, the most misses in one run, and the misses
+	 * of the run that set completion_run.
+	 */
+	uint32_t ic_runs[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_cycles[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_hits[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses_max[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses_longest[2][EFR32_COMPLETION_KINDS];
+#endif
+#if defined(CONFIG_EFR32_SEQ_WAKE_PROBE)
+	/*
+	 * The latest timed commands: post to first poll (TIMER0 counts), and the M0+'s SysTick
+	 * at its IRQ 23 entry and at that poll (seq_abi.h EFR32_SEQ_TIMED_ENTRY_ST, _POLL_ST).
+	 */
+	uint32_t wake_ring[16][3];
+#endif
 };
 struct efr32_radio_probe efr32_radio_probe;
 static uint32_t efr32_radio_probe_job_start;
@@ -1283,6 +1303,14 @@ static void efr32_seq_timed_probe(void)
 	    lead < efr32_radio_probe.seq_lead_min) {
 		efr32_radio_probe.seq_lead_min = lead;
 	}
+#if defined(CONFIG_EFR32_SEQ_WAKE_PROBE)
+	uint32_t *w = efr32_radio_probe.wake_ring[efr32_radio_probe.timed_samples %
+						   ARRAY_SIZE(efr32_radio_probe.wake_ring)];
+
+	w[0] = entry - efr32_seq_timed_posted;
+	w[1] = *EFR32_SEQ_TIMED_WORD(EFR32_SEQ_TIMED_ENTRY_ST);
+	w[2] = *EFR32_SEQ_TIMED_WORD(EFR32_SEQ_TIMED_POLL_ST);
+#endif
 }
 #endif
 
@@ -2749,6 +2777,10 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		efr32_radio_probe_job_start = k_cycle_get_32();
 		efr32_radio_probe.samples++;
 #endif
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+		CMU->CLKEN1_SET = CMU_CLKEN1_ICACHE0;
+		ICACHE0->CMD = ICACHE_CMD_STARTPC;
+#endif
 		key = irq_lock();
 		if (efr32_radio_completion_dispatch_take(&efr32_radio_completion_dispatch)) {
 			callback = efr32_radio_completion_work.callback;
@@ -2818,6 +2850,23 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 		}
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+		ICACHE0->CMD = ICACHE_CMD_STOPPC;
+		{
+			uint32_t run = k_cycle_get_32() - efr32_radio_probe_job_start;
+			uint32_t misses = ICACHE0->PCMISSES;
+			uint8_t c = probe_conn ? 1U : 0U;
+
+			efr32_radio_probe.ic_runs[c][probe_kind]++;
+			efr32_radio_probe.ic_cycles[c][probe_kind] += run;
+			efr32_radio_probe.ic_hits[c][probe_kind] += ICACHE0->PCHITS;
+			efr32_radio_probe.ic_misses[c][probe_kind] += misses;
+			EFR32_PROBE_MAX(ic_misses_max[c][probe_kind], misses);
+			if (run > efr32_radio_probe.completion_run[c][probe_kind]) {
+				efr32_radio_probe.ic_misses_longest[c][probe_kind] = misses;
+			}
+		}
+#endif
 		EFR32_PROBE_MAX(completion_run[probe_conn ? 1 : 0][probe_kind],
 				k_cycle_get_32() - efr32_radio_probe_job_start);
 	}
