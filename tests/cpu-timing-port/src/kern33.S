@@ -134,8 +134,51 @@ KERN k_isb, "", "isb", "", ""
 .ltorg
 .endm
 
+/*
+ * Exception entry and return (7.94). x_pend: r0 = NVIC.ISPR word, r1 = the IRQ's bit, r2 = a
+ * four-word stamp block; DWT.CYCCNT before the pending store into word 0 and after the barriers
+ * into word 3. x_isr, the IRQ's handler: CYCCNT at its first and last load into words 1 and 2
+ * of x_stamp. With the IRQ disabled the same sequence is the control.
+ */
+.align 4
+.global x_pend
+.thumb_func
+x_pend:
+	push {r4-r6, lr}
+	movw r4, #:lower16:DWT_CYCCNT
+	movt r4, #:upper16:DWT_CYCCNT
+	ldr r5, [r4]
+	str r1, [r0]
+	dsb
+	isb
+	ldr r6, [r4]
+	str r5, [r2]
+	str r6, [r2, #12]
+	sub r0, r6, r5
+	pop {r4-r6, pc}
+
+.align 4
+.global x_isr
+.thumb_func
+x_isr:
+	movw r0, #:lower16:DWT_CYCCNT
+	movt r0, #:upper16:DWT_CYCCNT
+	ldr r1, [r0]
+	ldr r3, [r0]
+	movw r2, #:lower16:x_stamp
+	movt r2, #:upper16:x_stamp
+	str r1, [r2, #4]
+	str r3, [r2, #8]
+	bx lr
+
 .global kern33_end
 kern33_end:
+
+.section .bss.x_stamp, "aw", %nobits
+.align 4
+.global x_stamp
+x_stamp:
+	.space 16
 
 .section .text.icblocks, "ax", %progbits
 ICBLOCK ic_512, 512

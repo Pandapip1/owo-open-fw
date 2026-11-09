@@ -48,6 +48,15 @@
  */
 #define EFR32_SEQ_TIMED_ENTRY_T1 0x18
 #define EFR32_SEQ_TIMED_AT_T1 0x1c
+/*
+ * Diagnostic, sequencer built with EFR32_SEQ_WAKE_PROBE (Kconfig EFR32_SEQ_WAKE_PROBE): the
+ * M0+'s SysTick (counting down at its core clock) at every exception entry (EXC_ST, scratch),
+ * and, copied at the timed command's first poll, at its own entry (ENTRY_ST) and at that poll
+ * (POLL_ST) (docs/radio-tables.md 7.94).
+ */
+#define EFR32_SEQ_TIMED_EXC_ST 0x20
+#define EFR32_SEQ_TIMED_ENTRY_ST 0x24
+#define EFR32_SEQ_TIMED_POLL_ST 0x28
 #define EFR32_SEQ_CMU_CLKEN0_NS 0x50008064
 #define EFR32_SEQ_CMU_CLKEN0_TIMER1 (1 << 5)
 #define EFR32_SEQ_TIMER1_CNT_NS 0x5004c024

@@ -91,5 +91,12 @@ int efr32_radio_conn_outcome(uint32_t *outcome);
 bool efr32_radio_conn_continues(void);
 /* Stage the replies to a connection event's first receive (the prepares). */
 void efr32_conn_stage_prepare(struct lll_conn *lll);
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+/*
+ * The initiator's CONNECT_IND verdict (@p replied) against isr_rx_pdu()'s own slot check
+ * (@p lll_declines) for a frame ending @p margin_us before its latest end (negative: after).
+ */
+void efr32_radio_probe_slot(bool replied, bool lll_declines, int32_t margin_us);
+#endif
 
 #endif /* EFR32_RADIO_CONN_H_ */

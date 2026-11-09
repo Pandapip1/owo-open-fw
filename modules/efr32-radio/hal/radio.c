@@ -302,6 +302,40 @@ enum efr32_radio_completion_kind {
 	EFR32_COMPLETION_KINDS,
 };
 
+#if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
+/*
+ * T_IFS probe (docs/radio-tables.md 7.91, 7.94): PRS async channels carry MODEMH.EOF, RACL.TX and
+ * MODEMH.SYNCSENT to TIMER1, as the debugger's PRS capture did (7.71, 7.91): EOF reload-starts
+ * it as a one-shot from 0, CC1 captures the RAC's TX entry and CC2 SYNCSENT. TIMER1 counts at
+ * EM01GRPACLK, 76.8 MHz in these images (7.75 [F]). The firmware owns TIMER1 and PRS async
+ * channels 9-11 in this build; a debugger must not set them up again.
+ */
+#define EFR32_TIFS_PRS_EOF 9U
+#define EFR32_TIFS_PRS_TX 10U
+#define EFR32_TIFS_PRS_SYNC 11U
+#define EFR32_TIFS_COUNTS_PER_US 76.8
+/* TIMER1 is 16 bits (RM 2, "1 x 32-bit and 4 x 16-bit Timer/Counters"; TIMER0 the 32-bit one):
+ * the one-shot runs to its full range, 853 us. */
+#define EFR32_TIFS_TIMER1_TOP 0xFFFFU
+/* 7.91's clean distribution ends at 182.0 us; above it, a sample is kept with its record. */
+#define EFR32_TIFS_OUTLIER ((uint32_t)(182.0 * EFR32_TIFS_COUNTS_PER_US))
+/* Histogram: 0.25 us bins from 176 us to 192 us, with under- and overflow bins. */
+#define EFR32_TIFS_HIST_FIRST ((uint32_t)(176.0 * EFR32_TIFS_COUNTS_PER_US))
+#define EFR32_TIFS_HIST_BIN ((uint32_t)(0.25 * EFR32_TIFS_COUNTS_PER_US))
+#define EFR32_TIFS_HIST_BINS 64U
+/*
+ * The sequencer's RX2TX record (radio_seq.S): RAC.STIMER at the handler's entry, decision,
+ * lock and PA up (EFR32_SEQ_TRACE_RX2TX_TIMES), the same instants on its SysTick 0x20 below,
+ * and SysTick at the TX entry after a responding RX2TX (EFR32_SEQ_TRACE_RESPONSE_TX_AT).
+ */
+#define EFR32_SEQ_TRACE_RX2TX_STIMER ((volatile uint32_t *)0xB0004F40UL)
+#define EFR32_SEQ_TRACE_RX2TX_SYSTICK ((volatile uint32_t *)0xB0004F20UL)
+#define EFR32_SEQ_TRACE_TX_AT_SYSTICK ((volatile uint32_t *)0xB0004F38UL)
+#define EFR32_SEQ_TRACE_RX2TX_WORDS 4U
+/* eof->TX entry, eof->SYNCSENT, the four STIMER words, the four SysTick words, TX_AT. */
+#define EFR32_TIFS_RECORD_WORDS (2U + 2U * EFR32_SEQ_TRACE_RX2TX_WORDS + 1U)
+#endif
+
 #if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
 /*
  * Longest times seen, scheduler-clock cycles, for a debugger to read (docs/radio-tables.md
@@ -332,9 +366,59 @@ struct efr32_radio_probe {
 	uint32_t conn_outcome_after_eof;
 	/* RAC.STIMER (from the RX2TX entry) when the sequencer took the stage, ticks. */
 	uint32_t conn_taken_at;
+	/*
+	 * radio_disable() ending an RXFRAME with FORCEDISABLE: pulses, the longest wait for idle,
+	 * and the longest completion run of each kind that followed a pulse (the close budget).
+	 */
+	uint32_t fd_pulses;
+	uint32_t fd_wait;
+	uint32_t completion_run_fd[2][EFR32_COMPLETION_KINDS];
+	/*
+	 * The initiator's CONNECT_IND verdicts, [sequencer replied][isr_rx_pdu()'s slot check
+	 * declines], and the frames nearest the slot's end (us before it; negative after): the
+	 * least margin of a reply, the greatest of a frame the sequencer refused.
+	 */
+	uint32_t slot_verdicts[2][2];
+	int32_t slot_reply_margin_min;
+	int32_t slot_refused_margin_max;
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+	/*
+	 * ICACHE0's performance counters over each completion run, per kind as completion_run:
+	 * runs, their cycles, hits and misses summed, the most misses in one run, and the misses
+	 * of the run that set completion_run.
+	 */
+	uint32_t ic_runs[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_cycles[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_hits[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses_max[2][EFR32_COMPLETION_KINDS];
+	uint32_t ic_misses_longest[2][EFR32_COMPLETION_KINDS];
+#endif
+#if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
+	/*
+	 * Every reply's PRS-captured interval from the received frame's EOF to its own SYNCSENT
+	 * (TIMER1 counts, efr32_tifs_probe_sample()): a histogram, the extremes, and the latest
+	 * samples above EFR32_TIFS_OUTLIER and at or below it, with the sequencer's RX2TX record.
+	 */
+	uint32_t tifs_samples;
+	uint32_t tifs_min;
+	uint32_t tifs_max;
+	uint32_t tifs_hist[EFR32_TIFS_HIST_BINS + 2];
+	uint32_t tifs_outliers;
+	uint32_t tifs_out_ring[16][EFR32_TIFS_RECORD_WORDS];
+	uint32_t tifs_norm_ring[4][EFR32_TIFS_RECORD_WORDS];
+#endif
+#if defined(CONFIG_EFR32_SEQ_WAKE_PROBE)
+	/*
+	 * The latest timed commands: post to first poll (TIMER0 counts), and the M0+'s SysTick
+	 * at its IRQ 23 entry and at that poll (seq_abi.h EFR32_SEQ_TIMED_ENTRY_ST, _POLL_ST).
+	 */
+	uint32_t wake_ring[16][3];
+#endif
 };
 struct efr32_radio_probe efr32_radio_probe;
 static uint32_t efr32_radio_probe_job_start;
+static bool efr32_radio_probe_fd;
 #define EFR32_PROBE_MAX(field, value) \
 	do { \
 		uint32_t v_ = (value); \
@@ -348,6 +432,106 @@ static uint32_t efr32_radio_probe_job_start;
 #else
 #define EFR32_PROBE_MAX(field, value) do { } while (0)
 #define EFR32_PROBE_PATH(field) do { } while (0)
+#endif
+
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+void efr32_radio_probe_slot(bool replied, bool lll_declines, int32_t margin_us)
+{
+	struct efr32_radio_probe *p = &efr32_radio_probe;
+
+	if (replied) {
+		p->slot_reply_margin_min = (p->slot_verdicts[1][0] + p->slot_verdicts[1][1] == 0U) ?
+			margin_us : MIN(p->slot_reply_margin_min, margin_us);
+	} else {
+		p->slot_refused_margin_max = (p->slot_verdicts[0][0] + p->slot_verdicts[0][1] == 0U) ?
+			margin_us : MAX(p->slot_refused_margin_max, margin_us);
+	}
+	p->slot_verdicts[replied ? 1 : 0][lll_declines ? 1 : 0]++;
+}
+#endif
+
+#if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
+static void efr32_tifs_probe_setup(void)
+{
+	static bool done;
+
+	if (done) {
+		return;
+	}
+	done = true;
+	CMU->CLKEN0_SET = CMU_CLKEN0_PRS | CMU_CLKEN0_TIMER1;
+	PRS->ASYNC_CH[EFR32_TIFS_PRS_EOF].CTRL = PRS_ASYNC_CH_CTRL_FNSEL_A | PRS_ASYNC_MODEMH_EOF;
+	PRS->ASYNC_CH[EFR32_TIFS_PRS_TX].CTRL = PRS_ASYNC_CH_CTRL_FNSEL_A | PRS_ASYNC_RACL_TX;
+	PRS->ASYNC_CH[EFR32_TIFS_PRS_SYNC].CTRL =
+		PRS_ASYNC_CH_CTRL_FNSEL_A | PRS_ASYNC_MODEMH_SYNCSENT;
+	PRS->CONSUMER_TIMER1_CC0 = EFR32_TIFS_PRS_EOF;
+	PRS->CONSUMER_TIMER1_CC1 = EFR32_TIFS_PRS_TX;
+	PRS->CONSUMER_TIMER1_CC2 = EFR32_TIFS_PRS_SYNC;
+	TIMER1->EN_CLR = TIMER_EN_EN;
+	TIMER1->CFG = TIMER_CFG_OSMEN;
+	TIMER1->CC[0].CFG = TIMER_CC_CFG_MODE_INPUTCAPTURE | TIMER_CC_CFG_INSEL_PRSASYNCPULSE;
+	TIMER1->CC[1].CFG = TIMER_CC_CFG_MODE_INPUTCAPTURE | TIMER_CC_CFG_INSEL_PRSASYNCLEVEL;
+	TIMER1->CC[2].CFG = TIMER_CC_CFG_MODE_INPUTCAPTURE | TIMER_CC_CFG_INSEL_PRSASYNCPULSE;
+	TIMER1->EN_SET = TIMER_EN_EN;
+	for (int i = 0; i < 3; i++) {
+		TIMER1->CC[i].CTRL = TIMER_CC_CTRL_ICEDGE_RISING;
+	}
+	TIMER1->TOP = EFR32_TIFS_TIMER1_TOP;
+	TIMER1->CTRL = TIMER_CTRL_RISEA_RELOADSTART;
+	efr32_radio_probe.tifs_min = UINT32_MAX;
+}
+
+/* Completion start: the reply's captures since the last EOF, if it sent one. */
+static void efr32_tifs_probe_sample(void)
+{
+	uint32_t r[EFR32_TIFS_RECORD_WORDS];
+	bool sent = false;
+
+	while ((TIMER1->STATUS & TIMER_STATUS_ICFEMPTY0) == 0U) {
+		(void)TIMER1->CC[0].ICF;
+	}
+	r[0] = 0U;
+	while ((TIMER1->STATUS & TIMER_STATUS_ICFEMPTY1) == 0U) {
+		r[0] = TIMER1->CC[1].ICF;
+	}
+	while ((TIMER1->STATUS & TIMER_STATUS_ICFEMPTY2) == 0U) {
+		r[1] = TIMER1->CC[2].ICF;
+		sent = true;
+	}
+	if (!sent) {
+		return;
+	}
+	for (uint32_t i = 0U; i < EFR32_SEQ_TRACE_RX2TX_WORDS; i++) {
+		r[2U + i] = EFR32_SEQ_TRACE_RX2TX_STIMER[i];
+		r[2U + EFR32_SEQ_TRACE_RX2TX_WORDS + i] = EFR32_SEQ_TRACE_RX2TX_SYSTICK[i];
+	}
+	r[EFR32_TIFS_RECORD_WORDS - 1U] = *EFR32_SEQ_TRACE_TX_AT_SYSTICK;
+	/* Only a reply: the sequencer stamps TX_AT at the TX entry after a responding RX2TX. */
+	static uint32_t tx_at_last;
+
+	if (r[EFR32_TIFS_RECORD_WORDS - 1U] == tx_at_last) {
+		return;
+	}
+	tx_at_last = r[EFR32_TIFS_RECORD_WORDS - 1U];
+
+	struct efr32_radio_probe *p = &efr32_radio_probe;
+	uint32_t bin = (r[1] < EFR32_TIFS_HIST_FIRST) ? 0U :
+		       MIN((r[1] - EFR32_TIFS_HIST_FIRST) / EFR32_TIFS_HIST_BIN + 1U,
+			   EFR32_TIFS_HIST_BINS + 1U);
+
+	p->tifs_samples++;
+	p->tifs_min = MIN(p->tifs_min, r[1]);
+	p->tifs_max = MAX(p->tifs_max, r[1]);
+	p->tifs_hist[bin]++;
+	if (r[1] > EFR32_TIFS_OUTLIER) {
+		memcpy(p->tifs_out_ring[p->tifs_outliers % ARRAY_SIZE(p->tifs_out_ring)], r,
+		       sizeof(r));
+		p->tifs_outliers++;
+	} else {
+		memcpy(p->tifs_norm_ring[p->tifs_samples % ARRAY_SIZE(p->tifs_norm_ring)], r,
+		       sizeof(r));
+	}
+}
 #endif
 static struct efr32_radio_completion_dispatch efr32_radio_completion_dispatch;
 
@@ -1283,6 +1467,14 @@ static void efr32_seq_timed_probe(void)
 	    lead < efr32_radio_probe.seq_lead_min) {
 		efr32_radio_probe.seq_lead_min = lead;
 	}
+#if defined(CONFIG_EFR32_SEQ_WAKE_PROBE)
+	uint32_t *w = efr32_radio_probe.wake_ring[efr32_radio_probe.timed_samples %
+						   ARRAY_SIZE(efr32_radio_probe.wake_ring)];
+
+	w[0] = entry - efr32_seq_timed_posted;
+	w[1] = *EFR32_SEQ_TIMED_WORD(EFR32_SEQ_TIMED_ENTRY_ST);
+	w[2] = *EFR32_SEQ_TIMED_WORD(EFR32_SEQ_TIMED_POLL_ST);
+#endif
 }
 #endif
 
@@ -2749,6 +2941,13 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 		efr32_radio_probe_job_start = k_cycle_get_32();
 		efr32_radio_probe.samples++;
 #endif
+#if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
+		efr32_tifs_probe_sample();
+#endif
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+		CMU->CLKEN1_SET = CMU_CLKEN1_ICACHE0;
+		ICACHE0->CMD = ICACHE_CMD_STARTPC;
+#endif
 		key = irq_lock();
 		if (efr32_radio_completion_dispatch_take(&efr32_radio_completion_dispatch)) {
 			callback = efr32_radio_completion_work.callback;
@@ -2818,6 +3017,30 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_SET_OFFSET +
 				     EFR32_FRC_IEN_OFFSET) = EFR32_FRC_IF_EVENTS;
 		}
+#if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
+		ICACHE0->CMD = ICACHE_CMD_STOPPC;
+		{
+			uint32_t run = k_cycle_get_32() - efr32_radio_probe_job_start;
+			uint32_t misses = ICACHE0->PCMISSES;
+			uint8_t c = probe_conn ? 1U : 0U;
+
+			efr32_radio_probe.ic_runs[c][probe_kind]++;
+			efr32_radio_probe.ic_cycles[c][probe_kind] += run;
+			efr32_radio_probe.ic_hits[c][probe_kind] += ICACHE0->PCHITS;
+			efr32_radio_probe.ic_misses[c][probe_kind] += misses;
+			EFR32_PROBE_MAX(ic_misses_max[c][probe_kind], misses);
+			if (run > efr32_radio_probe.completion_run[c][probe_kind]) {
+				efr32_radio_probe.ic_misses_longest[c][probe_kind] = misses;
+			}
+		}
+#endif
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		if (efr32_radio_probe_fd) {
+			efr32_radio_probe_fd = false;
+			EFR32_PROBE_MAX(completion_run_fd[probe_conn ? 1 : 0][probe_kind],
+					k_cycle_get_32() - efr32_radio_probe_job_start);
+		}
+#endif
 		EFR32_PROBE_MAX(completion_run[probe_conn ? 1 : 0][probe_kind],
 				k_cycle_get_32() - efr32_radio_probe_job_start);
 	}
@@ -3495,6 +3718,9 @@ void radio_setup(void)
 	/* The turnaround reset writes shared SEQRAM words: radio bus clock first. */
 	efr32_radio_bus_clocks_on();
 	efr32_hw_turnaround_reset();
+#if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
+	efr32_tifs_probe_setup();
+#endif
 #if defined(CONFIG_EFR32_RADIO_QEMU_TIFS)
 	efr32_qemu_tifs_state_init(&efr32_qemu_tifs);
 	efr32_qemu_tifs_next_action = EFR32_QEMU_TIFS_NEXT_NONE;
@@ -4886,10 +5112,18 @@ void radio_disable(void)
 	if (((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
 	      EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
 	    EFR32_RAC_STATE_RXFRAME) {
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		uint32_t fd_start = k_cycle_get_32();
+#endif
 		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 		while (!radio_is_idle()) {
 		}
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		efr32_radio_probe.fd_pulses++;
+		EFR32_PROBE_MAX(fd_wait, k_cycle_get_32() - fd_start);
+		efr32_radio_probe_fd = true;
+#endif
 		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
