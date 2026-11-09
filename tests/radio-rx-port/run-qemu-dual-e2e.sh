@@ -103,10 +103,10 @@ if [ -z "$rx_arm_line" ] || [ -z "$tx_snapshot_line" ] ||
 fi
 
 # A connectable advertiser must return from its first TX completion and launch
-# a later advertising event.  Require a second snapshot after the first RAC
-# TX->OFF transition; this remains a QEMU/Zephyr scheduler contract, not a
-# claim about silicon airtime.
-tx_off_line=$(grep -n 'RAC state 9 -> 0' "$RUNTIME_DIR/radio.trace" |
+# a later advertising event.  Require a second snapshot after the first exit
+# from TX (to OFF, or to TX2RX on the silicon path); this remains a QEMU/Zephyr
+# scheduler contract, not a claim about silicon airtime.
+tx_off_line=$(grep -nE 'RAC state 9 -> (0|11)$' "$RUNTIME_DIR/radio.trace" |
     head -1 | cut -d: -f1)
 second_tx_snapshot_line=$(awk -v start="${tx_off_line:-0}" '
     NR > start && /TX snapshot sequence=/ { print NR; exit }
@@ -152,11 +152,9 @@ if ! grep -Eq 'addr=0x(aa|ba)000098 value=0x00000208' "$RUNTIME_DIR/radio.trace"
     exit 1
 fi
 echo "radio-dual-e2e: descriptor acknowledgements=$descriptor_ack_count (crossed logical offset 0x200)"
-
-# The advertiser's QEMU-only TIFS seam is exercised only when its TX state
-# retires before a later software-RX arm.  The trace is intentionally a
-# machine-level boundary: it does not identify a silicon packet-end event.
-tx_off_line=$(grep -n 'RAC state 9 -> 0' "$RUNTIME_DIR/radio.trace" |
+# The scanner arms software RX again after the advertiser's first TX ends. The trace is
+# intentionally a machine-level boundary: it does not identify a silicon packet-end event.
+tx_off_line=$(grep -nE 'RAC state 9 -> (0|11)$' "$RUNTIME_DIR/radio.trace" |
     head -1 | cut -d: -f1)
 post_tx_rx_arm_line=$(awk -v start="${tx_off_line:-0}" '
     NR > start && /addr=0xa8021008 value=0x00000002/ { print NR; exit }
