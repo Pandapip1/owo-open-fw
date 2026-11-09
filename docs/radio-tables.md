@@ -9510,3 +9510,46 @@ pulses on the earlier model too; master's timing and EM2's did not hit it in the
 radio job inside a phase (LLL budget 249.1 us silicon, 266.9 us QEMU, 7.79) exceeds the slack, so
 whether a session survives depends on where the radio events fall: the slack and the radio budgets
 need reconciling (not changed here).
+
+### 7.96 Thread stacks cut to the measured peaks
+
+Tags as in 7.79. Question: the hardware image had 100 B left under its 31 000 B budget after the
+admission job table grew (vendor/zephyr 5504cebb61b); 7.86 measured every stack but cut only the
+radio's, leaving main, idle, the system work queue and the host's RX and TX threads at their
+Zephyr defaults. Tooling: `scratch/ss/stackrun.sh`, `stack_watermark.py` in a work tree (the
+QMP `memsave` of every stack object through the product SoC's M33; high-water mark as in 7.86).
+
+**Run [Q].** Dual machine, worktree QEMU (vendor/qemu 2acf4ddcc2): the product (`owo_suit
+-DOWO_HW=ON`, `sim/product-qemu.conf`, `CONFIG_INIT_STACKS`, EM2 on, suit board) against the
+Zephyr Central (`prj-central-product.conf` + `prj-central-product-stim.conf`), 300 s wall: LE
+Secure Connections passkey pairing to level 4 (P-256 on the long work queue), 240 encrypted GATT
+rounds, 24 stimulation cycles over the link, 3020 positive high-side closures on the board
+(its VCD), and EM2 entered and left between radio events throughout (7.95). Two runs gave the
+same figures (icount).
+
+| thread | before | this run | 7.86 largest (source) | reserve | after |
+|---|---|---|---|---|---|
+| main | 2048 | 1384 | 1420 (QEMU, fault scenarios) | 108 (FP) | **1528** |
+| ISR | 1024 | 536 | 540 (silicon) | - | 1024 (not cut) |
+| idle | 512 | 332 | 348 (QEMU) | 36 | **384** |
+| system work queue | 1024 | 384 | 420 (silicon) | 36 | **456** (744 with `OWO_SIM_INJECT`: 708, its test mailbox) |
+| BT RX | 1200 | **1096** | 988 (silicon) | 36 | **1136** |
+| BT long work queue | 1008 | 732 | 968 (silicon) | 36 | 1008 |
+| BT TX processor | 1024 | 416 | 432 (silicon) | 36 | **472** |
+| controller RX | 896 | 396 | 408 (silicon) | 36 | **448** |
+| controller priority RX | 640 | 380 | 416 (silicon) | 36 | **456** |
+| LLL, ULL worker, completion, TX/RX launch | 784, 688, 768, 480, 480 | 656, 532, 604, 260, 444 | 7.86 | 36 | unchanged |
+
+Rule as in 7.86: the largest peak of every source plus the reserve for one interrupt's frame on
+that thread (108 B for main, the only FP thread; 36 B otherwise), rounded up to 8. BT RX's peak
+is new: 1096 B with EM2 on, above 7.86's 988 B on silicon. The ISR stack is not cut: its worst
+case is the deepest nesting of interrupt priorities, which no run measures. The run with the cut
+stacks repeats every figure above, without a fault (the sentinels and the stack limit registers
+are on); the product pairing e2e and native-sim pass.
+
+RAM after (`scripts/check-hardware-ram.sh`): kit 27412, suit 27012, suit HW 28436 B (was 29876,
+29476, 30900).
+
+Not measured here: the 23 fault scenarios (7.86's figures for them are taken), and silicon with
+EM2 (silicon has no EM2 image yet, 7.95).
+
