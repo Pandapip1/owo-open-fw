@@ -60,7 +60,7 @@ static DEVICE_API(dac, ltc2634_api) = {
 
 #define LTC2634_INST(i)                                                                            \
 	static const struct ltc2634_config ltc2634_cfg_##i = {                                     \
-		.bus = SPI_DT_SPEC_INST_GET(i, SPI_OP_MODE_MASTER | SPI_WORD_SET(8) |              \
+		.bus = SPI_DT_SPEC_INST_GET(i, SPI_OP_MODE_CONTROLLER | SPI_WORD_SET(8) |          \
 						       SPI_TRANSFER_MSB),                          \
 		.reset = GPIO_DT_SPEC_INST_GET_OR(i, reset_gpios, {0}),                            \
 	};                                                                                         \

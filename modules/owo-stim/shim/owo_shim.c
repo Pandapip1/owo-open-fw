@@ -89,7 +89,9 @@ void owo_busy_wait_us(uint32_t us)
  * The system clock's hardware cycles are the timebase, so no counter device is
  * owned here. The handle is only an identity token for the Rust wrapper.
  */
+#if DT_HAS_COMPAT_STATUS_OKAY(owo_suit_output)
 static const char fine_clock;
+#endif
 
 int owo_counter_start(const void *d)
 {
