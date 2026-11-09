@@ -449,18 +449,15 @@ LL PDUs crossed the QEMU RAC/BUFC/medium boundary in the expected order. They
 do not establish over-air reception, CRC/FRC production, packet-end timing,
 PROTIMER behavior, BLE channel access semantics, or a silicon TIFS guarantee.
 
-The same harness also enables QEMU-only `BURTC compare program`, `compare
-expired`, IRQ18 and TIMER0 event tracepoints, all timestamped in virtual
-nanoseconds.  For each accepted active-scan turn it requires the causal model
-sequence: the advertiser TX retires, a scheduler-clock compare expires (BURTC
-IRQ18 or a TIMER0 CC match; the kernel chooses which), and only then does guest
-MMIO put RAC into RXSEARCH.  The last transition is the persistent TIFS job's
-observable action; the QEMU timer callback itself cannot issue RAC MMIO.  `MAX_TIFS_JOB_HANDOFF_NS` (100,000 ns
-by default) bounds expiry/IRQ publication to that job action as a QEMU virtual
-time diagnostic.  A five-second `-icount shift=5` run recorded 19 such
-handoffs with a 29,920-ns maximum.  This is observability for the simulated
-IRQ-exit scheduling path, not a guest-log dependency, silicon scheduling
-measurement, or BLE timing claim.
+Both endpoints run the silicon path, so the harness also checks how each reply
+was sent: the sender's last RAC transitions before every `SCAN_REQ` and
+`SCAN_RSP` snapshot must be RXFRAME -> RX2TX -> TX (3 -> 7 -> 9), the
+sequencer's turnaround at T_IFS without the M33 (radio-tables.md 7.82, 7.87),
+never a software TXEN from OFF (0 -> 8). It reports the time from the received
+frame's handoff to that TX entry, about 141 us of QEMU virtual time
+(`run-qemu-active-scan-e2e.sh:154-212`). This is model timing, not an RF T_IFS
+claim. (Until f98fc09 the profile ran the QEMU-only TIFS job, and this
+paragraph described that job's BURTC/TIMER0 hand-off check.)
 
 The full hardware-output configuration has an explicit RAM gate. After a
 `build/ram-probe` build, run `scripts/check-hardware-ram.sh`; it reads the
