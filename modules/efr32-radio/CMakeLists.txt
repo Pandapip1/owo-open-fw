@@ -180,8 +180,11 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
             "staged scanner replies: stage the SCAN_RSP receive")
   if(CONFIG_BT_CENTRAL)
     efr32_radio_patch(lll/lll_scan.c "\t\tif (pdu_end_us > (HAL_TICKER_TICKS_TO_US(ull->ticks_slot) -\n\t\t\t\t  EVENT_IFS_US - 352 - EVENT_OVERHEAD_START_US -\n\t\t\t\t  EVENT_TICKER_RES_MARGIN_US)) {\n"
-              "\t\t/* A staged CONNECT_IND: what the sequencer sent, or nothing. */\n\t\tif (efr32_scan_declined(pdu_end_us > (HAL_TICKER_TICKS_TO_US(ull->ticks_slot) -\n\t\t\t\t  EVENT_IFS_US - 352 - EVENT_OVERHEAD_START_US -\n\t\t\t\t  EVENT_TICKER_RES_MARGIN_US))) {\n"
+              "\t\t/* A staged CONNECT_IND: what the sequencer sent, or nothing. */\n\t\tif (efr32_init_declined(pdu_end_us, HAL_TICKER_TICKS_TO_US(ull->ticks_slot) -\n\t\t\t\t  EVENT_IFS_US - 352 - EVENT_OVERHEAD_START_US -\n\t\t\t\t  EVENT_TICKER_RES_MARGIN_US)) {\n"
               "staged initiator replies: the sequencer's CONNECT_IND decision")
+    efr32_radio_patch(lll/lll_scan.c "static void efr32_scan_stage_next(struct lll_scan *lll);\n"
+              "static void efr32_scan_stage_next(struct lll_scan *lll);\nstatic bool efr32_init_declined(uint32_t pdu_end_us, uint32_t latest_us);\n"
+              "staged initiator replies: declaration")
     # WinOffset: hal/efr32/ll_deadlines.h EFR32_DL_CONNECT_IND_WIN_OFFSET.
     efr32_radio_patch(lll/lll_scan.c "\t\t\tconn_space_us = conn_offset_us;\n\t\t\tpdu_tx->connect_ind.win_offset = sys_cpu_to_le16(0);\n"
               "\t\t\tconn_space_us = conn_offset_us + EFR32_DL_CONNECT_IND_WIN_OFFSET *\n\t\t\t\t\t\t\t BT_TRANSMIT_WINDOW_UNIT_US;\n\t\t\tpdu_tx->connect_ind.win_offset =\n\t\t\t\tsys_cpu_to_le16(EFR32_DL_CONNECT_IND_WIN_OFFSET);\n"

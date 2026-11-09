@@ -373,6 +373,14 @@ struct efr32_radio_probe {
 	uint32_t fd_pulses;
 	uint32_t fd_wait;
 	uint32_t completion_run_fd[2][EFR32_COMPLETION_KINDS];
+	/*
+	 * The initiator's CONNECT_IND verdicts, [sequencer replied][isr_rx_pdu()'s slot check
+	 * declines], and the frames nearest the slot's end (us before it; negative after): the
+	 * least margin of a reply, the greatest of a frame the sequencer refused.
+	 */
+	uint32_t slot_verdicts[2][2];
+	int32_t slot_reply_margin_min;
+	int32_t slot_refused_margin_max;
 #if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
 	/*
 	 * ICACHE0's performance counters over each completion run, per kind as completion_run:
@@ -424,6 +432,22 @@ static bool efr32_radio_probe_fd;
 #else
 #define EFR32_PROBE_MAX(field, value) do { } while (0)
 #define EFR32_PROBE_PATH(field) do { } while (0)
+#endif
+
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+void efr32_radio_probe_slot(bool replied, bool lll_declines, int32_t margin_us)
+{
+	struct efr32_radio_probe *p = &efr32_radio_probe;
+
+	if (replied) {
+		p->slot_reply_margin_min = (p->slot_verdicts[1][0] + p->slot_verdicts[1][1] == 0U) ?
+			margin_us : MIN(p->slot_reply_margin_min, margin_us);
+	} else {
+		p->slot_refused_margin_max = (p->slot_verdicts[0][0] + p->slot_verdicts[0][1] == 0U) ?
+			margin_us : MAX(p->slot_refused_margin_max, margin_us);
+	}
+	p->slot_verdicts[replied ? 1 : 0][lll_declines ? 1 : 0]++;
+}
 #endif
 
 #if defined(CONFIG_EFR32_RADIO_TIFS_PROBE)
@@ -482,6 +506,13 @@ static void efr32_tifs_probe_sample(void)
 		r[2U + EFR32_SEQ_TRACE_RX2TX_WORDS + i] = EFR32_SEQ_TRACE_RX2TX_SYSTICK[i];
 	}
 	r[EFR32_TIFS_RECORD_WORDS - 1U] = *EFR32_SEQ_TRACE_TX_AT_SYSTICK;
+	/* Only a reply: the sequencer stamps TX_AT at the TX entry after a responding RX2TX. */
+	static uint32_t tx_at_last;
+
+	if (r[EFR32_TIFS_RECORD_WORDS - 1U] == tx_at_last) {
+		return;
+	}
+	tx_at_last = r[EFR32_TIFS_RECORD_WORDS - 1U];
 
 	struct efr32_radio_probe *p = &efr32_radio_probe;
 	uint32_t bin = (r[1] < EFR32_TIFS_HIST_FIRST) ? 0U :

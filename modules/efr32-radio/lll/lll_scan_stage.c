@@ -174,6 +174,20 @@ static void efr32_scan_stage_next(struct lll_scan *lll)
 }
 #endif /* CONFIG_EFR32_RADIO_CONN_STAGED */
 
+#if defined(CONFIG_BT_CENTRAL)
+/* isr_rx_pdu()'s CONNECT_IND slot check, then the sequencer's decision on a staged receive. */
+static bool efr32_init_declined(uint32_t pdu_end_us, uint32_t latest_us)
+{
+	bool declines = efr32_scan_declined(pdu_end_us > latest_us);
+
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+	efr32_radio_probe_slot(!declines, pdu_end_us > latest_us,
+			       (int32_t)(latest_us - pdu_end_us));
+#endif
+	return declines;
+}
+#endif
+
 /*
  * OpenISA's scanner arms an RX->TX turnaround for every receive window, a passive scanner's
  * included. On the EFR32 an armed window holds the RAC in RX2TX at each frame's end and gives
