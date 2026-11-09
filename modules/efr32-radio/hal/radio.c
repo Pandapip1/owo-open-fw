@@ -332,6 +332,13 @@ struct efr32_radio_probe {
 	uint32_t conn_outcome_after_eof;
 	/* RAC.STIMER (from the RX2TX entry) when the sequencer took the stage, ticks. */
 	uint32_t conn_taken_at;
+	/*
+	 * radio_disable() ending an RXFRAME with FORCEDISABLE: pulses, the longest wait for idle,
+	 * and the longest completion run of each kind that followed a pulse (the close budget).
+	 */
+	uint32_t fd_pulses;
+	uint32_t fd_wait;
+	uint32_t completion_run_fd[2][EFR32_COMPLETION_KINDS];
 #if defined(CONFIG_EFR32_RADIO_ICACHE_PROBE)
 	/*
 	 * ICACHE0's performance counters over each completion run, per kind as completion_run:
@@ -355,6 +362,7 @@ struct efr32_radio_probe {
 };
 struct efr32_radio_probe efr32_radio_probe;
 static uint32_t efr32_radio_probe_job_start;
+static bool efr32_radio_probe_fd;
 #define EFR32_PROBE_MAX(field, value) \
 	do { \
 		uint32_t v_ = (value); \
@@ -2867,6 +2875,13 @@ static void efr32_radio_completion_job(void *a, void *b, void *c)
 			}
 		}
 #endif
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		if (efr32_radio_probe_fd) {
+			efr32_radio_probe_fd = false;
+			EFR32_PROBE_MAX(completion_run_fd[probe_conn ? 1 : 0][probe_kind],
+					k_cycle_get_32() - efr32_radio_probe_job_start);
+		}
+#endif
 		EFR32_PROBE_MAX(completion_run[probe_conn ? 1 : 0][probe_kind],
 				k_cycle_get_32() - efr32_radio_probe_job_start);
 	}
@@ -4935,10 +4950,18 @@ void radio_disable(void)
 	if (((*radio_reg32(EFR32_RAC_BASE + EFR32_RAC_STATUS_OFFSET) >>
 	      EFR32_RAC_STATUS_STATE_SHIFT) & EFR32_RAC_STATUS_STATE_MASK) ==
 	    EFR32_RAC_STATE_RXFRAME) {
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		uint32_t fd_start = k_cycle_get_32();
+#endif
 		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_SET_OFFSET +
 			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 		while (!radio_is_idle()) {
 		}
+#if defined(CONFIG_EFR32_RADIO_TIMING_PROBE)
+		efr32_radio_probe.fd_pulses++;
+		EFR32_PROBE_MAX(fd_wait, k_cycle_get_32() - fd_start);
+		efr32_radio_probe_fd = true;
+#endif
 		*radio_reg32(EFR32_RAC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
 			     EFR32_RAC_CTRL_OFFSET) = EFR32_RAC_CTRL_FORCEDISABLE;
 		*radio_reg32(EFR32_FRC_BASE + EFR32_REGISTER_CLEAR_OFFSET +
