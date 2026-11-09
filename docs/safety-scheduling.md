@@ -108,6 +108,48 @@ Found in `vendor/zephyr/kernel/deadline_admission.c`, `include/zephyr/kernel.h`,
 | G7 | **Releases latched while the consumer runs are not checked.** `z_deadline_admission_posted()` returns feasible unless the release finds the consumer idle. | Coalesced work is unproved. | Check every release; a latched run is a job behind the current one. |
 | G8 | **Scheduler-locked and work-queue sections are outside admission.** The pump's `k_sched_lock()` around a pulse (`hal.rs`) and system work-queue items are only covered by the blocking term. | Non-preemptible work of unknown length. | The pump's pulse becomes admitted jobs (above); work-queue items that a safety depends on (the expander's) become admitted jobs. |
 
+Closed (vendor/zephyr, branch `safety-sched`; `tests/kernel/sched/deadline_admission` on
+native_sim, 18/18, each new case failing without its change; the product's QEMU pairing e2e
+passes on the result):
+
+- G6, 254668a6e29: a check whose job table overflows refuses the request that asked for it.
+- G7, ebe4d826bc0: every publication not admitted when it was armed is checked; a run latched
+  behind the run in progress counts as work but its deadline only orders it.
+- G5, 1d1c5cbaefc: a failed check re-runs without the request; if admitted work is feasible
+  without it, the request fails (`-ETIME`, or a publication reported against its own event and
+  not recorded: it neither releases its consumer nor joins a pending run). Admitted work is
+  reported only when it is infeasible without the request.
+
+### G1 and G2 together
+
+Budget enforcement (G1) cannot come before interrupt accounting (G2): interrupt time is
+charged to the thread it interrupts, so an enforced budget would count interrupts that
+admission already accounts for separately, and report overruns that are not. The plan:
+
+- **Declaration.** Each interrupt line in use gets a budget C and a minimum inter-arrival T
+  (a kernel table filled by the drivers and the radio). An arrival sooner than T after the
+  previous one, or a handler longer than C, is a miss (new kinds), reported like any other.
+  Lines whose source can arrive faster than T (the expander's /INT, I2C) mask themselves in
+  the top half until the job that serves them has run, which makes T their job's period.
+- **Accounting.** Admission replaces the single blocking term with the interrupts' supply
+  bound: in any interval of length t, threads get at least t - sum over lines of
+  (floor(t / T) + 1) C. `sim_run()` advances time through that bound instead of 1:1, so every
+  job's start is checked against the interrupts that can arrive before it, not one handler at
+  the start of the check.
+- **Enforcement.** Interrupt entry and exit (the Cortex-M ISR wrapper and the direct-ISR
+  header) record the time spent in handlers. A budgeted run arms one scheduler clock event for
+  its remaining budget when it starts or resumes and disarms it when it is switched out; on
+  expiry the handler time accumulated during the run is subtracted and the event re-armed, or,
+  if the run's own time has reached its budget, `K_DEADLINE_MISS_OVERRUN` is reported.
+- **Evidence.** C and T for each line in the product (TIMER0 and BURTC clock events, LLL and
+  worker doorbells, FRC `isr_radio`, GPIO, I2C0, IADC, SMU) from QEMU traces now, silicon
+  owed. The WDOG0 warning stays outside: it is the containment for the scheduler.
+
+Open: the QEMU product image counts link-layer misses instead of stopping
+(`CONFIG_SCHED_DEADLINE_MISS_COUNT`, `sim/product-qemu.conf`; `radio-tables.md` 7.79: the model
+runs connection turnarounds past their start-by deadlines). Under "a miss is a scheduler bug"
+each of those is one to fix; the count is not yet reported by the e2e.
+
 ## Decisions for the user
 
 1. **Who wins a conflict between a pulse and the radio.** Recommended: the pulse chain runs above
