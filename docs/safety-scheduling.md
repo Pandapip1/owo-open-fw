@@ -145,10 +145,57 @@ admission already accounts for separately, and report overruns that are not. The
   worker doorbells, FRC `isr_radio`, GPIO, I2C0, IADC, SMU) from QEMU traces now, silicon
   owed. The WDOG0 warning stays outside: it is the containment for the scheduler.
 
-Open: the QEMU product image counts link-layer misses instead of stopping
-(`CONFIG_SCHED_DEADLINE_MISS_COUNT`, `sim/product-qemu.conf`; `radio-tables.md` 7.79: the model
-runs connection turnarounds past their start-by deadlines). Under "a miss is a scheduler bug"
-each of those is one to fix; the count is not yet reported by the e2e.
+**Cooperative runs break the shifting argument.** "Interrupts delay every job's start by at
+most the interrupt time before it" holds for preemptive scheduling, not for the non-preemptive
+EDF the scheduler uses inside one cooperative priority (the radio's meta-IRQ level). A
+counterexample: without interrupts a short job Z starts before a long job L is released, then an
+urgent job E runs, then L. Interrupts delay Z past L's release; EDF now picks L (its deadline is
+earlier than Z's), L runs non-preemptively, and E, released just after, waits L's whole budget,
+more than the interrupt time. So admission must be conservative there: per job j of a
+cooperative priority, add one non-preemptive blocker, the largest budget among the
+same-priority jobs released before j with a later deadline, and count the work released while j
+waits (higher priority, or same priority and an earlier deadline):
+x = s_j + B_j + I(x) + W(s_j, x), started late if the least fixed point x is past j's deadline.
+
+**Open: interrupt inter-arrival is not bounded today.** The supply bound needs a minimum
+inter-arrival T per line, and several lines have none: the TIMER0 and BURTC clock events re-arm
+at whatever spacing the timeout queue asks for (the TIMER0 provider's floor is a 2 us lead,
+`COUNTER_SILABS_TIMER_CLOCK_EVENT_MIN_LEAD_NS`), and the LLL and worker doorbells fire on every
+post. With T near 0 the bound is unusable, and taking it from the check's start (interrupts
+arriving synchronously at time 0) is too pessimistic for timed releases milliseconds ahead (the
+radio's prepares). Closing G2 needs a rate that holds by construction for each line before any
+bound is computed: a clock-event line serves only admitted arms (their releases are already
+jobs); a doorbell is part of the post it rings (its cost belongs in the posted job's budget, not
+a separate source); a peripheral line (GPIO, I2C, IADC, FRC) masks itself until its job has run.
+Then the bound runs per busy period, not from the check's start. This is the next design step.
+
+**QEMU miss count (scripts fail on any; `tests/radio-rx-port/qemu-miss-count.sh`).**
+
+| Profile | Advertiser / Peripheral | Scanner / Central |
+|---|---|---|
+| product pairing (owo_suit + `sim/product-qemu.conf`, Central product profile), 60 s | 0 | 0 |
+| radio-port connection (`prj-connection.conf`) vs Central, 60 s | 0 | 0 |
+| radio-port default vs passive scanner (dual-e2e), 20 s | 0 | 0 |
+| radio-port default vs active scanner (active-scan-e2e), 30 s | **1** | 0 |
+| amateur Peripheral / Central (data identification), 120 s | 0 | 0 |
+
+The `radio-tables.md` 7.79 connection misses no longer occur (the staged replies, 7.82, 7.87).
+The one miss: a late start of `efr32_radio_completion_event`, 88-89 ms past its deadline, on the
+radio-port default image, which runs the QEMU-only TIFS and RX-descriptor seams
+(`tests/radio-port/prj.conf`). Its advertiser turns from ADV_IND to RX in software after the
+completion, so it reaches RXSEARCH about 160 us after the scanner's SCAN_REQ began; the model's
+descriptor path (`efr32bg22.c`, the synthetic RX offer) still hands that frame over at RXSEARCH,
+which silicon would not receive, the RAC never enters RXFRAME, and the completion is posted only
+at the next event's launch, carrying the previous event's deadline. The silicon path (staged
+replies, the connection profile's advertiser) runs the same exchange with no miss, but the
+active-scan script checks the TIFS seam itself. Fix at the source, next: retire the TIFS and
+descriptor seams from the radio-port default image and the active-scan script (test the staged
+path), or make the model's offer path refuse a frame that began before RXSEARCH. (A change that
+dated an aborted advertising event's completion from its own launch removed the first instance
+but would also hide this lateness, so it was not kept.)
+
+The smoke and dual scripts also fail on `xxd`, which the dev shell does not provide (the
+awk replacement exists only as an uncommitted edit in the main tree).
 
 ## Decisions for the user
 
