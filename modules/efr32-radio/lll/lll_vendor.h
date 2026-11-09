@@ -9,8 +9,9 @@
 
 /*
  * XTAL + START is the prepare lead, a design value: docs/radio-tables.md 7.79 shows it covers the
- * measured expiry-to-launch chain (927.7 us silicon, 1505.7 us with an HFXO/DPLL restart; 1102.4
- * us QEMU), and admission checks each event against it.
+ * measured expiry-to-launch chain (927.7 us silicon, 1102.4 us QEMU), and admission checks each
+ * event against it. After EM2 the HFXO and DPLL are running again before the expiry: the
+ * scheduler clock wakes that much early (CLOCK_EVENT_SCHED_DEEP_WAKE_NS, 7.95).
  */
 #define EVENT_OVERHEAD_XTAL_US        1500 /* [D] with START: the prepare lead, 7.79 */
 #define EVENT_OVERHEAD_PREEMPT_US     0    /* if <= min, then dynamic preempt */

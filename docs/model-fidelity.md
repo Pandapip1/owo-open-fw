@@ -183,8 +183,8 @@ Measured and modelable, not done in this audit:
 - **Debugger effects** (C22-C24): WFI not gating the M33 clock while
   attached, EM2 never entered, side-effect-free debug reads, per-access SWD
   cost on the cores.
-- **EM2/EM3** (B69, B70, TODO energy modes): no energy-mode model yet;
-  silicon behaviour of the M0+ and radio in EM2/EM3 is partly measured.
+- **EM3/EM4** (TODO energy modes): EM2 is modelled (radio-tables.md 7.95);
+  EM3, EM4, EM1P and RAM power-down are not.
 
 Evidence too weak or missing:
 
@@ -320,7 +320,7 @@ Status of each reference-manual chapter in the model after this pass.
 | 9 | Oscillators | yes | Si SS7.73 | HFXO warm restart [P] |
 | 10 | SMU | partial | Si | only the AHBRADIO attribution |
 | 11 | CRYPTOACC | partial (gaps) | RM; Si for RADIOAES and TRNG timing (SS7.89) | TRNG test mode, health-test failures, IRQ; PK engine; BA413/418/419 |
-| 12 | EMU (incl. DCDC) | partial | RM, Si | RSTCAUSE/RSTCTRL, DCDC REGULATION only: no BOD, voltage monitors, EM2/EM3/EM4 |
+| 12 | EMU (incl. DCDC) | partial | RM, DS, Si SS7.74 | RSTCAUSE/RSTCTRL, EM2 (7.95), DCDC REGULATION: no BOD, voltage monitors, EM3/EM4, EM1P, LDMA/flash holding EM2 off |
 | 13 | PRS | yes (gaps) | RM, Si SS7.71/7.73 (probe routes, gating, timing) | producers CMU/CORE/AGC/BUFC/FRC/PROTIMER/SYNTH/PDM/LFRCO and some USART/EUART signals; RAC, CMU, MODEM, CORE, DTI, USART, WDOG consumers |
 | 14 | GPCRC | yes | RM | - (no LDMAXBAR source; the LDMA feeds INPUTDATA by SWREQ) |
 | 15 | RTCC | partial | RM | CCV0MATCH, PRECNT compare base, LOCK (capture and CCV outputs modelled) |
@@ -333,9 +333,9 @@ Status of each reference-manual chapter in the model after this pass.
 | 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input |
 | 23 | I2C | partial | RM | follower mode |
 | 24 | IADC | yes (gaps) | RM, Si SS7.89 timing | bipolar output, SCALEx calibration, SUPPLY inputs, tailgating |
-| 25 | GPIO | yes | RM | EM4 wake |
+| 25 | GPIO | yes | RM, DS 3.3 | EM4 wake; ports C/D input latch in EM2 [I] |
 | 26 | LDMA | yes (gaps) | RM, Si SS7.74 (error, EN) | own throughput [I]; not an interconnect manager (B81); DBGHALT |
-| 27 | WDOG | yes | RM, Si | EM2/EM3 run control |
+| 27 | WDOG | yes | RM, Si | EM3 run control |
 
 ## Model-gaps2 pass (2026-11-05)
 
@@ -471,7 +471,7 @@ DTI/DTIFS, USART CLK/IR/RX/TRIGGER, EUART0 RX, WDOG0 SRC; TIMER INSEL = PIN
 and the quadrature decoder; LETIMER DEBUGRUN; EUART0 parity errors, IrDA,
 auto-baud, flow control; LDMA as a bus manager and its own throughput on
 silicon; USART I2S and parity errors; I2C follower mode; EMU BOD, voltage
-monitors, DCDC beyond REGULATION; EM2/EM3/EM4.
+monitors, DCDC beyond REGULATION; EM3/EM4 (EM2: radio-tables.md 7.95).
 
 ## Tables
 
@@ -525,7 +525,7 @@ monitors, DCDC beyond REGULATION; EM2/EM3/EM4.
 | A44 | FPB hardware breakpoints survive SYSRESETREQ and fire on the next match (`bg22_reset_to_breakpoint`) | §7.27 (silicon) | yes | `dbg_op_reset` (`hw/misc/armv8m-debug.c` ~l.346). dap-test test_halt_registers_and_reset | none |
 | A45 | M0+ debug access via AP3 (OpenOCD `efm32.seq`): halt, hardware breakpoints, single-step; "external reset detected" when the M33 re-issues SEQRESET | §7.53, §7.57 (silicon) | no | `hw/misc/efr32-dap.c` exposes AP0 (M33) and AP1 (DCI) only | modelable from the ADIv5 / Armv6-M debug specs; needed to reproduce the AP3 workflows in simulation |
 | A46 | Connecting a fresh OpenOCD session to a running chip during early boot can itself hang stock (mailbox wait at 0x13056) | §7.53/§7.54 (silicon) | no | — | the mechanism is unknown (the halt-on-connect window races the M33/M0+ handshake). Not modelable until it is characterized |
-| A47 | Radio sleep/energy: datasheet lists the BLE radio chain (RF, synth, modem, FRC, BUFC RAM, M0+) as EM1-minimum and RFSENSE as EM2–EM4-capable; EM2/EM3 must not retain a usable radio | §3.1, §5 (datasheet) | no | no EM2/EM3 gating of radio blocks in `efr32bg22.c` | modelable at block level (radio inaccessible or reset in EM2+), but the EMU/CMU transition sequence is unknown; low priority |
+| A47 | Radio sleep/energy: datasheet lists the BLE radio chain (RF, synth, modem, FRC, BUFC RAM, M0+) as EM1-minimum and RFSENSE as EM2–EM4-capable; EM2/EM3 must not retain a usable radio | §3.1, §5 (datasheet) | partial | 7.95: EM2 only while RAC is idle (RM 12.3.2.2), M0+ clock stopped, registers and SEQRAM kept | RFSENSE; EM1P (radio active in EM2) |
 | A48 | Power-on reset vs SYSRESETREQ: the radio state (SR3 etc.) is the same after a real power cycle; SEQRAM is retained across an M33 reset | §7.5.2, §7.5.4 (silicon) | partial | SEQRAM (`radio_ram`) is plain RAM, so it survives system reset; no POR/warm distinction for radio registers | low value; all registers measured reset to their documented values |
 | A49 | Stock TX completes a whole frame and leaves TX well inside 10 ms. The stall settles within one instruction of TXEN (no gradual approach). FRC parses the header before stalling | §7.6, §7.20, §7.21, §7.30 (silicon, coarse) | yes (superseded) | frame timing now comes from the §7.71/7.72 calibrated anchors (`EFR32_RAC_TX_ENTRY_TO_SYNCSENT_NS` etc.) | the §7.6 numbers are halt-latency bounded and must not be used as timing; superseded |
 
@@ -603,8 +603,8 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B66 | M33 HCLK = 76.8 MHz = TIMER1 1:1 in stage 3 | §7.75 silicon | yes | efr32_cpu_clocks_update, efr32_hfrcodpll_hz | - |
 | B67 | RADIOCLKCTRL.EN=0 freezes the M0+ with state kept | §7.74 silicon | yes | efr32_cpu_clocks_update (0 Hz); T: core-clocks-radio-clock-stops-seq | - |
 | B68 | SYSCLKCTRL switch: no stall beyond ~0.1 us | §7.74 silicon | yes | immediate | - |
-| B69 | M33 entering EM2 stops the M0+ (82 cycles in 0.5 s) | §7.74 silicon | no | - | No EM2 model |
-| B70 | After EM2 wake HFXO.STATUS=0x40000000, DPLL.STATUS=0, SYSCLK on free-running HFRCO (-0.07 %) | §7.74 silicon | no | - | Not modelled |
+| B69 | M33 entering EM2 stops the M0+ (82 cycles in 0.5 s) | §7.74 silicon | yes | 7.95 efr32_emu_em2_enter (both cores at 0 Hz); restarted from its vector at the exit [I]; T: emu-em2-wfi | whether the M0+ is reset or loses its context [P] |
+| B70 | After EM2 wake HFXO.STATUS=0x40000000, DPLL.STATUS=0, SYSCLK on free-running HFRCO (-0.07 %) | §7.74 silicon | yes | 7.95: DPLL EN cleared at entry, HFXO off, HFRCODPLL 76.748 MHz until relocked; T: emu-em2-entry-exit | rate from other lock frequencies scaled [I] |
 | B71 | M0+ access costs (cycles): SEQRAM ld 2 / st 2.5, SRAM 3.25, radio 4.25 back-to-back (5 isolated), BUFC 3.25 (4 isolated), TIMER1 8.75, CMU 4.75; IRQ entry 16 | §7.74/7.75 silicon | yes (gaps) | efr32-interconnect.c timing table + idle wait state; M0+ SRAM window is I/O now. Probe harness on the model: radio 4.25 (isolated 5.1), BUFC 3.25, SRAM 3.25, TIMER1 8.75, CMU 4.75, IRQ entry 16 | SEQRAM store 2 not 2.5 (fetch/store conflict inside the Armv6-M translator, not a bus access) |
 | B72 | M33 access costs from flash: SRAM 1, SEQRAM 1.88, BUFC 1.88, radio/CMU/GPIO 3.88, TIMER1 11.88; from SRAM code: SEQRAM 3.6-3.9, radio 5.6-5.9, TIMER1 13.1, SRAM 1.5 | §7.74/7.75 silicon | partial | EFR32_M33_*_EXTRA_MILLICYCLES (~5710) | Flash-code numbers only; SRAM-resident code costs and flash data loads (4.5) not modelled |
 | B73 | M33 cycles per instruction class: ALU, ld/st 1, NOP 0.5, taken branch 2; flash data 4.5 (WS1), SRAM-resident code: SRAM 1.5, flash 4.0 | §7.75 silicon kernels | partial | target/arm/tcg/translate.c armv8m_main_extra_mc, icount_set_cpu_mem_costs (§7.93); qtest core-clocks-m33-access-costs | Placeholders: multiplies, divides (12), LDM/PUSH per word, IT folding, load-to-store, instruction-cache misses. Model runs silicon's crypto 6-22 % and radio paths 20-35 % short (§7.93) |
@@ -683,7 +683,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C19 | Right after nRESET release the DP answers at once (DPIDR 0x6ba02477) but the first AHB-AP write(s) to DHCSR fail ("Failed to write memory at 0xe000edf0") for 2 retry iterations; the 3rd succeeds | recover2-fpb3.log l.14-21; recover2-fpb2.log l.14-17, Si | no | efr32-dap.c:dap_ap_blocked only for SYSRESETREQ | AP window after a pin reset (same mechanism as C10?); duration and ack not recorded (retry loop, no timestamps) |
 | C20 | A DHCSR C_HALT (0xa05f0003) written in the first ms after pin-reset release halts the Non-secure app (PC 0x0000996e, before the FPB at 0x3220 fires); S_HALT within 50 polls | recover2-fpb3.log l.21-26, Si | partial | armv8m-debug.c:dbg_dhcsr_write; no pin reset path to rehearse it | needs C17/C18 to rehearse the recovery in QEMU |
 | C21 | **RAC XORETIMECTRL/DIGCLKRETIMECTRL ENRETIME (stock RXSEARCH limits) set in the RX tune wedges the debug port within ms of every boot**; per TODO DPIDR readable, AHB-AP and DCI dead; cause unknown | radio-tables.md §7.80 ~l.7423; TODO.md ~l.497; recover2.sh header, Si | yes (audit) | efr32bg22.c has no XORETIME/DIGCLKRETIME semantics (grep: none) | **Closed (mechanism unknown, see "The debug-port wedge"):** `efr32bg22.c` efr32_rac_retime_update -> `efr32-dap.c` dap_debug_wedge. qtest `dap/retime-wedges-debug-port`, `dap/retime-on-hfxo-sysclk-keeps-debug-port`, e2e step 7 |
-| C22 | Attached debugger: M33 WFI does not gate the core clock (DWT counts); EM2 never entered whatever EM2DBGEN | TODO Hardware/tooling "Debugger effects" (cross-core-findings), Si | no | - | SoC debug-attached state |
+| C22 | Attached debugger: M33 WFI does not gate the core clock (DWT counts); EM2 never entered whatever EM2DBGEN | TODO Hardware/tooling "Debugger effects" (cross-core-findings), Si | partial | 7.95: CDBGPWRUPREQ (efr32-dap "debug-powered") keeps the part out of EM2; T: emu-em2-not-entered | WFI still gates the core clock |
 | C23 | Each SWD AP access costs the M0+ ~1 cycle on the same target (SEQRAM, radio regs), up to ~5 on the peripheral bus (TIMER1); OpenOCD at 4 MHz ~17.6k accesses/s; M0+ SRAM loads under WFI +71 % attached vs +8.6 % detached | TODO "Debugger effects", Si | no | - | per-access bus cost of debug accesses |
 | C24 | Debug reads have no side effects (capture FIFOs do not pop); a debug write's bus error is reported on the next transaction | TODO "Debugger/chip quirks", Si | partial | efr32-dap.c:mem_ap_access -> STICKYERR then FAULT on the next access | no MemTxAttrs.debug path in efr32bg22.c for side-effect-free reads (gaps2: TIMER CCn_ICF debugger reads do not pop, by requester id) |
 | C25 | A debugger-halted M0+ (not in WFI) stops RAC leaving OFF | TODO quirks list, Si | no | no AP3 | needs C3 |
@@ -703,7 +703,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C39 | WDOG0_LOCK (unlock 0xABE8) locks EN/CFG; CMU_WDOGLOCK (unlock 0x93F7) locks clock select, CMU_STATUS.WDOGLOCK | watchdog.md, RM 27.5.8, 8.5.4 | yes | efr32bg22.c EFR32_WDOG_LOCK_UNLOCK ~l.3987, EFR32_CMU_WDOGLOCK ~l.4004; same qtest | - |
 | C40 | Timeout resets the device (except some EMU regs), RSTCAUSE.WDOG0; WDOG disabled and unlocked after any reset | watchdog.md, RM 12.5.14 | yes | efr32_wdog_expired -> qemu_system_reset_request; board/wdog-reset, dap/halt-registers-reset (RSTCAUSE.WDOG0) | TODO.md "WDOG0: EN reads 0, no timeout reset" is stale |
 | C41 | EMU_RSTCTRL.WDOG0RMODE can block the WDOG reset; LOCKUPRMODE resets to 0 (lockup does not reset) | watchdog.md, RM 12.5.14 | yes (audit) | no RSTCTRL semantics, no lockup reset | **Closed:** EMU_RSTCTRL (0x10405) gates SYSREQ, WDOG0 and M33 Lockup resets; survives soft resets, restored by PIN. qtest `m33-lockup`, `rstctrl-blocks-sysresetreq` |
-| C42 | EM2RUN/EM3RUN freeze in EM2/EM3; WDOG does not run in EM4 (RM 27.3.3); warning is an EM2 wake source | watchdog.md, RM | partial | comment ~l.3955: model always runs in sleep (EM2RUN=EM3RUN=1), LOG_UNIMP otherwise | EM depth not modelled |
+| C42 | EM2RUN/EM3RUN freeze in EM2/EM3; WDOG does not run in EM4 (RM 27.3.3); warning is an EM2 wake source | watchdog.md, RM | yes (EM2) | efr32_wdog_freezes (EM2RUN); T: emu-em2-wdog | EM3, EM4 |
 | C43 | Stock firmware: WDOG0 PERSEL 8 on 32.768 kHz LFRCO = 62.5 ms | stim-simulation.md finding 4, Dump | yes | same WDOG model (stock reproduces 62.3 ms in E) | - |
 | C44 | Radio block EN needs CMU.RADIOCLKCTRL.EN and the block's CLKEN1 first | hardware-bringup.md, Si | yes | efr32bg22.c:efr32_bus_error ~l.5626; radio-enable-requires-bus-clocks | - |
 | C45 | Gated radio read = bus error, gated write dropped; CLKEN1.BUFC gates nothing visible; holes 0xa8008000, 0xa8030000-0xa80fffff always bus error (§7.72) | efr32bg22.c comment ~l.5609, Si | yes | efr32_bus_error; gated-bus-clock-faults-and-drops, rf/radio-block-clock-gates | timers and (gaps2) PRS fault on gated writes; TODO: re-measure radio writes |
@@ -720,7 +720,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C56 | M0+ clock = SYSCLK/(RHCLKPRESC+1); M33 wins arbitration; per-access costs (§7.74) | TODO, Si | partial | core-clocks-per-cpu-rates, core-clocks-radio-clock-stops-seq; (gaps) efr32-interconnect.c | contention modelled per B75-B79; M33 SRAM traffic (B77) not |
 | C57 | SYNTH LO-count BUSY window | TODO says unmodelled | yes | efr32bg22.c EFR32_SYNTH_LOCNTSTATUS ~l.108; rf/locnt-busy-window | TODO line is stale |
 | C58 | RTCC compare edge: model per RM figure (IF when CNT becomes OCVALUE); BURTC fires one edge later; BURTC.COMP reads old value while pending (RM says pending) | TODO, RM vs Si | partial | rtcc-counts-and-compares; burtc-compare-pending | RTCC edge unmeasured; CCV0MATCH/PRECNT unmodelled (capture modelled in gaps2: prs-rtcc-capture) |
-| C59 | EM2/EM3 effect on M0+, SEQRAM/radio retention (SYSCFG_RADIORAMRETNCTRL), wake latencies | TODO, DS/RM | no | - | unmeasured |
+| C59 | EM2/EM3 effect on M0+, SEQRAM/radio retention (SYSCFG_RADIORAMRETNCTRL), wake latencies | TODO, DS/RM | partial | 7.95: retention per the RM resets (ALLON), wake tEM2_WU 13.22 / 37.89 / 50.56 us (DS Table 4.10), entry 5.23 us | silicon wake latency, retention with RETNCTRL written, M0+ state [P] |
 | C60 | RADIOAES run times at HCLK 76.8 MHz: ECB/CMAC 80 + 55 cycles per block, CCM 105 + 56 (ECB 1 block 133 cyc 1.73 us; CCM 27 B 495) | crypto.md §4, Si | yes | efr32-radioaes.c RADIOAES_START_NS ~l.104; no qtest (tests/crypto-port 330/330 in QEMU) | durations are fixed ns, valid only at 76.8 MHz HCLK |
 | C61 | Idle STATUS = 0; INCL_IPS_HW_CFG reads 0x00000001 (header says 0x11) | crypto.md §4, Si | yes | efr32-radioaes.c INCL_IPS_HW_CFG_RESET ~l.59 | no qtest |
 | C62 | Empty-payload CCM via SL descriptor sequence gives a non-SP 800-38C tag; decrypt of own output fails | crypto.md §3, Si | no | efr32-radioaes.c (no special case found) | decide whether to reproduce |

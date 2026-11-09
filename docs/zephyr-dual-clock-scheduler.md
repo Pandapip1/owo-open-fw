@@ -233,7 +233,8 @@ on silicon (7.71).
 The implementation is ready to replace the temporary radio alarm path only
 after all of these pass (status: 1 is the `clock_event_sched` kernel suite;
 4 passes in QEMU and on silicon with TIFS on the sequencer, `docs/radio-tables.md`
-7.71, 7.76, 7.82; 2 and 3 are open, and the radio stack never enters EM2, 7.84):
+7.71, 7.76, 7.82; 3 passes in QEMU for EM2, the product entering EM2 between radio events with
+the HFXO/DPLL restart in the deep wake-up budget, 7.95; 2 and EM4 are open):
 
 1. A native/QEMU unit test exercises active-to-BURTC, BURTC-to-active, and a
    deliberately stale old-backend IRQ; uptime never moves backward and a
