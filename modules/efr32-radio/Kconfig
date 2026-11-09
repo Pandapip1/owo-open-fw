@@ -766,6 +766,18 @@ config EFR32_RADIO_ICACHE_PROBE
 	  the model's shortfall on the radio paths. Measurement builds only
 	  (docs/radio-tables.md 7.93, 7.94).
 
+config EFR32_RADIO_TIFS_PROBE
+	bool "Capture every reply's EOF-to-SYNCSENT interval with PRS and TIMER1"
+	depends on EFR32_RADIO_TIMING_PROBE
+	help
+	  Route MODEMH.EOF, RACL.TX and MODEMH.SYNCSENT through PRS async
+	  channels 9-11 to TIMER1 (EOF reload-starts it, CC1/CC2 capture),
+	  and at each completion run record the reply's EOF-to-TX-entry and
+	  EOF-to-SYNCSENT intervals with the sequencer's RX2TX record: a
+	  histogram and the latest samples above 182.0 us (the SCAN_REQ
+	  outliers, docs/radio-tables.md 7.91, 7.94). Takes TIMER1 and those
+	  PRS channels. Measurement builds only.
+
 config EFR32_SEQ_WAKE_PROBE
 	bool "Sequencer: SysTick at the timed-command IRQ's entry and first poll"
 	depends on EFR32_RADIO_TIMING_PROBE
