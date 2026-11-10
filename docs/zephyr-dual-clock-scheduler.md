@@ -314,7 +314,7 @@ prepares) is never blocked by them.
 
 Not yet mapped in code: the radio and the product still post one-shot releases only.
 
-### Dispatch: priority among the satisfying orders (design, not implemented)
+### Dispatch: priority among the satisfying orders
 
 **The rule.** Among all orderings that meet every admitted deadline, run the highest-priority
 ready job first; run a lower-priority job ahead of a higher one only when every satisfying
@@ -383,11 +383,119 @@ grows from about 26 x 12 steps to about 26 x 12 x 4. The admission check runs in
 interrupt, so its time is part of that interrupt's budget; measure before enabling. RAM: the
 slack and order arrays, 12 x 8 B, static.
 
-**Plan once approved.** (1) The guard in the simulation, with the demonstration test inverted
-and tests for each property (higher first when it fits, lower first only when required, a
-running job never preempted by a lower one). (2) The cached decision and its use in `next_up()`.
-(3) Measurement of the check and dispatch time on the QEMU model and silicon. (4) Then the radio
-mapping as planned.
+**Implemented** (vendor/zephyr 11e01fd7b78, `CONFIG_SCHED_DEADLINE_DISPATCH`, default on with
+admission, uniprocessor). The guard sorts the jobs by deadline once per check (insertion sort)
+and takes every candidate's fit from one sweep (least slack of the strictly earlier deadlines),
+so a simulated step is O(n). Admission simulates the rule; with the option off it simulates
+Zephyr's fixed priority, as the runtime then is. Tests: the demonstration case is now admitted;
+higher first when it fits; lower first only when required; a running job not preempted by a
+lower release (the release is refused instead).
+
+| Measurement [Q] (EFR32BG22 model, `-icount shift=3`, `CONFIG_SCHED_DEADLINE_ADMISSION_PROBE`) | Longest | Count |
+|---|---|---|
+| Admission check, kernel admission suite (up to 12 jobs, reservations, full table), fixed-priority simulation | 4688 cycles (140 us) | 104 |
+| Same, the dispatch rule, first version (slack per job per step, O(n^2)) | 22978 cycles (685 us) | 104 |
+| Same, the dispatch rule, sorted sweep (shipped) | 11680 cycles (348 us) | 104 |
+| Dispatch decision, same suite | 276 cycles (8.2 us) | 172 |
+| Admission check, product (QEMU profile with radio admission on, about 5 radio jobs, 60 s) | 1393 cycles (41.5 us) | 11 |
+| Dispatch decision, product, same run | 248 cycles (7.4 us) | 58 |
+
+(cycles of the 2^25 Hz scheduler clock.) The product run is not a working link: the QEMU profile
+keeps radio admission off because the model's longest interrupt (72.4 us) exceeds the ADV_IND
+completion's window (46.6 us), and with it on the product refused two releases and the Central
+never connected; its figures are the checks that ran. On silicon [P] (kit list): the model runs
+the M33's paths up to 35 % short (`radio-tables.md` 7.93), so silicon may be up to 1/0.65 of
+these [I]. A check runs in the releasing interrupt, so its time belongs in that interrupt's
+budget: a 12-job worst case of 348 us is too long for the radio's windows, and the product's
+own job count (about 5) must be what bounds it. The full-table case is the suite's, not the
+product's.
+
+### Resources: the CPU, mutexes and the sequencer as one model (design, not implemented)
+
+**Rule (user):** a claim of a shared resource that could make another admitted job miss its
+deadline (planned preemption included) blocks; jobs declare up front every resource they may
+hold; the CPU itself is a declared resource; with several processors the CPU is a semaphore.
+
+**Model.** A resource has a capacity: a mutex 1, a counting semaphore N, the CPU the number of
+interchangeable processors (1 on the BG22's M33). A job's admission request (one-shot release,
+arm, periodic arm, interrupt-line reservation) carries its declaration: for each resource it
+may hold, the longest hold, as own execution time inside the hold. The CPU entry is the job's
+budget; an interrupt line's reservation is a declaration of CPU time at interrupt level.
+
+**Ceilings and claims (Stack Resource Policy).** Every resource gets a ceiling per number of free
+units: the highest preemption level among the jobs whose declared need exceeds that many units
+(for a mutex, simply the highest level among its declared users). Ceilings are computed when a
+declaration is admitted or removed (arm, reserve, disarm, budget registration), never at a claim.
+A job starts only when its preemption level is above the system ceiling (the highest ceiling of
+the resources held now) and the dispatch guard allows it; once started it never blocks on a
+declared resource, so there is no priority inversion beyond one critical section and no
+deadlock, nested claims included. A claim then only checks the declaration: a resource the job
+did not declare is refused and reported (`K_DEADLINE_MISS_UNDECLARED_RESOURCE`, through the miss
+policy: safe shutdown in the product), never granted. Holding past the declared length is an
+overrun, caught by the same enforcement as G1.
+
+**Admission.** One path over all declared resources. CPU demand is what the simulation and the
+per-busy-period bound already compute. Every other resource adds the SRP blocking term: per job,
+the longest declared hold of a lower-level user of a resource whose ceiling reaches the job's
+level, at most one such hold. What exists maps onto it:
+- the cooperative blocker B_j and the radio's run-to-completion groups: each cooperative
+  priority level is a capacity-1 "run" resource that every job at that level holds for its whole
+  run, ceiling = that level; B_j is exactly its SRP blocking term;
+- `irq_lock()` sections and `CONFIG_SCHED_DEADLINE_ADMISSION_BLOCKING_NS`: a resource "interrupts
+  masked" whose ceiling is above every interrupt level; its longest declared hold is the term;
+- `EFR32_RADIO_AES_BLOCKING_NS`: the RADIOAES resource's blocking term (below);
+- the busy-period bound: CPU demand, unchanged;
+- G1: the CPU entry's overrun; IRQ_STRICT: a CPU claim (an interrupt) without a declaration.
+Nothing stays a parallel path.
+
+**Enforcement.** One hold timer per running job: armed for the earliest declared end among the
+resources it holds (the CPU's being its remaining budget), with G1's accounting (own time:
+switched-out and interrupt time excluded), so G1 becomes the CPU case of the hold check.
+
+**Code outside admission** (the BT host, the work queues, drivers called from host threads).
+Resources used only among unadmitted threads keep Zephyr's semantics, priority inheritance
+included. A resource shared between an admitted job and unadmitted code needs the unadmitted
+side declared too: a declaration without a deadline (its holds and their lengths), so the
+ceiling and the blocking term count it; its claims are checked against the ceiling like any
+other. SRP makes priority inheritance unnecessary for admitted jobs (they never block on a
+declared resource once started); keep inheritance for mutexes used only by unadmitted threads.
+
+**Several processors.** The declaration, admission and enforcement code stays capacity-generic.
+Admission for CPU capacity above 1 (global or partitioned multiprocessor analysis, multi-unit
+SRP) is future work, not implemented.
+
+**The BG22's M0+ sequencer** is a second processor that runs only sequencer code, so it is its own
+capacity-1 resource, "sequencer", not a second unit of the M33's CPU. Declare the radio's
+sequencer work against it: a timed command holds it from its post to the TXEN or RXEN it times,
+a staged reply from its staging to the end of its turnaround. Today the HAL serialises these
+implicitly (one timed command at a time); as declared holds, admission proves two radio
+operations never need the sequencer at once and refuses the release that would. SEQRAM's single
+port (B75, B77) is a bus effect, not a claimable resource: concurrent accesses slow both cores.
+Fold it into the budgets (both cores' holds measured under the worst contention), and where the
+sequencer's timing must not be slowed (its T_IFS hold, 7.74's rule against M33 SEQRAM access),
+declare a capacity-1 "SEQRAM quiet" resource that the sequencer window holds and every M33 job
+touching SEQRAM declares: the ceiling then keeps M33 SEQRAM accesses out of those windows.
+
+**Inventory: resources shared between admitted jobs, or between admitted jobs and other code.**
+
+| Resource | Capacity | Users | Hold (declared) | Today |
+|---|---|---|---|---|
+| CPU (M33) | 1 | every job, every interrupt line | budgets, handler budgets | budgets, G1 |
+| Sequencer (M0+) | 1 | radio timed commands (TX/RX launch), staged replies (connection, scan response, SCAN_REQ, CONNECT_IND) | post to TXEN/RXEN; staging to turnaround end | implicit HAL serialisation |
+| SEQRAM quiet | 1 | the sequencer's timing-critical windows; M33 radio code that writes SEQRAM (mailbox, staged frames) | the window; the M33 access | 7.74's rule, by code review |
+| LLL run group (each cooperative meta-IRQ level) | 1 | LLL context, TX/RX launch jobs, completion job (LLL level); ULL worker (its level) | each run | cooperative semantics, B_j |
+| RADIOAES | 1 | radio CCM (encrypted connection events); host AES-CMAC/ECB (SMP f4/f6/g2, session key; unadmitted) | CCM per PDU; host 412 cycles (5.37 us silicon) | `EFR32_RADIO_AES_BLOCKING_NS` |
+| Interrupts masked | 1 (ceiling above all lines) | every `irq_lock()` section (kernel, drivers, radio HAL) | longest section, to be measured | `CONFIG_SCHED_DEADLINE_ADMISSION_BLOCKING_NS` |
+| I2C0 bus with the expander | 1 | stop-input read (S6), supply enable and DAC /CLR writes (pulse setup, teardown, safe-off), expander /INT read (host work queue today) | one transfer: 3 bytes at the bus clock | driver mutex (priority inheritance) |
+| IADC | 1 | S2, S3, S7 conversions (supervisor) | one conversion (17.6 us QEMU, silicon [P]) | one conversion at a time (`Hw` contract) |
+| Stimulation command state (pump / GATT write) | 1 | pump (to be admitted); BT RX thread's `write_cb` (unadmitted) | the copy in or out | Rust `Mutex` |
+| USART0 (channel switch), USART1 (DAC), TIMER1 (boost) | 1 | the supervisor only | - | single user: declared, no blocking |
+| WDOG0 warning | - | outside the scheduler by design (containment) | - | direct interrupt |
+
+**Tests (with the implementation):** a claim that would endanger an admitted deadline blocks and
+is granted once safe; a safe claim is granted at once; no inversion in a three-job inversion
+scenario; no deadlock with nested claims; an undeclared claim refused and reported; an over-long
+hold reported; a declaration that makes an admitted set infeasible refused at admission.
 
 ## Acceptance plan
 
