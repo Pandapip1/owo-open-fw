@@ -412,7 +412,7 @@ a run expires as its job.
 
 | Owner | Kind | Why |
 |---|---|---|
-| WDT feed (S10) | periodic, non-pausable; its own thread, cooperative above the pump | released by time alone, at its period; legal and safety containment |
+| WDT feed (S10) | periodic, non-pausable; its own thread, cooperative -13, above the Bluetooth receive threads and under the meta-IRQ levels | released by time alone, at its period; legal and safety containment |
 | Pump pass and pulse schedule | pending the pulse option (user) | a kernel-semaphore loop for now; its timed waits are undeclared |
 | sim_inject polling (simulation builds) | periodic | released by time alone |
 | Amateur identification (not in the product build) | periodic, non-pausable | released by time; legal requirement |
@@ -427,6 +427,17 @@ start-by + run stays under the warning (46.9 ms) before it is declared and on ev
 watchdog disabled (`em_wdog.c` disables it first) and `src/watchdog.c` locks it after
 configuring; disabling it would remove the containment. Only the feed's timing changes, inside
 the fixed window.
+
+The feed job runs cooperatively at -13 (default, pending user confirmation): the highest priority
+under the radio's meta-IRQ levels, above the Bluetooth receive threads (-10, -8), so no
+Bluetooth or supervision work is ahead of the containment once released. Its start-by
+(11.7 ms) must cover what can still be: the radio's meta-IRQ contexts at their declared budgets
+(LLL 266.9 us + ULL 485.6 us in the QEMU profile), one interrupt (72.4 us), and one cooperative
+thread already running at its release, which it cannot preempt and which is not declared until
+the Bluetooth threads are jobs (measured with it: the longest release-to-start 554 us). Three
+lines, 825 us declared plus that blocker, well inside 11.7 ms. Measured, 120 s stimulating run
+on the suit board model: 8053 feeds, 0 misses, longest gap 23.99 ms (bound 35.4 ms, warning
+46.9 ms).
 
 ### Dispatch: priority among the satisfying orders
 
