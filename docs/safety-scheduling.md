@@ -92,6 +92,32 @@ and start-by deadline, before the setup job closes anything:
 The radio's guarantees stay intact the same way: the pulse chain is admitted against them, and a
 radio release that arrives later is admitted against the chain.
 
+### Interrupt lines: rates by construction
+
+The kernel now takes a reservation per interrupt line (`k_irq_reserve()`: handler budget, minimum
+inter-arrival; vendor/zephyr 6543e623fd5). Admission counts it as interference on every job, and
+with `CONFIG_SCHED_DEADLINE_IRQ_BUDGETS` the Cortex-M interrupt entry checks every arrival and
+handler run against it, reporting a violation as a miss (the product: safe shutdown);
+`CONFIG_SCHED_DEADLINE_IRQ_STRICT` also reports a line with no reservation. A declared rate is
+only sound if something makes it hold, so each line of the hardware image gets one of three:
+
+| Line (handler) | What fires it | What bounds its rate | Status |
+|---|---|---|---|
+| TIMER0, BURTC (scheduler clock events) | an armed clock event: a radio launch, the ticker, a kernel timeout | radio arms: the admitted release each one serves (its handler budget is that job's). Kernel timeouts: not bounded today | radio: with the radio mapping. Kernel timeouts: see below |
+| LLL doorbell, worker doorbell | a post to the LLL context or the worker | the post: the doorbell is part of the release it rings, its handler budget that job's | with the radio mapping (and G4: the worker admitted) |
+| FRC (`isr_radio`) | a radio frame event | the radio event: at most one completion outstanding per event (the completion job armed for the event's duration) | with the radio mapping (G3) |
+| GPIO even/odd (expander /INT on PC4) | an external edge | nothing: masked in its handler, unmasked by the expander-read job (S6) when it has run, so its rate is that job's | G3 (driver) |
+| I2C0 | a byte of a transfer the driver started | the bus: one byte time at the devicetree clock (9 SCL periods) | declare from the devicetree |
+| IADC | a conversion the supervisor started | the starter: S2, S3, S7 each start one conversion and wait for it | declare with the pulse chain |
+| SMU fault | a security fault | none needed: any arrival is a fault | declare with a period no arrival can meet, so it is reported |
+| WDOG0 warning | the watchdog | outside the scheduler by design (direct, zero-latency; the containment when the scheduler fails) | not reserved |
+
+Kernel timeouts (`k_sleep()`, `k_timer`, delayed work, wait timeouts) arm the same clock event
+line without an admitted release. Bounding them is part of mapping the product's threads onto
+job kinds: each owner's timeouts become the periodic or one-shot releases of its jobs (the pump's
+sleep is S10's period), and the host's (ATT, SMP, connection timers) are counted as one line
+declared from the shortest timer the host arms.
+
 ### Job kinds of the safeties
 
 The scheduler distinguishes one-shot, armed (sporadic) and periodic jobs
