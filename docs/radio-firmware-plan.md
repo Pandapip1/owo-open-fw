@@ -19,7 +19,8 @@ open driver.
 
 The generated `radio-sequencer.bin` is an intermediate build product, not an
 input blob: the build graph derives it only from `sequencer/radio_seq.S` and
-`sequencer/link.ld`, then converts it to the const array linked into the M33
+`sequencer/link.ld` (since §7.97 from `radio_seq.c`, `radio_seq_core.S` and `seq_regs.h`; the
+all-assembly `radio_seq.S` with `CONFIG_EFR32_RADIO_SEQ_ASM`), then converts it to the const array linked into the M33
 image.  A clean stage-3 rebuild on 2026-10-27 produced the 400-byte image with
 SHA-256 `21f65696a8009288554589d157cec10953dd7dec7a1db4d259b4fe533840b102`;
 the product build for `bg22_ek4108a` at `918708d` (2026-11-05) produces a
@@ -87,7 +88,7 @@ Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, s
   attachment read the sentinel back unchanged. This proves the loader, reset
   vector, local address space, and execution gate without copying vendor code;
   it does not yet implement a radio event or transmit a frame. (Since then
-  `sequencer/radio_seq.S` runs the TXWARM/TX/TXPD and RXWARM handlers, the
+  the sequencer runs the TXWARM/TX/TXPD and RXWARM handlers, the
   turnarounds and the staged replies: §7.61, §7.62, §7.80, §7.82, §7.87.)
 * **[F]** Instruction mix over 0x100..0x3300: 303 `bl`, `ldr`/`str`/`movs`/`lsls` dominate, `mrs`, `cpsid`, `cpsie`, `wfi` present; zero `cbz`, `it`, `ldrex`, `movw/movt`, `ubfx`, `udiv`. The code assembles and disassembles cleanly with the ARMv6-M instruction set (`arm-none-eabi-objdump -M force-thumb`). **[I]** It is ARMv6-M compatible code (a Cortex-M0+ class core). The core's identity is **[?]**: no public document available offline states it.
 * **[F]** The image in the stock application is not byte-identical to the one in the SDK's `generic_efr32xg22_release_seq.o` (a 32-byte prefix search of all its large data sections finds nothing in the stock firmware). The two are different RAIL versions; the M33↔sequencer contract changes between versions. The open sequencer therefore has to be built against *one* M33-side driver, not against "the" Silabs interface.
@@ -103,7 +104,7 @@ Radio hardware  +  RAC sequencer (code in SEQRAM 0xA0000000)   [F] qemu trace, s
 | Link layer | `liblinklayer.a` | **done**: Zephyr's split controller, ULL plus the OpenISA-derived LLL (`modules/efr32-radio`, §5 "Alternative"); `crates/ble-ll` is not used by the firmware | none (timing budget aside) |
 | Radio driver (M33) | RAIL | **done**: `modules/efr32-radio/hal/radio.c`, the controller's `radio_*` HAL | RAC/FRC/BUFC/MODEM/SYNTH/AGC/PROTIMER registers |
 | PHY configuration | `sl_rail_ble_config.c` tables (public) + RAIL calibration | public tables applied by `radio_phy_set()`; 1M on silicon, 2M/coded tables imported but not supported (§7.79); TX VCO calibration cached per channel (§7.61, §7.67); demodulator rates per channel (§7.83) | meaning of each register, calibration sequence |
-| Sequencer firmware | closed image in SEQRAM | **done**: `sequencer/radio_seq.S`, open ARMv6-M source | RAC state machine, mailbox, every register it touches |
+| Sequencer firmware | closed image in SEQRAM | **done**: `sequencer/radio_seq.c` + `radio_seq_core.S`, open ARMv6-M source (§7.97) | RAC state machine, mailbox, every register it touches |
 | DEVINFO calibration | read by RAIL at boot | not read by the open driver; whether it needs to is **[?]** | DEVINFO fields (names in `efr32bg22_devinfo.h`, semantics for radio not documented) |
 
 QEMU currently has no Bluetooth controller, bus, backend, or virtio-BT device
