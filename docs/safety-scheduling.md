@@ -145,9 +145,27 @@ Admission-on therefore needs, in order:
 2. the kernel timeouts mapped onto job releases (above), so that job is bounded;
 3. then the radio's completions, staged replies and launches armed (their releases carry no
    check), the doorbell and FRC costs in those reservations, the blocking term at the longest
-   masked section only, and the window derivations checked against the result. Silicon's
-   longest interrupt is 58.1 us, also above 46.6 us: the derivation of the ADV_IND completion's
-   window has to be re-examined on silicon as well, not only the model.
+   masked section only, and the window derivations checked against the result.
+
+The ADV_IND completion's window (`efr32_dl_completion_tx_rx_start_by()`: the RX->TX PENDING
+store by T_IFS less the active clock's 2 us plus preamble and access address, 188 us after the
+frame's end) is, from the post, 188 - 11.54 (frame end to post) - the interrupt allowance -
+the path to the store: QEMU 188 - 11.54 - 72.4 - 54.4 = 49.7 us, silicon 188 - 11.54 - 58.1 -
+27.9 = 90.5 us. Silicon's longest interrupt (58.1 us) fits its own window, which is why its
+admission holds; the 46.0 us is the model's. The allowance is spent twice, though: once
+subtracted from the window for an interrupt that may have delayed the post, and again by
+admission as blocking after it. With the frame's end timestamped instead (a transmission's end
+is its TXEN instant plus warm-up and air time), the window from the post is 188 less the path
+and the actual post delay: QEMU about 122 us, silicon about 149 us.
+
+**Step 1 done** (vendor/zephyr, `CONFIG_CLOCK_EVENT_SYSTEM_TIMER_JOB`): the expiry only
+releases the announcing job, a meta-IRQ job below the radio's and the ULL's; timeout callbacks
+run there. Expiries are at least `..._MIN_INTERARRIVAL_NS` apart (the product: 500 us, start-by
+250 us), by construction: the driver arms no sooner. Per clock-event release the interrupt now
+costs [Q] 11-13 us (the system timer 12.9, the ticker 11.2, a radio launch 12.3); the TIMER0
+line's longest, 48.6 us, is several releases due in one interrupt. One expiry handler still
+works in the interrupt: the hardware configuration's RX timeout (HCTO) calls `radio_disable()`
+there, 32.8 us.
 
 ### Job kinds of the safeties
 
