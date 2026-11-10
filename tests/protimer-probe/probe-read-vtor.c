@@ -6,19 +6,12 @@
  * copy instead of the Non-secure one this firmware actually runs under).
  * Standalone, no Zephyr. See tests/protimer-probe/README.md.
  */
-.syntax unified
-.cpu cortex-m33
-.thumb
+#include "probe.h"
 
-.equ VTOR, 0xe000ed08
-.equ SCRATCH_MARKER, 0x200007f0
+/* The marker carries VTOR's value instead of SCRATCH_DONE. */
+static __attribute__((used, noinline)) uint32_t protimer_probe_read_vtor_body(void)
+{
+	return REG(VTOR);
+}
 
-.section .text, "ax", %progbits
-.global protimer_probe_read_vtor
-.thumb_func
-protimer_probe_read_vtor:
-	ldr	r0, =VTOR
-	ldr	r1, [r0]
-	ldr	r0, =SCRATCH_MARKER
-	str	r1, [r0]
-	bkpt	#0
+PROBE_ENTRY(protimer_probe_read_vtor, protimer_probe_read_vtor_body, "")

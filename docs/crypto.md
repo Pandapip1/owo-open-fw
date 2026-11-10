@@ -159,7 +159,7 @@ to a turnaround that has about 100 us.
   GATT write/read-back rounds over the encrypted link in a 900 s wall run (shift 3), no
   disconnection, no MIC failure. With the final tree, 300 s wall: shift 3 1 020/1 020, shift 5
   1 110/1 110; product 810/810; product `-DOWO_HW=ON` 720/720.
-* QEMU, the product (`owo_suit`, `sim/product-qemu.conf`, flash image from `sim/scripts/mkflash.py` with `sim/scripts/jump16000.S`, a test stand-in for the
+* QEMU, the product (`owo_suit`, `sim/product-qemu.conf`, flash image from `sim/scripts/mkflash.py` with `sim/scripts/jump16000.c`, a test stand-in for the
   bootloader at 0) paired from the Zephyr Central (`prj-central-product.conf`: passkey 426134 for
   serial 000000000000, the product's "Test" characteristic): level 4, 360/360 rounds; the same
   with `-DOWO_HW=ON` and the suit board model (`MACHINE_OPTS=board0=owo-suit`, new `board0/1`

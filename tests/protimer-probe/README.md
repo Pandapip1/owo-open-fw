@@ -1,6 +1,6 @@
 # PROTIMER enable probe
 
-`probe.S` is standalone Cortex-M33 code, independent of Zephyr and the real
+`probe.c` is standalone Cortex-M33 code, independent of Zephyr and the real
 driver. It is not a bootable image (no vector table): it is meant to be
 injected into SRAM and run from a debugger-forced halt-point inside the
 already-running production firmware, right before that firmware's own
@@ -10,12 +10,27 @@ This exists to test one specific question cheaply and safely: does merely
 enabling and clocking `PROTIMER` (no interrupt servicing, no scheduling
 logic) change `FRC`'s TX frame-coder stall at all? See
 `docs/radio-tables.md` §7.32/§7.33 for the full result (a clean negative)
-and what it does and does not rule out.
+and what it does and does not rule out. The other probes here are its
+follow-ups (§7.34-7.36), each described in its own header.
+
+Every probe enters through `PROBE_ENTRY` (`probe.h`): a short asm stub,
+linked first at the injection address, that runs the C body and stores the
+completion marker, then halts on `bkpt`. The stub keeps the halted host's
+`r0`-`r3`, `r12`, `lr` and flags intact, so the host resumes at its
+halt-point with the registers it stopped with. The original assembly probes
+did not: they returned `r0`/`r1` holding the marker address and value, and
+the VTOR probes also `r2` = 0 and `r3` = the last vector-table word. The
+host's halted instruction is its own `TXEN` store (`str r1, [r3, #16]`, see
+below), so unless the registers were restored by hand (the procedure below
+does not), those runs stored the marker value (`TXEN` bit clear) or wrote to
+the wrong address instead of issuing `TXEN`. Results from §7.32-7.36 taken
+with the assembly probes should be read with that in mind; the MMIO writes
+of each probe are unchanged (compared store by store in QEMU).
 
 ## Building
 
 ```sh
-./build.sh            # writes build/probe.elf, build/probe.bin
+./build.sh            # writes build/<probe>.elf and .bin for every probe
 ```
 
 ## Running (reconstructing the exact test)

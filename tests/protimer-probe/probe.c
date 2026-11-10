@@ -28,7 +28,7 @@
  * poke (docs/radio-tables.md SS7.32). A follow-up probe that *does* want to
  * test the IRQ-handshake sub-hypothesis needs a real installed handler,
  * which needs either a from-scratch bootable image (like
- * tests/hardware-lockstep/m33-seq-txwarm.S) or Zephyr's own
+ * tests/hardware-lockstep/m33-seq-txwarm.c) or Zephyr's own
  * IRQ_CONNECT()/software-ISR-table mechanism -- not attempted here.
  *
  * Register values below are the exact sequence stock is observed to issue
@@ -42,55 +42,14 @@
  * does", not a field-decoded, understood configuration. Do not copy these
  * values into production code without first resolving that gap.
  */
+#include "probe.h"
 
-.syntax unified
-.cpu cortex-m33
-.thumb
-
-.equ PROTIMER_BASE,      0xb801c000 /* non-secure alias: this probe runs in whatever CPU security state the host firmware left it in (Non-secure, like the rest of the real driver), and the secure 0xa801c000 window silently drops writes from there -- confirmed by running this probe once against the secure address: it completed with no fault but every readback stayed 0 */
-.equ PROTIMER_EN,        PROTIMER_BASE + 0x004  /* EN.EN, same one-bit latch pattern FRC/AGC/RFCRC/MODEM/SYNTH/RAC each have at +0x004 (docs/radio-tables.md SS7, public *_S_register.py:24-37) */
-.equ PROTIMER_CTRL,      PROTIMER_BASE + 0x008  /* value observed, not field-decoded -- see file header */
-.equ PROTIMER_CTRL_VAL,  0x00011102
-.equ PROTIMER_CMD,       PROTIMER_BASE + 0x00c  /* stock pairs "1" here with enabling NVIC IRQ36, "4" with disabling it (docs SS7.9) */
-.equ PROTIMER_CMD_START, 0x00000001
-.equ PROTIMER_REG_030,   PROTIMER_BASE + 0x030  /* "timer state/period input", not further resolved (docs SS7.9) */
-.equ PROTIMER_REG_030_VAL, 0x00001233
-.equ PROTIMER_REG_038,   PROTIMER_BASE + 0x038
-.equ PROTIMER_REG_038_VAL, 0x80015558
-.equ PROTIMER_COUNTER,   PROTIMER_BASE + 0x020  /* matches vendor/qemu's own modeled offset AND the offset observed changing live in stock's capture (docs SS7.32) */
-
-.equ SCRATCH_MARKER,     0x200007f0  /* same sentinel address bg22_require_sram_execution uses to prove execution */
-.equ SCRATCH_DONE,       0x51a7c0de
-
-.section .text, "ax", %progbits
-.global protimer_probe_enable
-.thumb_func
-protimer_probe_enable:
-	cpsid i
-
-	ldr	r0, =PROTIMER_EN
-	movs	r1, #1
-	str	r1, [r0]
-
-	ldr	r0, =PROTIMER_CTRL
-	ldr	r1, =PROTIMER_CTRL_VAL
-	str	r1, [r0]
-
-	ldr	r0, =PROTIMER_REG_030
-	ldr	r1, =PROTIMER_REG_030_VAL
-	str	r1, [r0]
-
-	ldr	r0, =PROTIMER_REG_038
-	ldr	r1, =PROTIMER_REG_038_VAL
-	str	r1, [r0]
-
-	ldr	r0, =PROTIMER_CMD
-	ldr	r1, =PROTIMER_CMD_START
-	str	r1, [r0]
-
+static __attribute__((used, noinline)) uint32_t protimer_probe_enable_body(void)
+{
+	protimer_configure();
+	REG(PROTIMER_CMD) = PROTIMER_CMD_START;
 	/* Deliberately no NVIC enable here -- see file header. */
+	return SCRATCH_DONE;
+}
 
-	ldr	r0, =SCRATCH_MARKER
-	ldr	r1, =SCRATCH_DONE
-	str	r1, [r0]
-	bkpt	#0
+PROBE_ENTRY(protimer_probe_enable, protimer_probe_enable_body, "cpsid i\n")

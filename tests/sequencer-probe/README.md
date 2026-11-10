@@ -9,6 +9,12 @@ ring at local `0x3000` retains records in the order
 any following hardware state event. It is a bring-up probe, not production
 firmware.
 
+The probe is C (`probe.c`), converted from assembly with the same register
+writes in the same order. Two behaviours of that assembly are kept on purpose,
+because silicon results were taken with them: the IRQ 8 gate wait polls bit 2
+of `0xa8020040`, not the gate bit it pulses, and after IRQ 8 the handler
+acknowledges `RAC.IF` with that poll mask (`4`) instead of the `IF` it read.
+
 Build inside the repository's Nix environment:
 
 ```sh
