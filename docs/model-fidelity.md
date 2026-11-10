@@ -168,7 +168,7 @@ from.
 Measured and modelable, not done in this audit:
 
 - **Bus contention and per-target access costs** (B71, B76-B79): done in
-  the model-gaps pass (below), except the M33's SRAM traffic (B77).
+  the model-gaps pass (below); the M33's SRAM data traffic (B77) in the model3 pass.
   Related edge offsets that are probably emergent from the 500 ns
   per-core rounds: EOF to SCAN_RSP sync 181.5-181.7 us vs 180.1-180.9 us
   (B57), TX2RX 124.5-125.5 vs 123.4-123.7 us (B51), TXWARM spread (B48).
@@ -296,13 +296,33 @@ average, so only the bus part is comparable).
 "before" is the per-access constant table (the pre-pass model, by its
 constants).  Fitted [I]: the handover counts (radio 6.0, BUFC 4.2, APB 6.2
 M33 tenures), the SEQRAM steal (1.2 / 0.35 cycles), the tenure split of
-each access.  Not reproduced: M33 SRAM traffic (B77: SRAM-to-SRAM and
+each access.  Not reproduced in that pass: M33 SRAM traffic (B77, below: SRAM-to-SRAM and
 SRAM-code rows, the +0.5 on M0+ peripheral loads in the mat_m0 session),
 M0+ SEQRAM stores at 2.5, the M33 side of APB contention (low by 2-4x).
 Firmware regressions: dual `b-adv`/`b-scan` 0 late/unsat/shutdown, SCAN_REQ
 = SCAN_RSP; connection pair passes (25 s idle host, 60 s under load); the
 model runs about 5-15 % slower per wall second (timeline arbitration and the
 M0+ SRAM window as I/O).
+
+**M33 SRAM traffic (B77, model3 pass).**  The translator counts the M33's
+SRAM data transfers per round; each M0+ SRAM, TIMER and HF peripheral access
+pays the flashrun-session cost scaled by the M33's transfer rate over its
+own time in the round (`seq_m33_sram_mc`).  Same harness, groups `m0f m0`:
+
+| measured (cycles per 1600 ops) | interferer | silicon | model |
+|---|---|---|---|
+| M0+ SRAM ld | M33 SRAM ld / st (flash) | 7553 / 7481 | 7415 / 7345 |
+| M0+ SRAM st | M33 SRAM ld / st (flash) | 6834 / 7016 | 6748 / 6916 |
+| M0+ TIMER1 ld | M33 SRAM ld (flash) | 15408 | 15345 |
+| M0+ CMU ld | M33 SRAM ld (flash) | 8891 | 8835 |
+| M0+ SRAM ld | M33 SRAM ld / st (SRAM code) | 7747 / 8848 | 7010 / 6947 |
+| M0+ SRAM ld | M33 ALU (SRAM code) | 6948 | 5807 |
+
+Still short: an SRAM-resident M33's instruction fetches (silicon slows M0+
+SRAM loads by 0-1.6 cycles from fetches alone, depending on the loop's
+alignment), so the SRAM-code rows; the M0+'s SRAM traffic slowing the M33
+(+0.15..0.31).  QEMU e2e suite unchanged: smoke, dual, active scan (33
+exchanges), connection and pairing (L4, 30/30) with 0 deadline misses.
 
 ### RM chapter coverage
 
@@ -312,7 +332,7 @@ Status of each reference-manual chapter in the model after this pass.
 | RM chapter | block | modelled | evidence | gaps |
 |---|---|---|---|---|
 | 3 | System processor (M33, M0+ timing) | partial | Si SS7.75, SS7.93 | M33 counts cycles per class (B73); unmeasured classes placeholders, no instruction-cache misses; M0+ SEQRAM store 2.5 (alignment-dependent) |
-| 4 | Memory and bus system | yes (gaps) | RM, Si SS7.74 | M33 SRAM/flash traffic (B77); LDMA as a bus manager (B81) |
+| 4 | Memory and bus system | yes (gaps) | RM, Si SS7.74 | M33 instruction fetches from SRAM and the M33 side of SRAM contention (B77); LDMA as a bus manager (B81) |
 | 5 | Radio transceiver | yes (radio-tables) | Si | see tables A and B |
 | 6 | MSC, DEVINFO, USERDATA | yes | RM, Si | erase/write durations (C34); DEVINFO calibration words |
 | 7 | DBG debug interface | yes | Si, docs/debug-port-model.md | AP3 / M0+ debug (A45, C3); DWT watchpoints (A43) |
@@ -320,7 +340,7 @@ Status of each reference-manual chapter in the model after this pass.
 | 9 | Oscillators | yes | Si SS7.73 | HFXO warm restart [P] |
 | 10 | SMU | partial | Si | only the AHBRADIO attribution |
 | 11 | CRYPTOACC | partial (gaps) | RM; Si for RADIOAES and TRNG timing (SS7.89) | TRNG test mode, health-test failures, IRQ; PK engine; BA413/418/419 |
-| 12 | EMU (incl. DCDC) | partial | RM, DS, Si SS7.74 | RSTCAUSE/RSTCTRL, EM2 (7.95), DCDC REGULATION: no BOD, voltage monitors, EM3/EM4, EM1P, LDMA/flash holding EM2 off |
+| 12 | EMU (incl. DCDC) | partial | RM, DS, Si SS7.74 | RSTCAUSE/RSTCTRL (BOD resets from board inputs, no voltage monitor thresholds), EM2 (7.95), DCDC REGULATION: no EM3/EM4, EM1P, LDMA/flash holding EM2 off |
 | 13 | PRS | yes (gaps) | RM, Si SS7.71/7.73 (probe routes, gating, timing) | producers CMU/CORE/AGC/BUFC/FRC/PROTIMER/SYNTH/PDM/LFRCO and some USART/EUART signals; RAC, CMU, MODEM, CORE, DTI, USART, WDOG consumers |
 | 14 | GPCRC | yes | RM | - (no LDMAXBAR source; the LDMA feeds INPUTDATA by SWREQ) |
 | 15 | RTCC | partial | RM | CCV0MATCH, PRECNT compare base, LOCK (capture and CCV outputs modelled) |
@@ -332,7 +352,7 @@ Status of each reference-manual chapter in the model after this pass.
 | 21 | USART | partial | RM | I2S, parity errors, TX sequencer delays, AUTOCS, secondary sync mode |
 | 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input |
 | 23 | I2C | partial | RM | follower mode |
-| 24 | IADC | yes (gaps) | RM, Si SS7.89 timing | bipolar output, SCALEx calibration, SUPPLY inputs, tailgating |
+| 24 | IADC | yes (gaps) | RM, Si SS7.89 timing | bipolar output, SCALEx calibration, tailgating; SUPPLY inputs from RM Table 24.3 (AVDD/IOVDD from the board's VDDX, DVDD 1.8 V under DCDC regulation, DECOUPLE by VSCALE; qtest iadc-supply-inputs) |
 | 25 | GPIO | yes | RM, DS 3.3 | EM4 wake; ports C/D input latch in EM2 [I] |
 | 26 | LDMA | yes (gaps) | RM, Si SS7.74 (error, EN) | own throughput [I]; not an interconnect manager (B81); DBGHALT |
 | 27 | WDOG | yes | RM, Si | EM3 run control |
@@ -573,7 +593,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B36 | RAC.STATUS before first TXEN 0x00400000 vs 0x10400000 depending on build (bit 28) | §7.71 silicon (explained by §7.72 SEQACTIVE rule) | yes | efr32_rac_status | - |
 | B37 | Open image needs no PROTIMER enable/clock/counter; "PROTIMER before RAC" ordering does not hold for the open image | §7.71 silicon | yes (audit) | bg22.c peripheral_write RAC.EN (~5410) still forces SHUTDOWN when RAC.EN is set before BUFC/PROTIMER EN; T: rac-enable-requires-dependency-order | **Closed:** PROTIMER dropped from the RAC.EN ordering rule (BUFC stays, [I]). qtest `rac-enable-requires-dependency-order` (no-PROTIMER case) |
 | B38 | Live stage 3 PROTIMER: EN=1, CTRL=0, COUNTER static 0 | §7.71/7.73 silicon | yes (audit) | bg22.c:efr32_protimer_counter (~2316), 2 MHz ptimer free-runs | **Closed:** as A39 |
-| B39 | PROTIMER compare/wrap flags (stock stack programs CTRL, PRECNT, START, CC0/1, IEN 0x03001804) | §7.78 [I], undocumented | no | - | Blocks stock BT stack boot in the model; no public register semantics |
+| B39 | PROTIMER compare/wrap flags (stock stack programs CTRL, PRECNT, START, CC0/1, IEN 0x03001804) | §7.78 [I], undocumented | no | Reset values (IPVERSION 1, +0x030 0x00ffff00, +0x034 0x0000ffff, PERIOD 0xffffffff, +0x040/+0x04c 0x00ff00ff), +0x014 bit 0 while running and CMD reading 0, all from the silicon bank dumps (baselines release-boundary/stock-protimer.bin, hardware-lockstep/stage2-*-protimer.bin); T: protimer-reset-values | No compare or wrap events: no public register semantics. Not what stalls the stock stack: after a 20 s stock boot IRQ 36 is enabled and IEN = 0x03001804, but no compare slot has a target time (+0x10c..+0x16c all 0), so nothing is armed to fire; the stall is elsewhere |
 | B40 | Bus-clock gate map: CLKEN1 bit0 AGC,1 MODEM,2 RFCRC,3 FRC,4 PROTIMER,5 RAC,6 SYNTH,7 RDSCRATCHPAD,8 RDMAILBOX0,9 RDMAILBOX1,10 PRORTC; bit 11 BUFC gates nothing; bits 12-15 nothing | §7.72 silicon | yes | bg22.c:efr32_radio_bus_clock (~1367), efr32_bus_error (~5613); RF: radio-block-clock-gates; T: gated-bus-clock-faults-and-drops | - |
 | B41 | RADIOCLKCTRL.EN=0 faults every radio window, BUFC and SEQRAM (0xB0000000); debugger SEQRAM reads fail | §7.72, §7.74 silicon | yes (audit) | efr32_bus_error covers radio+BUFC; efr32_seqram_m33_read (~6527) ungated | **Closed:** the M33/debugger SEQRAM window faults (read) and drops writes while RADIOCLKCTRL.EN is clear (`efr32_seqram_gated`). qtest `rf/seqram-radio-clock-gate`. The secure 0xa0000000 alias is plain RAM (unmeasured) |
 | B42 | Gated radio write: accepted by AP and dropped (RAC SR0 kept pre-gate value) | §7.72 silicon; §7.73 notes TIMER/PRS gated writes give sticky bus errors and radio not re-measured | partial | efr32_radio_mmio_write (~5952) returns OK, drops | Open question: may be a (sticky) bus error like TIMER; needs remeasure |
@@ -611,8 +631,8 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B74 | M33 exception entry 17 cycles (18 from WFI), SRAM vectors | §7.74 silicon | yes | EFR32_M33_EXCEPTION_ENTRY_MILLICYCLES 17000 | Flash vectors [P]; WFI +1 not modelled |
 | B75 | SEQRAM single port, M33 priority: each M33 SEQRAM access costs M0+ ~0.9 cycle; M33 SEQRAM 1.88 -> 2.38 while M0+ executes | §7.74 silicon | yes | efr32-interconnect.c SEQRAM port: M33 +0.5 from flash code only, M0+ loses 1.2 cycles per M33 SEQRAM access while it runs from SEQRAM, 0.35 in the short gaps between its bus accesses [I fitted]. Probe harness: M0+ SEQRAM ld 6.05 (6.01), ALU 3.35 (3.46), bus loops -1..-17 % | No qtest (probe harness, scratch) |
 | B76 | Radio-register path contention (RAC/FRC/SYNTH/MODEM shared, BUFC separate): M0+ 4.25 -> 9.2-9.8 under M33 streaming; M33 3.88 -> 4.86; BUFC 3.25 -> 4.77 | §7.74 silicon | partial (gaps) | efr32-interconnect.c RADIO/BUFC ports, round-robin with handover [I fitted]. M0+ RAC under M33 RAC: 9.0 (9.19, SRAM-code M33), 8.2 (9.83, flash M33); BUFC 4.76 (4.77). M33 side +0.55 (+0.42 SRAM code), +0.87 (+0.98 flash) | M0+ under flash-resident M33 radio streaming 16 % short |
-| B77 | SRAM contention: M0+ +0.7..+1.1 cycle/access under M33 SRAM traffic; M33 +0.15..+0.31 under M0+ | §7.74 silicon | partial | M0+ SRAM accesses go through the interconnect (base 3.25 now right); M33 SRAM and flash accesses are now costed by the translator (icount_set_cpu_mem_costs, §7.93) | Their occupancy still does not reach the interconnect, so M33 SRAM traffic does not slow the M0+ |
-| B78 | Peripheral-bus (TIMER1/CMU) mutual contention +9 % .. 3.5x; M0+ +0.5 cycle/peripheral access while M33 does SRAM traffic or WFI | §7.74 silicon | partial (gaps) | efr32-interconnect.c HF APB port. M0+ side: TIMER/TIMER 21.0 (23.3), CMU/CMU 9.2 (9.1), CMU/TIMER 17.7 (19.3), TIMER/CMU 13.3 (13.3) | M33 side low (TIMER/TIMER +1.2 vs +4.2 cycles); the +0.5 under M33 SRAM traffic as B77 |
+| B77 | SRAM contention: M0+ +0.7..+1.1 cycle/access under M33 SRAM traffic; M33 +0.15..+0.31 under M0+ | §7.74 silicon | partial | M0+ SRAM accesses go through the interconnect (base 3.25); M33 SRAM data transfers counted per round by the translator (icount_mem_range_transfers) and charged to M0+ SRAM/TIMER/HF-peripheral accesses at the measured cost, rate-scaled (seq_m33_sram_mc). Flash-resident M33: within 1-2 % of all six §7.74 rows | SRAM-resident M33's instruction fetches (SRAM-code rows 10-20 % short); M33 side (+0.15..0.31) not modelled |
+| B78 | Peripheral-bus (TIMER1/CMU) mutual contention +9 % .. 3.5x; M0+ +0.5 cycle/peripheral access while M33 does SRAM traffic or WFI | §7.74 silicon | partial (gaps) | efr32-interconnect.c HF APB port. M0+ side: TIMER/TIMER 21.0 (23.3), CMU/CMU 9.2 (9.1), CMU/TIMER 17.7 (19.3), TIMER/CMU 13.3 (13.3) | M33 side low (TIMER/TIMER +1.2 vs +4.2 cycles); the +0.5 under M33 SRAM traffic now modelled (B77: TIMER1 15345 vs 15408, CMU 8835 vs 8891) |
 | B79 | M0+ IRQ entry 16 -> 23-59 cycles (median 45-51) while the M33 streams SEQRAM | §7.74 silicon | yes (gaps) | efr32_ic_seq_exception_millicycles: 14 + 31 x the M33's SEQRAM utilization in the last round. Probe: 16 alone, 48 busy (47), 38 from WFI (45, range 23-51) | - |
 | B80 | Peripheral access latency follows HCLK (HCLKPRESC DIV4: TIMER1-bracketed M0+ chunk 484 -> 520 ticks) | §7.74 silicon | no | bus extras are fixed core cycles | - |
 | B81 | LDMA into SEQRAM slows M0+ like M33 streaming (ALU 1.66x, SEQRAM ld 1.87x); LDMA.EN clear does not stop a busy self-linked channel | §7.74 silicon | partial (gaps2) | efr32-ldma.c: EN is not a run gate, CHDIS stops; LDMA error on a radio register | LDMA is not an interconnect manager: the contention is not reproduced |
@@ -644,11 +664,11 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B107 | RADIOAES bus clock CMU_CLKEN0.RADIOAES / RADIOCLKCTRL.EN gating | crypto.md [D] RM 8.5 | yes (gaps2) | efr32_bus_error; T: radioaes-clock-gate | RM-only evidence; fault rule [I] |
 | B108 | TIMER0.CNT read by M33 0.156 us | §7.77 silicon | yes | M33 TIMER extra 10.875 -> 11.875 cycles = 0.155 us | - |
 | B109 | RAC_RSM/RAC_SEQ M33 IRQs (37/38) come from RAC.IF & RAC.IEN (bits 0-3 / 16-23), not SEQIF & SEQIEN | §7.78 [D] public fields + stock behaviour | yes | efr32_rac_update_irqs | - |
-| B110 | RDMAILBOX IF/IEN latch: mailbox 0 -> M33 IRQ 39, mailbox 1 -> M0+ IRQ 23 | §7.78 [I]/stock behaviour | yes | efr32_rdmailbox_update_irqs (~1473); T: rfmailbox-flags-latch | - |
+| B110 | RDMAILBOX IF/IEN latch: mailbox 0 -> M33 IRQ 39, mailbox 1 -> M0+ IRQ 23 | §7.78 [I]/stock behaviour | yes | efr32_rdmailbox_update_irqs (~1473); T: rfmailbox-flags-latch, seq-mailbox-irq-and-timer0 (M0+ handler at IRQ 23 runs on IF & IEN only, clears through CLR; the M0+ reads TIMER0.CNT at 0x50048024) | Delivery latency: no measurement |
 | B111 | SYSCFG.CHIPREV.FAMILY follows DEVINFO.PART (BG22 = 53); flash/RAM sized from DEVINFO.MSIZE; access past flash end faults (ADDRFAULTEN) | §7.78 RM | yes | efr32_chiprev_from_part (~6378); T: part-352k-identity, part-352k-flash-end-faults | 352-512 KB hole behaviour unmeasured |
 | B112 | MSC programming (WREN, ADDRB/INVADDR, ERASEPAGE, WDATA clears bits, PAGELOCK, MSC_LOCK) | §7.78 RM | yes | efr32_msc_* (~4732) | Erase/write durations and read stall [U] |
 | B113 | RTCC counts at RTCCCLKCTRL/CNTPRESC, writes immediate, IF.CCn when CNT becomes OCVALUE [I] | §7.78 RM/[I] | yes | efr32_rtcc_* (~3688); T: rtcc-counts-and-compares | Edge timing unmeasured |
-| B114 | EMU.RSTCAUSE: POR after power-up, SYSREQ on AIRCR.SYSRESETREQ, kept until RSTCAUSECLR | §7.78 RM/[I] | yes | T: emu-rstcause | - |
+| B114 | EMU.RSTCAUSE: POR after power-up, SYSREQ on AIRCR.SYSRESETREQ, kept until RSTCAUSECLR | §7.78 RM/[I] | yes | T: emu-rstcause; brown-out causes per RM Table 12.8 (SoC "brown-out" inputs: DVDD, DECOUPLE, AVDD, IOVDD0), T: brown-out-resets | - |
 | B115 | IADC single conversion; conversion time | §7.78 RM | yes (gaps) | efr32_iadc_queue / efr32_iadc_complete: RM SS24.3.3 warm-up (TIMEBASE intervals, WARMUPMODE) and ((4 OSR)+2) ADC_CLK plus the measured first-result latency [F, 7.89]; T: iadc-single-conversion | (triggers, 16/20-bit and window compare modelled in gaps2: iadc-triggers, iadc-resolution-and-window) |
 | B116 | Unidentified SEQRAM 0x4000 user (reads 0xe5ecc0de, 0x01010201, 0xaabbccdd) | §7.72 silicon | no | - | Owner unknown; nothing to model yet |
 | B117 | CMU gates RDMAILBOX/RDSCRATCHPAD/PRORTC/SYSCFG stop the stock M0+ lockups (§7.59 via §7.70) | §7.70 silicon (mechanism unknown) | partial | gate map B40 now covers them | Which access faulted for stock not identified |
@@ -691,12 +711,12 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C27 | All-zero TARGET_HALTED context: OpenOCD cortex_m_poll artefact, not chip | debug-port-model.md quirk 5, Si + source | yes (reproduced) | n/a (OpenOCD patch) | - |
 | C28 | `resume 0x00000000` executes the vector table and faults; programming a running radio image can time out after erase; "erasing vectors can change observable core/debug state" | hardware-bringup.md; debug-port-model.md quirk 8, Si | partial | first is architectural (modelled); the other two have no known mechanism | measurement in TODO |
 | C29 | Probe flash timing: 129,856 B erase/write/verify 2.72 s at 1900 kHz; WORKAREASIZE 0 path 121.87 s | hardware-bringup.md, Si | no | jlink.c SET_SPEED recorded only | SWCLK timing not modelled |
-| C30 | EK: EFR32BG22 C224 rev 9, 512 KiB, 8 KiB pages; DEVINFO module name BGM220PC22HNA2, MODULEINFO 0x00570100 | hardware-bringup.md, Si | yes | efr32bg22.c EFR32_DEVINFO_MODULENAME0/MODULEINFO; (gaps) INFO 0x07090000 (rev 9 = PRODREV), PART 0x021608B0 (C224), MEMINFO 8 KiB pages, byte 0x1FE = 0x80 (OpenOCD's Series-2 family, as on the suit); qtest bgm220-module-identity | DEVINFO CRC, DILEN, calibration words never read (0); SYSCFG.CHIPREV major/minor (C32) |
+| C30 | EK: EFR32BG22 C224 rev 9, 512 KiB, 8 KiB pages; DEVINFO module name BGM220PC22HNA2, MODULEINFO 0x00570100 | hardware-bringup.md, Si | yes | efr32bg22.c EFR32_DEVINFO_MODULENAME0/MODULEINFO; (gaps) INFO 0x07090000 (rev 9 = PRODREV), PART 0x021608B0 (C224), MEMINFO 8 KiB pages, byte 0x1FE = 0x80 (OpenOCD's Series-2 family, as on the suit); qtest bgm220-module-identity; in a multi-SoC machine each default SoC's EUI64L is the kit's plus its endpoint number [I: consecutive units], rf qtest socs-have-distinct-eui64 | DEVINFO CRC, DILEN, calibration words never read (0); SYSCFG.CHIPREV major/minor (C32) |
 | C31 | Suit: BGM220PC22WGA2, die C222F352GM40, 352 KiB, no LFXO, HFXO CTUNE 0x77 valid; flash map 0/0x6000/0x16000/0x4C000/0x56000 | suit-board.md, Dump | yes | devinfo=/userdata= options; qtests part-352k-identity, part-352k-flash-end-faults | silicon behaviour for 0x58000-0x80000 and SYSCFG_CTRL.ADDRFAULTEN=0 unknown (model faults, ignores ADDRFAULTEN) |
 | C32 | SYSCFG.CHIPREV MAJOR/MINOR, CHIPREVHW (RM 0xD01 vs header 0xD02) | TODO QEMU model, RM | partial | efr32bg22.c EFR32_SYSCFG_CHIPREV ~l.530 (family only, major/minor 0) | read on silicon |
 | C33 | MSC: 8 KiB page erase, word program via WRITECTRL/ADDRB/WDATA, only clears bits, locks; MISCLOCKWORD only clearable by root/debug (RM 6.8.13) | debug-port-model.md MSC, RM | yes | efr32bg22.c:efr32_msc_* ~l.4745; dap/msc-program, msc-status-reset | - |
 | C34 | MSC erase/write durations, BUSY window, flash read stall | TODO (unmeasured) | no | model completes at once | measure (DWT around ERASEPAGE/WDATA) |
-| C35 | EMU.RSTCAUSE: POR at power-up, SYSREQ on SYSRESETREQ, kept until RSTCAUSECLR [I: accumulate vs replace unmeasured] | ota.md; efr32bg22.c comment ~l.471, RM | partial | efr32bg22.c rstcause ~l.471/~l.6563; qtest emu-rstcause | pin (C17), lockup, BOD, EM4, DCI causes not modelled; accumulate rule unmeasured |
+| C35 | EMU.RSTCAUSE: POR at power-up, SYSREQ on SYSRESETREQ, kept until RSTCAUSECLR [I: accumulate vs replace unmeasured] | ota.md; efr32bg22.c comment ~l.471, RM | partial | efr32bg22.c rstcause, efr32_soc_brown_out; qtests emu-rstcause, m33-lockup, brown-out-resets | Pin, WDOG0, lockup and BOD causes modelled (BOD: DVDDBOD/DVDDLEBOD by energy mode, DECBOD hard and RSTCTRL-gated, AVDDBOD/IOVDD0BOD soft and RSTCTRL-gated, RM Table 12.8); EM4 and DCI causes not; accumulate vs replace unmeasured [I: accumulate] |
 | C36 | Gecko bootloader/AppLoader honour the RAM reset word only after SYSRESETREQ; 0x00000002 keeps AppLoader, 0xF00F0202 goes to its install path [E; silicon [I]] | ota.md, E | yes (E) | rstcause SYSREQ; emu-rstcause | confirm on a unit |
 | C37 | WDOG period (2^(3+PERSEL)+1)/f: PERSEL 8 on 32768 Hz = 62.53 ms; WARNSEL quarters (75 % = 46.90 ms); IF is INTFLAG (clear does not clear IF.WARN) | watchdog.md, RM 27 | yes | efr32bg22.c:efr32_wdog_schedule ~l.4069, efr32_wdog_expired ~l.4090; board/wdog-config-lock-warning-clear | - |
 | C38 | CFG write while EN = BusFault (RM 4.2.4.4.2); CMD is LFSYNC, clear pending 3-4 cycles (92-122 us), 2nd CMD write while SYNCBUSY.CMD = BusFault (RM 4.2.4.4.4) [RM only; TODO: unmeasured on silicon] | watchdog.md, RM | yes | efr32bg22.c:efr32_wdog_write_rejected ~l.4243, efr32_wdog_sync_done; board/wdog-config-lock-warning-clear | silicon check of the BusFault rule (TODO structural interconnect item) |
@@ -717,7 +737,7 @@ Evidence kinds: Si silicon or bench, RM reference manual, DS datasheet, Z Silico
 | C53 | RXOVERFLOW sticks; only FORCEDISABLE (via SHUTDOWN) leaves it; FIFO full -> BUF1OF and FRC.IF.RXOF, no RXDONE | radio-tables §7.80, §7.89, TODO, Si | yes | rf/released-rx-fifo-overflow | - |
 | C54 | RX2TX -> TX start 180.6 us modelled vs 180.5 us measured; HFXO 276 us, DPLL 302 us | TODO QEMU model, Si | yes | rf/* turnaround tests; dpll-lock, hfxo-ready-status | HFXO warm restart placeholder |
 | C55 | M0+ handler run time: TXWARM 91 us silicon vs 12.6 us model; TX2RX 123.5 vs 39 us | TODO QEMU model, Si | partial | per-core clocks; now 92.65 / 125.81 us (B48, B51, §7.93) | Sequencer timed wake 187 vs 136 TIMER0 counts (§7.93) |
-| C56 | M0+ clock = SYSCLK/(RHCLKPRESC+1); M33 wins arbitration; per-access costs (§7.74) | TODO, Si | partial | core-clocks-per-cpu-rates, core-clocks-radio-clock-stops-seq; (gaps) efr32-interconnect.c | contention modelled per B75-B79; M33 SRAM traffic (B77) not |
+| C56 | M0+ clock = SYSCLK/(RHCLKPRESC+1); M33 wins arbitration; per-access costs (§7.74) | TODO, Si | partial | core-clocks-per-cpu-rates, core-clocks-radio-clock-stops-seq; (gaps) efr32-interconnect.c | contention modelled per B75-B79; M33 SRAM data traffic (B77) too, not its SRAM instruction fetches |
 | C57 | SYNTH LO-count BUSY window | TODO says unmodelled | yes | efr32bg22.c EFR32_SYNTH_LOCNTSTATUS ~l.108; rf/locnt-busy-window | TODO line is stale |
 | C58 | RTCC compare edge: model per RM figure (IF when CNT becomes OCVALUE); BURTC fires one edge later; BURTC.COMP reads old value while pending (RM says pending) | TODO, RM vs Si | partial | rtcc-counts-and-compares; burtc-compare-pending | RTCC edge unmeasured; CCV0MATCH/PRECNT unmodelled (capture modelled in gaps2: prs-rtcc-capture) |
 | C59 | EM2/EM3 effect on M0+, SEQRAM/radio retention (SYSCFG_RADIORAMRETNCTRL), wake latencies | TODO, DS/RM | partial | 7.95: retention per the RM resets (ALLON), wake tEM2_WU 13.22 / 37.89 / 50.56 us (DS Table 4.10), entry 5.23 us | silicon wake latency, retention with RETNCTRL written, M0+ state [P] |
