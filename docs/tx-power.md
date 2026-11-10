@@ -51,7 +51,7 @@ figures Silicon Labs' Zlib-licensed RAIL headers in `vendor/hal_silabs`.
 * **[F] The fixed preset** the HAL writes at every `radio_tx_power_set()` (unchanged,
   `EFR32_RAC_STAGE2_*`, docs/hardware-bringup.md): PAENCTRL 0x10000000 is PARAMPMODE alone;
   PACTRL 0x10 is TX0DBMSELSLICE = 1 with **TX6DBMPOWER and TX6DBMSELSLICE 0**, while the 6 dBm
-  PA transmits (the sequencer's `efr32_seq_pa_start` enables only its path, radio_seq.S). The
+  PA transmits (the sequencer's `efr32_seq_pa_start` enables only its path, radio_seq_core.S). The
   6 dBm PA's power is therefore not held in PACTRL in this mode.
 * **[F] What Silicon Labs' stack writes** (the stock image's RAIL PA configuration, read for
   understanding; nothing of it is copied): for the frequency-shift modulations it sets
@@ -142,7 +142,7 @@ every transmission used level 127.
    against the table's 36.0), 127 equal to 121; the absolute figures still need an instrument.
 3. **Ramp**: with RAMPCTRL at its reset rates, the PA's ramp-up and ramp-down at low and high
    levels (SDR envelope around TXEN and TXPD) and the MODEM.SEQIF.TXRAMPDONE time against the
-   sequencer's bounded wait (radio_seq.S `efr32_seq_pa_stop`); the transmit spectrum mask
+   sequencer's bounded wait (radio_seq_core.S `efr32_seq_pa_stop`); the transmit spectrum mask
    (Core Vol 6 Part A 3.2.2) at the highest level. Measured without RF [F, 7.89]: TXRAMPDONE
    after PARAMP clear about 24 ns per RAMPLEV step (1.17 us at 0x3A, 3.46 us at 0x99), far
    inside the bounded wait; the frame does not wait for the ramp-up (TX to SYNCSENT 40.6-40.7 us

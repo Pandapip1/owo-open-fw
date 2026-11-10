@@ -18,7 +18,16 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
   # Build the private radio Cortex-M0+ firmware from reviewed source and embed
   # that exact binary in the M33 application.  SEQRAM is retention RAM, so a
   # separately flashed or previously booted image is never a valid dependency.
-  set(SEQ_SRC ${CMAKE_CURRENT_LIST_DIR}/sequencer/radio_seq.S)
+  if(CONFIG_EFR32_RADIO_SEQ_ASM)
+    set(SEQ_SRC ${CMAKE_CURRENT_LIST_DIR}/sequencer/radio_seq.S)
+  else()
+    # The timed assembly first, so its functions keep their order from address 0x100.
+    set(SEQ_SRC ${CMAKE_CURRENT_LIST_DIR}/sequencer/radio_seq_core.S
+                ${CMAKE_CURRENT_LIST_DIR}/sequencer/radio_seq.c)
+  endif()
+  # libgcc is not linked: no builtins (a byte loop must not become memcpy).
+  set(SEQ_CFLAGS -O2 -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns
+                 -Wall -Wextra -Werror)
   set(SEQ_LD ${CMAKE_CURRENT_LIST_DIR}/sequencer/link.ld)
   set(SEQ_ELF ${GEN}/sequencer/radio-sequencer.elf)
   set(SEQ_BIN ${GEN}/sequencer/radio-sequencer.bin)
@@ -51,7 +60,9 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
       OUTPUT ${SEQ_C}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${GEN}/sequencer
       COMMAND ${CMAKE_C_COMPILER} -mcpu=cortex-m0plus -mthumb -nostdlib ${SEQ_DEFS}
+              ${SEQ_CFLAGS}
               -I${CMAKE_CURRENT_LIST_DIR}/include
+              -I${CMAKE_CURRENT_LIST_DIR}/sequencer
               -Wl,--build-id=none -Wl,-T,${SEQ_LD}
               ${SEQ_SRC} -o ${SEQ_ELF}
       COMMAND ${CMAKE_OBJCOPY} -O binary ${SEQ_ELF} ${SEQ_BIN}
@@ -60,6 +71,7 @@ if(CONFIG_BT_LLL_VENDOR_EFR32)
               ${SEQ_BIN} ${SEQ_C} open
       DEPENDS ${SEQ_SRC} ${SEQ_LD}
               ${CMAKE_CURRENT_LIST_DIR}/include/hal/efr32/seq_abi.h
+              ${CMAKE_CURRENT_LIST_DIR}/sequencer/seq_regs.h
               ${CMAKE_CURRENT_LIST_DIR}/sequencer/embed_binary.py
       VERBATIM
       COMMENT "Building and embedding open EFR32 radio-sequencer firmware"

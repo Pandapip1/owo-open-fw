@@ -9555,3 +9555,67 @@ RAM after (`scripts/check-hardware-ram.sh`): kit 27412, suit 27012, suit HW 2843
 Not measured here: the 23 fault scenarios (7.86's figures for them are taken), and silicon with
 EM2 (silicon has no EM2 image yet, 7.95).
 
+### 7.97 The sequencer's logic in C (QEMU only)
+
+`modules/efr32-radio/sequencer/` now builds the M0+ image from three files: `seq_regs.h` (every
+`.equ` of `radio_seq.S` as a `#define`, with its comment, shared by both), `radio_seq_core.S` (the
+code whose instruction sequence is the point) and `radio_seq.c` (reset and the staged reply's
+decision). `radio_seq.S` stays, selected by `CONFIG_EFR32_RADIO_SEQ_ASM`, until silicon confirms
+the C decision's timing; its image is byte-identical to the one before this change.
+
+What stayed assembly, and why: every state-event handler (TXWARM, TX, TXPD, RXWARM, RXPD,
+RXFRAME, RX2TX, TX2RX and the common tail) runs while the RAC holds its transition until the
+event is acknowledged (7.69), so its cycle count is the warm-up or turnaround time; with them the
+synthesizer, PA, VCO and PGA routines they call. The timed command polls TIMER0 for its instant
+(its loop period is the issue latency), `efr32_seq_delay` is calibrated per pass (7.60), and the
+trace helpers keep register contracts the handlers rely on. In C: reset (once, at boot), and
+`efr32_seq_conn_decide` with the scanner/advertiser matches, the address compares, the slot check
+and its modulo. The decision runs inside the RX2TX handler before the STIMER hold that sets
+T_IFS (`EFR32_SEQ_RX2TX_TX_AT_STIMER`), so its length moves nothing on air while it ends before
+the hold: on silicon at least 76 us were left (7.84 item 4; decisions 12.7-25.6 us, 7.91).
+
+*The assembly is unchanged.* All 26 functions and data tables left in `radio_seq_core.S` have the
+same encodings and literal pools as in `radio_seq.S` (`objdump -d` per function; branch targets
+compared as function + offset, the VCO tables' address by name; scratch/seqc/cmpfn.py). Only
+reset and the decision differ.
+
+*The C decision* (`-O2`; the scanner's and advertiser's paths out of line so the connection path
+keeps its registers; the stage block through one base register; the FIFO's base, offset and mask
+read once). M0+ cycles (SysTick, the model's 38.4 MHz CPU timing, 7.93) from the RX2TX entry stamp
+to the decision's return, measurement builds of both images, 90 s per pair, per OUTCOME path,
+min/median/max:
+
+| pair, endpoint, path | n (before/after) | asm | C | median |
+|---|---|---|---|---|
+| connection, Peripheral, ACK+ACCEPT+DONE+REPLY | 6923/7435 | 224/227/244 | 272/275/286 | +48 |
+| connection, Peripheral, ACK+ACCEPT+REPLY | 606/652 | 237/344/574 | 290/407/664 | +63 |
+| connection, Central, ACK+ACCEPT+DONE (sends nothing) | 7527/8085 | 161/162/170 | 207/209/218 | +47 |
+| active scan, advertiser, SCAN_REQ matched (SCAN_RSP) | 174/159 | 607/611/616 | 680/684/689 | +73 |
+| active scan, scanner, ADV not answered | 151/136 | 144/145/145 | 212/214/215 | +69 |
+| active scan, scanner, SCAN_REQ sent | 174/159 | 372/382/386 | 517/519/525 | +137 |
+| pairing (product), Peripheral, ACK+ACCEPT+DONE+REPLY | 2872/3134 | 224/227/241 | 273/275/280 | +48 |
+
+The C is 37-137 cycles (1.0-3.6 us) slower: it saves r4-r11 (the asm r4-r7), reloads block words
+through its base register where the asm kept them in registers, and calls the out-of-line paths.
+A first version (everything inlined, every block word from its own literal) was 47-108 cycles
+slower; `-Os` was slower than `-O2`. Against the hold this is far inside the margin, and T_IFS did
+not move: the active-scan e2e's RX handoff -> TX entry was 140 887-141 115 ns (84 replies) with
+the assembly and 140 884-141 165 ns (86 replies) with the C, one 208 ns STIMER tick of spread in
+both.
+
+Verified in QEMU, C default, every guest 0 deadline misses: qtests 139/46/8/13; radio-port and
+radio-rx-port smoke; dual (169 descriptor acks); active scan (43 exchanges); connection (30/30
+GATT); product pairing (level 4, 30/30); fake-vhci `CONNECT=1` (ATT Read By Group Type answered);
+sequencer-timed-wrap 6/6. Image 4734 -> 4990 B (limit 0x3E00 with the stack); deepest stack in
+the decision 48 B (the asm chain 52 B). Product RAM unchanged (28 804 / 28 404 / 29 828 B), flash
++256 B (kit 145 204 -> 145 460 B).
+
+Not covered by any e2e (checked against the assembly by reading only): the initiator's
+ADV_DIRECT_IND with TargetA (RPA and RxAdd), the slot check and its modulo, a frame over RX_MAX,
+the second CRC failure closing the event, no free RX buffer, and the stage timeout.
+
+**Silicon measurements needed** (kit, C image against the `CONFIG_EFR32_RADIO_SEQ_ASM` image,
+probe builds as 7.91): the scanner's and Central's decision times (7.91's SEQRAM 0x4F60 method),
+T_IFS of SCAN_RSP, SCAN_REQ, CONNECT_IND and the connection reply (`scripts/bg22-tifs-probe.tcl`;
+expected unchanged, 179.9-181.1 us), and the RX2TX record (0x4F40/0x4F20: PA up against the
+650-tick hold). Then `radio_seq.S` and `CONFIG_EFR32_RADIO_SEQ_ASM` go.

@@ -778,6 +778,16 @@ config EFR32_RADIO_TIFS_PROBE
 	  outliers, docs/radio-tables.md 7.91, 7.94). Takes TIMER1 and those
 	  PRS channels. Measurement builds only.
 
+config EFR32_RADIO_SEQ_ASM
+	bool "Sequencer: the all-assembly image (sequencer/radio_seq.S)"
+	help
+	  Build the radio sequencer from the original all-assembly source
+	  instead of radio_seq.c (reset and the staged reply's decision) with
+	  radio_seq_core.S (the state-event handlers, the timed command and the
+	  busy wait, instruction for instruction the same as in radio_seq.S).
+	  Kept until the C decision's timing is confirmed on silicon
+	  (docs/radio-tables.md 7.97); then radio_seq.S is removed.
+
 config EFR32_SEQ_WAKE_PROBE
 	bool "Sequencer: SysTick at the timed-command IRQ's entry and first poll"
 	depends on EFR32_RADIO_TIMING_PROBE

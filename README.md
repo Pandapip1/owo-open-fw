@@ -21,7 +21,7 @@ taken from a schematic. Bench-test it with the checklist below before it goes ne
 | `boards/owo/owo_suit/` | The suit's control unit as an out-of-tree Zephyr board (`docs/suit-board.md`) |
 | `boards/<board>.overlay`, `boards/owo_product.dtsi` | What the product needs from a board: OTA hand-over word, open controller, scheduler clock, watchdog (plus the kit's flash map) |
 | `boards/<board>_hw.overlay`, `owo-suit-hw.conf` | The suit's output stage as devicetree for that board (only with `-DOWO_HW=ON`; CMake picks `boards/${BOARD}_hw.overlay`) |
-| `modules/efr32-radio/` | **Open Bluetooth controller lower layer** for Zephyr's split link layer: M33 radio driver (`hal/radio.c`), the radio coprocessor's ARMv6-M firmware built from source (`sequencer/radio_seq.S`), RADIOAES crypto (`docs/radio-firmware-plan.md`, `docs/zephyr-ll-port.md`) |
+| `modules/efr32-radio/` | **Open Bluetooth controller lower layer** for Zephyr's split link layer: M33 radio driver (`hal/radio.c`), the radio coprocessor's ARMv6-M firmware built from source (`sequencer/radio_seq.c`, `radio_seq_core.S`), RADIOAES crypto (`docs/radio-firmware-plan.md`, `docs/zephyr-ll-port.md`) |
 | `crates/ble-ll/` | Rust link-layer reference crate (host tests only; the firmware uses Zephyr's controller) |
 | `vendor/zephyr/` | Pinned patched Zephyr submodule: scheduler clock and deadline scheduling (`docs/zephyr-dual-clock-scheduler.md`), Counter-backed timing backend, read-back verification for `ti,sn74hc595` |
 | `vendor/qemu/`, `sim/` | Pinned QEMU fork with the `efr32bg22` machine (M33 and radio M0+, radio, suit board); simulation scripts (`sim/README.md`, `docs/model-fidelity.md`) |
