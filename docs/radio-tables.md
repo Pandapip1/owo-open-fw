@@ -9570,7 +9570,9 @@ synthesizer, PA, VCO and PGA routines they call. The timed command polls TIMER0 
 (its loop period is the issue latency), `efr32_seq_delay` is calibrated per pass (7.60), and the
 trace helpers keep register contracts the handlers rely on. In C: reset (once, at boot), and
 `efr32_seq_conn_decide` with the scanner/advertiser matches, the address compares, the slot check
-and its modulo. The decision runs inside the RX2TX handler before the STIMER hold that sets
+and its modulo; inside it the wait for the M33's stage stays the assembly's loop as inline asm,
+because its passes are the wait's bound (see the six paths below). The decision runs inside the
+RX2TX handler before the STIMER hold that sets
 T_IFS (`EFR32_SEQ_RX2TX_TX_AT_STIMER`), so its length moves nothing on air while it ends before
 the hold: on silicon at least 76 us were left (7.84 item 4; decisions 12.7-25.6 us, 7.91).
 
@@ -9583,36 +9585,66 @@ reset and the decision differ.
 keeps its registers; the stage block through one base register; the FIFO's base, offset and mask
 read once). M0+ cycles (SysTick, the model's 38.4 MHz CPU timing, 7.93) from the RX2TX entry stamp
 to the decision's return, measurement builds of both images, 90 s per pair, per OUTCOME path,
-min/median/max:
+min/median/max (C: with the stage wait in assembly, 2026-11-10; first C: before that fix):
 
-| pair, endpoint, path | n (before/after) | asm | C | median |
-|---|---|---|---|---|
-| connection, Peripheral, ACK+ACCEPT+DONE+REPLY | 6923/7435 | 224/227/244 | 272/275/286 | +48 |
-| connection, Peripheral, ACK+ACCEPT+REPLY | 606/652 | 237/344/574 | 290/407/664 | +63 |
-| connection, Central, ACK+ACCEPT+DONE (sends nothing) | 7527/8085 | 161/162/170 | 207/209/218 | +47 |
-| active scan, advertiser, SCAN_REQ matched (SCAN_RSP) | 174/159 | 607/611/616 | 680/684/689 | +73 |
-| active scan, scanner, ADV not answered | 151/136 | 144/145/145 | 212/214/215 | +69 |
-| active scan, scanner, SCAN_REQ sent | 174/159 | 372/382/386 | 517/519/525 | +137 |
-| pairing (product), Peripheral, ACK+ACCEPT+DONE+REPLY | 2872/3134 | 224/227/241 | 273/275/280 | +48 |
+| pair, endpoint, path | n (asm/C) | asm | C | median | first C |
+|---|---|---|---|---|---|
+| connection, Peripheral, ACK+ACCEPT+DONE+REPLY | 6923/6982 | 224/227/244 | 256/257/277 | +30 | 272/275/286 |
+| connection, Peripheral, ACK+ACCEPT+REPLY | 606/612 | 237/344/574 | 257/386/632 | +42 | 290/407/664 |
+| connection, Central, ACK+ACCEPT+DONE (sends nothing) | 7527/7592 | 161/162/170 | 191/192/202 | +30 | 207/209/218 |
+| active scan, advertiser, SCAN_REQ matched (SCAN_RSP) | 174/180 | 607/611/616 | 663/665/669 | +54 | 680/684/689 |
+| active scan, scanner, ADV not answered | 151/157 | 144/145/145 | 193/193/194 | +48 | 212/214/215 |
+| active scan, scanner, SCAN_REQ sent | 174/180 | 372/382/386 | 497/514/515 | +132 | 517/519/525 |
+| pairing (product), Peripheral, ACK+ACCEPT+DONE+REPLY | 2872/3085 | 224/227/241 | 256/258/268 | +31 | 273/275/280 |
 
-The C is 37-137 cycles (1.0-3.6 us) slower: it saves r4-r11 (the asm r4-r7), reloads block words
+The C is 30-132 cycles (0.8-3.4 us) slower: it saves r4-r9 (the asm r4-r7), reloads block words
 through its base register where the asm kept them in registers, and calls the out-of-line paths.
 A first version (everything inlined, every block word from its own literal) was 47-108 cycles
 slower; `-Os` was slower than `-O2`. Against the hold this is far inside the margin, and T_IFS did
 not move: the active-scan e2e's RX handoff -> TX entry was 140 887-141 115 ns (84 replies) with
-the assembly and 140 884-141 165 ns (86 replies) with the C, one 208 ns STIMER tick of spread in
+the assembly and 140 887-141 148 ns (84 replies) with the C, one 208 ns STIMER tick of spread in
 both.
 
 Verified in QEMU, C default, every guest 0 deadline misses: qtests 139/46/8/13; radio-port and
-radio-rx-port smoke; dual (169 descriptor acks); active scan (43 exchanges); connection (30/30
+radio-rx-port smoke; dual (189 descriptor acks); active scan (42 exchanges); connection (30/30
 GATT); product pairing (level 4, 30/30); fake-vhci `CONNECT=1` (ATT Read By Group Type answered);
-sequencer-timed-wrap 6/6. Image 4734 -> 4990 B (limit 0x3E00 with the stack); deepest stack in
-the decision 48 B (the asm chain 52 B). Product RAM unchanged (28 804 / 28 404 / 29 828 B), flash
-+256 B (kit 145 204 -> 145 460 B).
+sequencer-timed-wrap 6/6; tests/sequencer-decide 83/83. Image 4734 -> 4934 B (limit 0x3E00 with
+the stack); deepest stack in the decision 84 B (`-fstack-usage`: the decision 56, scan_match 28;
+the asm chain 52 B). Product RAM unchanged (28 804 / 28 404 / 29 828 B), flash +200 B (kit
+145 204 -> 145 404 B).
 
-Not covered by any e2e (checked against the assembly by reading only): the initiator's
-ADV_DIRECT_IND with TargetA (RPA and RxAdd), the slot check and its modulo, a frame over RX_MAX,
-the second CRC failure closing the event, no free RX buffer, and the stage timeout.
+*The six paths no e2e reaches* (`tests/sequencer-decide`, 2026-11-10): the initiator's
+ADV_DIRECT_IND with TargetA, the slot check and its modulo, a frame over RX_MAX, the second CRC
+failure closing the event, no free RX buffer, and the stage timeout. The harness installs each
+image as the M33 does (as `sequencer-timed-wrap`), points its RDMAILBOX1 vector (IRQ 23) at an
+84-byte entry that calls the image's own `efr32_seq_conn_decide()` once per mailbox flag, and
+writes each stage and received frame into SEQRAM itself (an RX FIFO with mask 0xff, so frames and
+trailers wrap). For each of 83 cases the C and the assembly image must leave the same return,
+OUTCOME, stage state and shared words (0x4f00-0x4fff), and make the same M0+ register writes in
+the same order (QEMU's `memory_region_ops_write`: the mailbox clear, FRC.WCNTCMP0, BUFC TX CMD
+and every WRITEDATA octet of the reply, RAC.RXENSRCEN), and each answers as the case expects
+(`src/main.c`; the slot cases pin the modulo's remainder with LATEST = r and r + 1). They agree on
+all 83. Cycles are the decision's call to return on the sequencer's SysTick, not the RX2TX-entry
+figures above (other frames and PDUs), so only C - asm compares:
+
+| path | cases | C - asm (cycles) | e.g. C / asm |
+|---|---|---|---|
+| ADV_DIRECT_IND: TargetA ours or another, RxAdd, TxAdd, AdvA, length, CRC, the RPA policy, wrap | 20 | +24 to +47 | to us 810 / 785; RPA target 720 / 691 |
+| slot check: edges, START/EOF, before START, LATEST 0, 13 modulo pairs, STIMER's term | 32 | -17 to +27 | 0xffffffff mod 1 answered 1193 / 1210 |
+| over RX_MAX: connection (Peripheral, Central, closing, trailer wrapping), scanner, advertiser, initiator | 11 | +23 to +33 | length 28 of 27 201 / 178 |
+| CRC failure: first, second (closes), Central, SN/NESN 1 | 5 | +25 to +33 | Central's second 142 / 112 |
+| no RX buffer: connection new data, scanner, initiator, advertiser (not checked) | 5 | +30 to +54 | scanner 161 / 107 |
+| stage timeout: never staged, staged 40, 128, 142, 250 us after the mailbox | 5 | +16 to +31 | never 5220 / 5204 |
+| baselines the e2e also reaches | 5 | +29 to +105 | SCAN_REQ sent 440 / 335 |
+
+*Bug found and fixed:* the first C's stage wait took 15 cycles per pass besides
+`efr32_seq_delay(1)` where the assembly takes 12 (a compare, a flag copy and a taken branch
+more), so its 120-pass bound ended about 10 us later (5591 cycles from the call against 5204): a
+stage written 142 us after the mailbox was taken by the C and refused by the assembly, which sends
+nothing. The bound exists so the reply can start within T_IFS (`EFR32_SEQ_RX2TX_DECISION_WAIT_US`),
+so the loop is now the assembly's, instruction for instruction, as inline asm; the bound differs by
+the 16 cycles of entry and exit. Recompiled around it, the rest of the decision got faster (its
+prologue saves r8-r9 only) and the image 56 B smaller.
 
 **Silicon measurements needed** (kit, C image against the `CONFIG_EFR32_RADIO_SEQ_ASM` image,
 probe builds as 7.91): the scanner's and Central's decision times (7.91's SEQRAM 0x4F60 method),
