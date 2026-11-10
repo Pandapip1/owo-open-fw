@@ -541,6 +541,45 @@ vendor/qemu branch `model4`.  qtests after the pass: `efr32bg22-test` 139,
    loop, against the same kernels with the M0+ held, to get the M33's
    slow-down per M0+ access.
 
+## Stock Bluetooth stack boot (2026-11-09)
+
+Why the stock image never transmits in QEMU (B39 had ruled out PROTIMER
+compare/wrap events).  Two causes, in boot order; no model change.
+
+1. **Run configuration.**  The stock application reads the battery on PD3
+   through the 33/133 divider (C70) and takes its low-battery path when the
+   reading is low; the earlier stock-boot runs supplied 968 mV (3.9 V x
+   33/133) on PD2, the sense input, and left PD3 at 0 V.  Run stock images
+   on the suit board model, `-M efr32bg22,board=owo-suit`
+   (`sim/scripts/run-suit-board.sh`), which supplies the two-cell battery on
+   PD3 ("battery-mv", 7600 by default) and the expander inputs.  So booted,
+   the stack enables the radio and issues TXEN about 1.67 s after reset.
+2. **RAC.STIMERCOMP and the sequencer's wake.**  The RAC then stays in
+   TXWARM: the released sequencer, in its TXWARM state handler, writes
+   RAC.STIMERCOMP (+0x034) = 0x1c4, clears RAC.SEQIF bit 1 (STIMCMPEV,
+   public RAC_S_field.py) through the CLR alias, enables SEQIEN bit 0 only
+   (SEQIEN reads 0x3fff0001) and waits in WFI until SEQIF bit 1 is set or a
+   state change.  The model implements neither the STIMER compare nor any
+   wake for it.  Setting STIMCMPEV when STIMER reaches STIMERCOMP and routing
+   SEQIF & SEQIEN & 0xc000ffff to M0+ IRQ 14 (the line whose stock handler
+   acknowledges exactly those bits) was tried and is not enough: SEQIF
+   reads 0x01000002 but no enabled interrupt wakes the WFI (RAC.IEN
+   0x00050000, the M0+ NVIC enables IRQs 14, 16, 19, 20 above the handler's
+   priority, none of them pending).  On silicon the same wait ends, so some
+   wake path exists that no public source describes; nothing was committed.
+   Needed on silicon (sequencer-probe style, M0+ under the debugger, open
+   image or a minimal released sequencer):
+   - (a) with STIMERCOMP = N written, does SEQIF.STIMCMPEV (and RAC.IF bit 1)
+     set when STIMER reaches N, at N or N + 1, and again after each 16-bit
+     wrap; is the compare cleared by a state change (STIMER restart);
+   - (b) with SEQIEN bit 1 clear and the M0+ in WFI, does STIMCMPEV wake it
+     (count SysTick or PC before/after), and through which NVIC line (read
+     the M0+ ISPR for IRQs 14-22 with all of them disabled);
+   - (c) with SEQIEN bit 1 set, does STIMCMPEV pend M0+ IRQ 14, and does
+     clearing it there drop the line;
+   - (d) RAC.CTRL.CPUWAITDIS (bit 26, set by stock) on and off: whether it
+     changes (b).
+
 ## Tables
 
 ### A. docs/radio-tables.md sections 1 to 7.59
@@ -641,7 +680,7 @@ Line numbers in the Where column are approximate (the file moved during the audi
 | B36 | RAC.STATUS before first TXEN 0x00400000 vs 0x10400000 depending on build (bit 28) | §7.71 silicon (explained by §7.72 SEQACTIVE rule) | yes | efr32_rac_status | - |
 | B37 | Open image needs no PROTIMER enable/clock/counter; "PROTIMER before RAC" ordering does not hold for the open image | §7.71 silicon | yes (audit) | bg22.c peripheral_write RAC.EN (~5410) still forces SHUTDOWN when RAC.EN is set before BUFC/PROTIMER EN; T: rac-enable-requires-dependency-order | **Closed:** PROTIMER dropped from the RAC.EN ordering rule (BUFC stays, [I]). qtest `rac-enable-requires-dependency-order` (no-PROTIMER case) |
 | B38 | Live stage 3 PROTIMER: EN=1, CTRL=0, COUNTER static 0 | §7.71/7.73 silicon | yes (audit) | bg22.c:efr32_protimer_counter (~2316), 2 MHz ptimer free-runs | **Closed:** as A39 |
-| B39 | PROTIMER compare/wrap flags (stock stack programs CTRL, PRECNT, START, CC0/1, IEN 0x03001804) | §7.78 [I], undocumented | no | Reset values (IPVERSION 1, +0x030 0x00ffff00, +0x034 0x0000ffff, PERIOD 0xffffffff, +0x040/+0x04c 0x00ff00ff), +0x014 bit 0 while running and CMD reading 0, all from the silicon bank dumps (baselines release-boundary/stock-protimer.bin, hardware-lockstep/stage2-*-protimer.bin); T: protimer-reset-values | No compare or wrap events: no public register semantics. Not what stalls the stock stack: after a 20 s stock boot IRQ 36 is enabled and IEN = 0x03001804, but no compare slot has a target time (+0x10c..+0x16c all 0), so nothing is armed to fire; the stall is elsewhere |
+| B39 | PROTIMER compare/wrap flags (stock stack programs CTRL, PRECNT, START, CC0/1, IEN 0x03001804) | §7.78 [I], undocumented | no | Reset values (IPVERSION 1, +0x030 0x00ffff00, +0x034 0x0000ffff, PERIOD 0xffffffff, +0x040/+0x04c 0x00ff00ff), +0x014 bit 0 while running and CMD reading 0, all from the silicon bank dumps (baselines release-boundary/stock-protimer.bin, hardware-lockstep/stage2-*-protimer.bin); T: protimer-reset-values | No compare or wrap events: no public register semantics. Not what stalls the stock stack: after a 20 s stock boot IRQ 36 is enabled and IEN = 0x03001804, but no compare slot has a target time (+0x10c..+0x16c all 0), so nothing is armed to fire; the stall is elsewhere ("Stock Bluetooth stack boot": run configuration, then RAC.STIMERCOMP and the sequencer's wake, owed on silicon) |
 | B40 | Bus-clock gate map: CLKEN1 bit0 AGC,1 MODEM,2 RFCRC,3 FRC,4 PROTIMER,5 RAC,6 SYNTH,7 RDSCRATCHPAD,8 RDMAILBOX0,9 RDMAILBOX1,10 PRORTC; bit 11 BUFC gates nothing; bits 12-15 nothing | §7.72 silicon | yes | bg22.c:efr32_radio_bus_clock (~1367), efr32_bus_error (~5613); RF: radio-block-clock-gates; T: gated-bus-clock-faults-and-drops | - |
 | B41 | RADIOCLKCTRL.EN=0 faults every radio window, BUFC and SEQRAM (0xB0000000); debugger SEQRAM reads fail | §7.72, §7.74 silicon | yes (audit) | efr32_bus_error covers radio+BUFC; efr32_seqram_m33_read (~6527) ungated | **Closed:** the M33/debugger SEQRAM window faults (read) and drops writes while RADIOCLKCTRL.EN is clear (`efr32_seqram_gated`). qtest `rf/seqram-radio-clock-gate`. The secure 0xa0000000 alias is plain RAM (unmeasured) |
 | B42 | Gated radio write: accepted by AP and dropped (RAC SR0 kept pre-gate value) | §7.72 silicon; §7.73 notes TIMER/PRS gated writes give sticky bus errors and radio not re-measured | partial | efr32_radio_mmio_write (~5952) returns OK, drops | Open question: may be a (sticky) bus error like TIMER; needs remeasure |
