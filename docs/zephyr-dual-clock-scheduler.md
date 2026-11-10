@@ -382,6 +382,22 @@ this deviation.
 each callback is attributed to its job, so the line's cost per expiry is that job's. The
 announcing job of step 1 and its spacing floor are gone.
 
+**Threads that wait on an object for their work** (work queues, the Bluetooth receive
+threads) become armed jobs with `k_deadline_job_bind()` (`k_work_queue_job_bind()` for a work
+queue): each wake from that wait is a release and each wait on it ends a run; their other waits
+stay resource waits. A wake sooner than the declared inter-arrival after the last release is
+held until it, not reported (as a resume is), so the declaration's spacing holds by
+construction and `D <= T` keeps one run outstanding. The Bluetooth host and controller expose
+their queues and receive threads for the product to declare.
+
+**Not yet bound in the product** (finding, pending the pulse option and a priority decision).
+Bound with provisional declarations, admission refused four of the six Bluetooth jobs and then
+the pump: the Bluetooth receive threads are cooperative at -8 and -10, above the pump (-2) and
+the feed (-3), and the pump's own declaration (1893 us every 2000 us) leaves no capacity below
+it. Binding them needs the pump decomposed (the pulse option) and the safety jobs placed above
+the Bluetooth threads. The product binding (`src/bt_jobs.c`, a startup job for the main
+thread's bring-up) is kept aside until then; strict mode stays off.
+
 **Essential threads may suspend themselves.** A deadline-event wait suspends its consumer; the
 main thread (essential) is the product's pump, so `z_thread_halt()` now panics only when an
 essential thread terminates, not when it suspends.
