@@ -1,0 +1,5 @@
+/*
+ * The BGM220 explorer kit (BRD4314A): the BRD4108A kit's layout with the BGM220P module, so the
+ * same product overlay.
+ */
+#include "bg22_ek4108a.overlay"

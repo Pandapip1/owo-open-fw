@@ -9651,3 +9651,68 @@ probe builds as 7.91): the scanner's and Central's decision times (7.91's SEQRAM
 T_IFS of SCAN_RSP, SCAN_REQ, CONNECT_IND and the connection reply (`scripts/bg22-tifs-probe.tcl`;
 expected unchanged, 179.9-181.1 us), and the RX2TX record (0x4F40/0x4F20: PA up against the
 650-tick hold). Then `radio_seq.S` and `CONFIG_EFR32_RADIO_SEQ_ASM` go.
+
+### 7.98 Silicon regression check of master d5894d4: two shutdowns the QEMU suites cannot see
+
+Tags as in 7.79. Board: BGM220 explorer kit (J-Link OB 000440200548), the laptop's controller
+(hci0, BlueZ `bluetoothctl`) as Central. Scratch: `scratch/sil4/` of the kit agent's worktree
+(build.sh, hw.sh, bis.sh and bisp.sh for the bisections, catchmiss.tcl, prodtest.sh, images in
+`img/`). Every image below runs the hardware timing figures and the custom miss policy (a miss or
+an infeasible request shuts the radio down); the QEMU suites run the QEMU figures with misses
+counted, so neither failure shows there.
+
+**1. The 7.84 pairing image shuts down at its first connectable advertising event [F].**
+`tests/radio-port` with `prj-hardware`, `prj-connection`, `prj-pairing` and 7.84's safety policy
+(`scratch/sil-conn/safe.conf`), built from master: `adv_start: 0`, then 168 ms after boot
+`deadline late start: efr32_radio_completion_event ... 3337 ns past the deadline, 88185 ns after
+release`, running at release `bt_long_wq` (the host's P-256 key generation); the same on three
+resets. Bisected on the kit over the superproject's first-parent commits that change
+vendor/zephyr, modules/efr32-radio or tests/radio-port: good at 3cf3057 (7.91), 88f0003 and
+246c22d; bad from 91fdd7f, vendor/zephyr `11e01fd7b78` ("dispatch by priority among satisfying
+orders"). Master with `CONFIG_SCHED_DEADLINE_DISPATCH=n` advertises, pairs and holds the link
+(below). `CONFIG_SCHED_DEADLINE_ADMISSION_PROBE` on the kit, to the shutdown: longest admission
+check 1969 cycles (58.7 us at 2^25 Hz) over 6 checks, longest dispatch decision 408 cycles
+(12.2 us) over 32; with the dispatch rule off, 1289 cycles (38.4 us) over 1070 checks. Both run
+inside the post, in the interrupt that releases the job and before the consumer is readied
+(`kernel/deadline.c` `deadline_event_post()`), so a completion with an 84.8 us start window
+loses up to 70.9 us of it to the check and the decision: the cost the rule added (+20 us check,
++12 us decision) is what tips it over. The check's own cost is charged nowhere [I]. Caught at
+`z_deadline_miss_report` with a hardware breakpoint (`catchmiss.tcl`): the completion event was
+released from idle (`released_idle`), pending, budget 267.5 us; no other admitted run started
+between its release and its start.
+
+**2. The product never advertises [F].** The repository-root application for this kit (new
+`boards/bgm220_ek4314a.overlay` and `.conf`, the BRD4108A product overlay unchanged; the image at
+0x16000 with its two vector words copied to 0, as `scratch/ram-fit/mkflash.py` does for QEMU),
+shipped configuration (printk off, watchdog on): 10.2 ms after boot admission refuses a post of
+the LLL context while the LLL thread runs: `deadline unsat: lll context`, reported with the TX
+launch it would make late (release 1144 us and start-by 1258 us from the check, demand ahead
+343.1 us = the 58.1 us interrupt allowance + the 285.0 us LLL budget). The radio shuts down; no
+advertising is seen by the laptop; the part keeps running and feeding, and EMU.RSTCAUSE (read at
+the non-secure alias 0x50004094; the secure alias reads 0) shows no watchdog reset over 10 s.
+Deterministic, and the same in QEMU with the kit image (hardware figures). With the dispatch rule
+off as well, unchanged. Product bisection (shipped configuration, radio halted or a miss counted
+4 s after boot): good at 246c22d, 7f2614e, 3e606bc and bac14eb; bad from a46917f ("Watchdog feed
+as a periodic job; timed calls attributed to jobs", vendor/zephyr `06e572e5231` +
+`3112eee5ca7`). The earlier product images are not sound either: bac14eb's halted later with a
+late clock-event delivery of the kernel timeout event (89.5 us against the 88.6 us tolerance,
+idle running at release, about 4.2 s after boot); 246c22d's advertised and connected, but after a
+pairing the test script answered with a wrong passkey it stopped advertising (no miss, no reset;
+not followed up).
+
+A printk build of the product (diagnosis only) reset in a loop every 200 ms: the safe-shutdown
+report, printed synchronously at 115200 baud, starves the 62.5 ms watchdog. The shipped
+configuration (printk off) does not do this.
+
+**3. What works [F].** Master's 7.84 pairing image with the dispatch rule off: the laptop paired
+(LE Secure Connections, passkey, bonded, level 4 as `peripheral_paired: bonded 1`), then 148
+write/read-back rounds over 150 s, 148/148 exact (`gattcheck.sh`), the link held 2.6 min, then a
+host disconnect; misses 0, late deliveries 0, radio not halted. The bond was removed afterwards
+(that address only).
+
+**Open.** Both shutdowns are scheduler or budget bugs (admission accepted what it then cannot
+meet, or refused what the product needs); the fixes belong to the scheduler work, not to this
+check. The kit tests of the product's GATT stimulation path, its 2-minute connection and its
+watchdog under load wait for an image that advertises. The batch-4 measurements (TIMER0 across
+EM2, C against assembly sequencer, protimer probes, close completion, HCTO run, STIMERCOMP,
+cpu-timing-port) were not run.
