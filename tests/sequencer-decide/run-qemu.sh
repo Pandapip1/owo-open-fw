@@ -2,7 +2,7 @@
 # The staged-reply decision of the C sequencer against the assembly one, case by case, on the
 # in-tree EFR32 QEMU model (M0+ included). Build both first (no west workspace):
 #   for v in c asm; do
-#     nix develop . -c cmake -GNinja -S tests/sequencer-decide -B build/sequencer-decide-$v \
+#     ZEPHYR_BASE="$PWD/vendor/zephyr" nix develop . -c cmake -GNinja -S tests/sequencer-decide -B build/sequencer-decide-$v \
 #       -DBOARD=bg22_ek4108a -DZEPHYR_BASE="$PWD/vendor/zephyr" \
 #       -DZEPHYR_MODULES="$PWD/vendor/cmsis_6;$PWD/vendor/hal_silabs" \
 #       -DDTC_OVERLAY_FILE="$PWD/tests/sequencer-decide/boards/bg22_ek4108a.overlay" \
