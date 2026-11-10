@@ -439,6 +439,50 @@ lines, 825 us declared plus that blocker, well inside 11.7 ms. Measured, 120 s s
 on the suit board model: 8053 feeds, 0 misses, longest gap 23.99 ms (bound 35.4 ms, warning
 46.9 ms).
 
+### Clock sync: the root of every timing guarantee
+
+Every deadline, budget and release time is measured with the scheduler clock: if its providers
+disagree, every timing assumption fails with them. So the clock service checks itself, inline,
+in its own handling path (`CONFIG_CLOCK_EVENT_SCHED_SYNC_CHECK`), never subject to admission and
+never refused, and a failure goes straight to the application's safe shutdown,
+`k_clock_sync_fault_handler()`, as `K_DEADLINE_MISS_CLOCK_SYNC`, not through the miss policy,
+which measures lateness with the clocks that just failed.
+
+**Where it runs.** Re-anchoring (the BURTC and TIMER0 counts tied together at a BURTC edge) runs
+inline: in the BURTC expiry interrupt and in the power-management entry and exit hooks, as
+before; step 1 moved none of it. The checks run there and in the clock-event interrupt, plus
+one scheduler-clock client of the service's own (a check at least every interval while TIMER0
+runs, delivered by the BURTC so a stopped TIMER0 cannot hide), cancelled while only the BURTC
+runs (EM2). Their cost is part of the TIMER0 and BURTC lines' interrupt cost.
+
+**The checks, each against the other clock, never against itself:**
+- *Drift.* While TIMER0 runs, over every interval of at least
+  `CONFIG_CLOCK_EVENT_SCHED_SYNC_INTERVAL_MS` (100 ms), the two providers' counts in logical
+  cycles differ by no more than `CONFIG_CLOCK_EVENT_SCHED_SYNC_DRIFT_PPM` of the interval plus
+  one BURTC cycle of quantisation at each end. The bound, 550 ppm: the HF tree within the
+  Bluetooth active-clock accuracy (50 ppm: the suit's HFRCODPLL is phase-locked to the 38.4 MHz
+  HFXO, so it adds none on average), the LF clock within the Bluetooth sleep-clock accuracy
+  (500 ppm), which also bounds the suit's LFRCO in precision mode (about +-500 ppm,
+  `docs/suit-board.md`) and the kit's LFXO (measured +110 ppm against the HF tree,
+  `docs/radio-tables.md` 7.73). A stopped provider fails it.
+- *Capture window.* A BURTC edge capture (re-anchoring at PM entry and exit) completes within
+  two BURTC cycles, timed by TIMER0; a stopped BURTC fails it instead of hanging.
+- *Monotonic time.* Logical time never steps back by more than a hand-off's quantisation (two
+  BURTC cycles); within it the step is held, as before. Measured on the product: no step back
+  at all over a 120 s stimulating run.
+
+**The safe shutdown** (`src/clock_sync.c`): interrupts masked, the output stage to its safe
+state by raw register writes (no clock, timeout or scheduler involved), then nothing feeds WDOG0
+and it resets the part. WDOG0 runs from its own LF oscillator; on the suit that is the LFRCO,
+which also clocks the BURTC, so with a stopped LFRCO the reset does not come and the part stays
+in the handler with the output safe. Nothing in the shutdown depends on TIMER0 or the BURTC.
+
+**Fault tests** (`tests/clock-sync-qemu/run-clock-sync-qemu.sh`, the BG22 model's run-time clock
+faults on vendor/qemu `clock-faults`: `x-hf-ppm`, `x-timer0-stopped`, `x-lf-ppm`,
+`x-lf-stopped`, qtest `/efr32bg22/clock-fault-injection`): no fault, no report; the TIMERs'
+clock +2000 ppm, the BURTC's clock -2000 ppm and a stopped TIMER0 while awake, each a drift
+report; a stopped BURTC while sleeping, a capture report.
+
 ### Dispatch: priority among the satisfying orders
 
 **The rule.** Among all orderings that meet every admitted deadline, run the highest-priority
