@@ -314,6 +314,81 @@ prepares) is never blocked by them.
 
 Not yet mapped in code: the radio and the product still post one-shot releases only.
 
+### Dispatch: priority among the satisfying orders (design, not implemented)
+
+**The rule.** Among all orderings that meet every admitted deadline, run the highest-priority
+ready job first; run a lower-priority job ahead of a higher one only when every satisfying
+ordering requires it. Feasibility first, priority breaks the ties.
+
+**Today.** Not implemented. Dispatch is Zephyr's fixed priority (EDF within one priority), and
+admission simulates exactly that, so it refuses sets another order satisfies. Evidence:
+`test_fixed_priority_refuses_a_satisfiable_set` (vendor/zephyr 1fd04697089). A low job (100 us,
+start by +400) and a high job (500 us, start by +5000), both released at +100: fixed priority
+starts the low job at +600, late, and the high release is refused; low then high starts them at
++100 and +200.
+
+**Feasibility oracle.** For start-by deadlines on one CPU with the jobs released, ordering by
+start-by deadline (EDF) is optimal: if any order starts every job in time, EDF does (exchange
+argument). For the released set R at time t, with C the remaining budgets, define each job's EDF
+slack S_k = d_k - t - sum of C_i over i != k with d_i <= d_k. R is satisfiable iff every S_k >= 0.
+
+**Dispatch decision.** At a scheduling point, let h be a candidate. Running h first (to the end
+of its run, the conservative case) keeps R satisfiable iff C_h <= S_k for every k with
+d_k < d_h: jobs with later deadlines already count h's work. With S in deadline order and a
+prefix minimum, each candidate is checked in O(1): sort once (n <= 12, insertion sort), prefix
+minima once, then walk the candidates in priority order and take the first that passes. O(n log
+n) per scheduling point. If none passes, run EDF's choice (the earliest deadline), which keeps
+R satisfiable by the oracle. By induction the schedule meets every deadline whenever the set was
+satisfiable at admission, and it runs the highest priority the deadlines allow at every step.
+
+**Where it decides.** Only at scheduling points, which already exist: a release (the post that
+readies a job enters the scheduler, the user's "free preemption at activation"), a run's end
+(its next wait), an arm or disarm. Between them nothing re-decides, and the check assumes the
+chosen job runs to its budget, so no timer is needed for the rule itself (G1's budget timer
+catches a job that runs longer). The decision is cached at the scheduling point; `next_up()`
+reads it in O(1), so the scheduler's critical section (interrupts locked) grows only by the
+O(n log n) step at releases and run ends. Cost to measure on silicon before enabling: n = 12 is
+on the order of a few hundred instructions.
+
+**What it changes in the meta-IRQ and cooperative semantics, and what it does not.**
+- A running job is never preempted by a lower-priority one. A lower-priority job can only be
+  chosen over a higher one that has not started. So nothing a running job relies on changes:
+  run-to-completion within a cooperative priority, and the radio's mutual exclusion between its
+  jobs (same meta-IRQ level, non-preemptive), stay as they are; a higher priority still
+  preempts a lower one.
+- Choosing a lower job L while a higher job H is released but not started is equivalent, for
+  every piece of code, to H having been released after L started: any code already has to be
+  correct under that interleaving, since releases come at arbitrary times. No new data race.
+- What changes: a higher-priority job can now start later than an admitted lower one when the
+  deadlines require it; and the realizable schedules are "priority, except where the guard
+  forbids", not fixed priority. Zephyr APIs that assume fixed priority (priority inheritance on
+  mutexes, `k_yield()`) are unaffected for threads outside admission; the override applies only
+  between deadline-event consumers about to start a run.
+- Threads outside admission (the BT host, the pump until it is mapped) are background: they run
+  when no admitted job is ready, or when the guard leaves slack. Mapping them onto job kinds
+  (kernel timeouts, above) brings them inside the rule.
+
+**What admission checks.** The existence of a schedule the rule produces, i.e. that the rule's
+own schedule meets every deadline. Admission simulates the rule (the same guard at every
+simulated step, over the admitted releases, the reservations' worst-case releases and the
+interrupts' supply bound per busy period), replacing the fixed-priority simulation. Because the
+rule never leaves EDF-feasibility, this accepts every set EDF can schedule within the rule's one
+constraint (no lower preempting a running higher), which a blocking term covers: per job, the
+largest remaining run of a higher-priority job that can be running when it is released.
+Sufficient, not exact, inside non-preemptive groups: non-preemptive scheduling is NP-hard in
+general (it may need inserted idle time), so a set satisfiable only by idling is refused.
+
+**Cost and RAM.** The simulation's per-step selection becomes the O(n log n) guard: the check
+grows from about 26 x 12 steps to about 26 x 12 x 4. The admission check runs in the releasing
+interrupt, so its time is part of that interrupt's budget; measure before enabling. RAM: the
+slack and order arrays, 12 x 8 B, static.
+
+**Plan once approved.** (1) The guard in the simulation, with the demonstration test inverted
+and tests for each property (higher first when it fits, lower first only when required, a
+running job never preempted by a lower one). (2) The cached decision and its use in `next_up()`.
+(3) Measurement of the check and dispatch time on the QEMU model and silicon. (4) Then the radio
+mapping as planned.
+
 ## Acceptance plan
 
 The implementation is ready to replace the temporary radio alarm path only
