@@ -3,13 +3,13 @@
  * model's per-instruction-class cycle counts. The same image runs on silicon and in QEMU and
  * prints one line per figure.
  *
- * Kernels (src/kern33.S) run with interrupts locked, from flash and from a copy in SRAM, at
+ * Kernels (src/kern33.c) run with interrupts locked, from flash and from a copy in SRAM, at
  * N = 10 and N = 110 iterations; "iter" is the DWT.CYCCNT cost of one iteration in
  * millicycles, "op" that less the empty loop, divided by the 8 copies of the body. Then
  * library and firmware functions (cold call after an instruction-cache flush, then warm), and
  * straight-line blocks for the instruction cache's size and miss cost. Then exception entry
  * and return on the M33, and the M0+'s kernels and exception run on the radio sequencer core
- * (src/kern0.S, 7.94).
+ * (src/kern0.c, 7.94).
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -412,7 +412,7 @@ static void run_exceptions(void)
 }
 
 /*
- * The M0+ kernels (src/kern0.S) on the radio sequencer core: held in RAC.CTRL.SEQRESET for
+ * The M0+ kernels (src/kern0.c) on the radio sequencer core: held in RAC.CTRL.SEQRESET for
  * the copy into SEQRAM and released with CPUWAITDIS, as hal/radio.c's radio_reset() does.
  * While it runs this core only waits on its own clock: an M33 SEQRAM access during the run
  * would slow the M0+'s (7.74).
@@ -422,7 +422,7 @@ static void run_exceptions(void)
 #define RAC_CTRL_SEQRESET BIT(24)
 #define RAC_CTRL_CPUWAITDIS BIT(26)
 #define SEQRAM_M33 0xB0000000U
-/* kern0.S's result layout and parameters. */
+/* kern0.c's result layout and parameters. */
 #define K0_RESULTS 0x3000U
 #define K0_RESULTS_END 0x3710U
 #define K0_RES_KERN 8U
@@ -435,7 +435,8 @@ static void run_exceptions(void)
 /* 19 kernels x 2 N x 3 runs x at most 110 x 40 cycles is 52 ms at the slowest M0+ clock in
  * 7.75, 19.2 MHz (HFXO SYSCLK / 2); four times that. */
 #define K0_RUN_US 200000U
-extern uint8_t kern0_start[], kern0_end[];
+extern const uint8_t kern0_image[];
+extern const size_t kern0_image_size;
 
 static const char *const k0_name[] = {
 	"empty",     "nop",       "alu",       "str_a0",    "str_a2",    "str_a4",    "str_a6",
@@ -450,13 +451,13 @@ static uint32_t seqram_rd(uint32_t off)
 
 static void run_m0(void)
 {
-	size_t bytes = kern0_end - kern0_start;
+	size_t bytes = kern0_image_size;
 
 	sys_write32(1U, RAC_EN);
 	sys_write32(RAC_CTRL_SEQRESET, RAC_CTRL);
 	__DSB();
 	for (size_t i = 0; i < bytes; i += 4U) {
-		sys_write32(sys_get_le32(&kern0_start[i]), SEQRAM_M33 + i);
+		sys_write32(sys_get_le32(&kern0_image[i]), SEQRAM_M33 + i);
 	}
 	for (uint32_t off = K0_RESULTS; off < K0_RESULTS_END; off += 4U) {
 		sys_write32(0U, SEQRAM_M33 + off);

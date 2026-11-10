@@ -46,14 +46,21 @@ OpenOCD must re-examine this board after SRST), stop it at the checkpoint first
 and pass `--current hardware`. The other endpoint will still continue to the
 requested address before the paired snapshot is taken.
 
-For M0+ instruction lockstep, build `m33-seq-launch.S` with its linker script
+For M0+ instruction lockstep, build `m33-seq-launch.c` with its linker script
 and use its binary as QEMU's machine flash. Load the sequencer probe with a
-generic loader device. The launcher performs SEQRESET/CPUWAITDIS from running
+generic loader device at `0xa0000000` (SEQRAM's RAM view: the `0xb0000000`
+window drops writes while `RADIOCLKCTRL.EN` is clear, as it is at reset). The launcher performs SEQRESET/CPUWAITDIS from running
 M33 code, after device reset and image loading; issuing CPUWAITDIS from another
 generic loader has ambiguous reset ordering and can make the M0+ sample an
 uninitialized vector table.
 
-`m33-seq-txwarm.S` is the companion event fixture. It enables the radio bus
+```sh
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -Os -ffreestanding -nostdlib \
+  -Wl,-T,m33-seq-launch.ld m33-seq-launch.c -o m33-seq-launch.elf
+arm-none-eabi-objcopy -O binary m33-seq-launch.elf m33-seq-launch.bin
+```
+
+`m33-seq-txwarm.c` is the companion event fixture. It enables the radio bus
 clocks, releases a preloaded M0+ image, and requests TXEN so QEMU asserts the
 sequencer's external IRQ8/TXWARM input. It was used with the open probe to
 regress the hardware-observed rule that rewriting an already-asserted

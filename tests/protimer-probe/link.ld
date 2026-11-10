@@ -3,6 +3,6 @@ ENTRY(protimer_probe_enable)
 SECTIONS
 {
   . = 0;
-  .text : { *(.text*) *(.rodata*) }
+  .text : { KEEP(*(.text.entry)) *(.text*) *(.rodata*) }
   /DISCARD/ : { *(.ARM.attributes) *(.comment) }
 }
