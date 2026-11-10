@@ -314,6 +314,46 @@ prepares) is never blocked by them.
 
 Not yet mapped in code: the radio and the product still post one-shot releases only.
 
+**Which kind.** Released by time alone: periodic (timed). Released by an event (a GATT write, a
+radio completion): armed.
+
+**Timed releases** (vendor/zephyr, `CONFIG_SCHED_DEADLINE_TIMED_JOBS`). A periodic job's
+releases ride a scheduler clock event of the kernel's own pool, delivered at the release time,
+not at the next tick and not through kernel timeouts. Its start-by counts from the release
+time, not the delivery; the delivery's lateness, up to `CONFIG_CLOCK_EVENT_SCHED_LATE_TOLERANCE_NS`
+(beyond which the clock service reports it), is its jitter, and admission checks its own start
+that much earlier. `k_deadline_event_release_at()` lets the job choose its next release (a pulse
+schedule: any time at least a period after the last), which cannot fail. Without the clock
+service a kernel timeout stands in (a tick of jitter); with the announcing job on, a timed job
+needs a pool clock event.
+
+**Pause and resume.** `k_deadline_event_pause()` stops a timed job's releases and keeps its
+reservation: admission charges it at its declared rate as for an armed job, so nothing is
+admitted into its space (paused = armed). `k_deadline_event_resume()` is an activation and cannot
+fail: the job is released now, or held (not reported) until a period after its last release,
+and its period restarts there. Only `k_deadline_event_disarm()` frees the capacity; starting
+again after it is a new arm, checked. A job declared `non_pausable` refuses a pause (`-EPERM`):
+the watchdog feed and the amateur identification. The pump's pulse job pauses when stimulation
+stops instead of disarming.
+
+**Change requests.** `k_deadline_event_change()` replaces an armed or timed job's declaration
+(budget, inter-arrival or period, deadline, interrupt budget, pausability; the resource set with
+the resource model). The new declaration is checked against everything else admitted with the
+current one removed, and until the switch the envelope of both is charged (larger budget and
+interrupt budget, shorter inter-arrival, earlier deadline), so the transition is covered too.
+Admitted, it takes effect at the job's next release; the run in progress completes under the old
+one; a timed job's first release under it is the new period after the last old one. Refused, the
+old declaration stays in force, its charge unchanged. A change that only reduces demand charges
+the current declaration, so it passes. A non-pausable job keeps a non-pausable declaration.
+Thread context only: the check is admission work.
+
+Tests (deadline_admission, native_sim, mps2/an385 and the BG22 model): pause then resume cannot
+fail; an early resume is held to its period; a paused job's capacity is not given away; a
+non-pausable job refuses a pause; a change applies at the next release; a changed period spaces
+from the last release; an infeasible change is refused with the old one charged; a reducing
+change passes; a non-pausable job cannot change into a pausable one; on the model, two timeouts
+100 us apart both expire within a tick and the announcing job's start-by.
+
 ### Dispatch: priority among the satisfying orders
 
 **The rule.** Among all orderings that meet every admitted deadline, run the highest-priority
