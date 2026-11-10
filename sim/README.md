@@ -109,6 +109,30 @@ round trip over vhci was 100 to 270 ms, and up to 1 s for the first HCI_Reset du
 inside HCI_CMD_TIMEOUT; with both SoCs busy virtual time ran at about 0.3x real time. Real
 time is never fed into the guests: bytes from the host enter at the current virtual time.
 
+### Simulator speed
+
+With per-CPU clocks the dual machine runs its four cores (two M33s, two M0+s) in rounds of
+500 ns of virtual time, about 38 M33 instructions per slice. Host profiles (perf, pairing e2e)
+show the time going to the per-slice overhead, not to guest code: entering and leaving the
+execution loop, the BQL, TB lookups, the timer deadline, and the TB rewind (`cpu_io_recompile`)
+that icount makes every device access in the middle of a TB take. The quantum itself decides
+how the cores interleave, so it is part of the guest-visible timing and stays.
+
+Two exact caches cut that overhead (model-fidelity.md, "Model-gaps4 pass"): the TB of a host
+address, and the earliest timer expiry while no timer changed. Measured on the pairing e2e's
+dual machine up to the Central's first GATT summary (49.4 s of virtual time), QEMU pinned to
+the Apple M-series performance cores (`taskset -c 2-9`; the efficiency cores run it markedly
+slower), median of interleaved runs: 267 to 239 billion host instructions (-10.6 %), CPU time
+-10 to -13 %, wall time 36.1 to 32.4 s (1.11x) on a lightly loaded host. With
+`-icount shift=3,sleep=off` that run advances about 1.5 s of virtual time per wall second.
+
+Determinism: with `-seed N` (the TRNG model draws from QEMU's guest random source) two runs
+of the same images produce the same radio trace and consoles byte for byte, whatever the host
+load; without it, per-boot random addresses make each run different. Every speed change was
+checked that way against the previous build: the shorter run's trace and consoles are an exact
+prefix of the longer run's. For speed comparisons count instructions (`perf stat -e
+instructions`) or CPU time rather than wall time, and interleave the builds being compared.
+
 ## Debugging and flashing the simulator
 
 The machine has the BG22's SWD debug port (SW-DP, AHB-AP, DCI, M33 halting
