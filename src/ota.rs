@@ -47,16 +47,13 @@ pub(crate) fn reboot_if_requested() {
 
     // The ATT handler has returned by now. Keep the radio alive only for the
     // response settling window, with output already de-energised; shutdown then
-    // runs in the pump's thread context. The pump keeps feeding through the
+    // runs in the pump's thread context. The feed job keeps feeding through the
     // window under its usual condition (output quiescent); if Bluetooth teardown
-    // wedges, the watchdog resets the SoC with the output already off.
+    // wedges, the watchdog resets the SoC with the output already off. The window
+    // is a timed release of the pump job, far longer than its spacing.
     crate::prepare_reset();
-    // The reset preparation was this pass's safe-off: feed before the window, which
-    // started without one (the request woke the pump ahead of its pass).
-    let _ = crate::wdt::feed();
-    let _ = crate::wdt::sleep_fed(SETTLE_MS);
+    zephyr::time::sleep(zephyr::time::Duration::millis_at_least(SETTLE_MS));
     crate::ble::shutdown();
-    let _ = crate::wdt::feed();
 
     // SAFETY: reset preparation has put the output stage in its safe state.
     unsafe {

@@ -319,6 +319,10 @@ extern "C" fn rust_main() {
     unsafe {
         zephyr::set_logger().unwrap();
     }
+    // The feed job feeds from now on while the output stays quiescent (src/wdt.rs).
+    if wdt::start_feed_job().is_err() {
+        error!("watchdog feed job refused; the watchdog resets the part");
+    }
     // C reset safe-off has already run from SYS_INIT. Rust's readiness check
     // and forced safe-off must complete before enabling work.
     if early_boot_baseline().is_err() {
@@ -327,20 +331,15 @@ extern "C" fn rust_main() {
          * best-effort baseline has already attempted every electrical
          * safe-off action; do not bring up BLE or normal work unless the
          * reconstructed drivers also acknowledged their shutdown state.
+         * The feed job keeps feeding while the output stays quiescent: a reset loop would
+         * pass through the reset window (pins floating) again and again. Once the bridge is
+         * on it withholds the feed, and the warning interrupt and the reset take over.
          */
         error!("output shutdown baseline unverified; bring-up halted");
-        /*
-         * Keep feeding while the output stays quiescent: a reset loop would pass through the
-         * reset window (pins floating) again and again. A feed refused here means the bridge
-         * is on, so stop feeding and let the warning interrupt and the reset take over.
-         */
-        while wdt::sleep_fed(1_000) {}
         loop {
             zephyr::time::sleep(Forever);
         }
     }
-    // Boot checkpoint: the baseline pass just left the output safe.
-    let _ = wdt::feed();
     // Before the link can exist: a radio shutdown stops the output it controls.
     // SAFETY: registers a function that is safe in any context.
     #[cfg(CONFIG_BT_LLL_VENDOR_EFR32)]
@@ -351,7 +350,6 @@ extern "C" fn rust_main() {
         error!("BLE start failed: {}", e);
         return;
     }
-    let _ = wdt::feed();
     let serial = serial();
     info!(
         "pairing passkey for serial '{}': {:06}",
@@ -360,8 +358,8 @@ extern "C" fn rust_main() {
     );
 
     // Pump: tickless. Sleep until the engine's next wake-up or a GATT write gives the
-    // semaphore, never longer than the watchdog allows (src/wdt.rs). It is the output-safety
-    // supervisor, and the only thread that feeds the watchdog: after each supervision pass.
+    // semaphore. It is the output-safety supervisor; the feed job checks its passes are on
+    // time (src/wdt.rs).
     loop {
         ota::reboot_if_requested();
         let (wake, poll, watchdog) = {
@@ -390,8 +388,11 @@ extern "C" fn rust_main() {
         // The supervisor has already completed its ordered safe-off path; its feed predicate
         // and its hold on EM1 go with the session.
         drop(watchdog);
-        // The supervision pass is complete: feed if the feed condition holds (src/wdt.rs).
-        if !wdt::feed() {
+        // The supervision pass is complete. While a session is supervised the feed accepts it
+        // up to a poll interval plus the feed's own start-by (wdt::pass_slack_us()): the pump
+        // is not a scheduler job here, so nothing tighter is admitted for its wake-up.
+        let limit = poll.map(|p| p + wdt::pass_slack_us());
+        if !wdt::pass_done(now_us(), limit) {
             // A monitored resource whose predicate fails is failed, not rebooted: stop every
             // output now; its lifecycle remains failed until an explicit, separately
             // authorized recovery. The watchdog is the containment if this does not complete.
@@ -407,8 +408,6 @@ extern "C" fn rust_main() {
             (None, Some(p)) => Some(now_us() + p),
             (None, None) => None,
         };
-        // The watchdog counts in every sleep mode: never sleep past the next feed.
-        let until = wdt::cap_sleep(until, now_us());
         match until {
             None => {
                 let _ = WAKE.take(Forever);

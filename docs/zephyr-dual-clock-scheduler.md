@@ -324,8 +324,7 @@ time, not the delivery; the delivery's lateness, up to `CONFIG_CLOCK_EVENT_SCHED
 (beyond which the clock service reports it), is its jitter, and admission checks its own start
 that much earlier. `k_deadline_event_release_at()` lets the job choose its next release (a pulse
 schedule: any time at least a period after the last), which cannot fail. Without the clock
-service a kernel timeout stands in (a tick of jitter); with the announcing job on, a timed job
-needs a pool clock event.
+service a kernel timeout stands in (a tick of jitter).
 
 **Pause and resume.** `k_deadline_event_pause()` stops a timed job's releases and keeps its
 reservation: admission charges it at its declared rate as for an armed job, so nothing is
@@ -352,7 +351,66 @@ fail; an early resume is held to its period; a paused job's capacity is not give
 non-pausable job refuses a pause; a change applies at the next release; a changed period spaces
 from the last release; an infeasible change is refused with the old one charged; a reducing
 change passes; a non-pausable job cannot change into a pausable one; on the model, two timeouts
-100 us apart both expire within a tick and the announcing job's start-by.
+100 us apart both expire within a tick.
+
+### Jobs: every timed call belongs to the job that makes it
+
+`CONFIG_SCHED_DEADLINE_JOBS` (vendor/zephyr). The kernel tracks the job each thread runs: a
+deadline event's consumer is in a run from the wait that starts it until it waits again.
+`z_deadline_current_job()` is that job for the running thread, NULL for a thread with none, for
+an interrupt (Cortex-M entry saves the job, clears it, and restores it at exit, so a nested
+handler never inherits one) and before the scheduler starts. Every kernel timeout records the
+job that armed it (a thread's own timeout, its thread's job) and its expiry runs as that job. A
+timeout armed with no current job is an undeclared claim: recorded per thread and handler in
+`z_deadline_job_probe` (`CONFIG_SCHED_DEADLINE_JOBS_PROBE`), and with `CONFIG_SCHED_DEADLINE_JOBS_STRICT` reported as
+`K_DEADLINE_MISS_UNDECLARED` (object NULL) at the next resume point.
+
+**A sleep inside a run ends it; the wake is the next release** (default, pending user
+confirmation: "a timed wait mid-run is a new release"). The release time is the tick the
+timeout expired at, so the announcement's lateness counts against the job's start-by. The wake
+must fit the job's declaration: closer than its spacing it is `K_DEADLINE_MISS_OVERRUN`; a job
+with no reservation is `K_DEADLINE_MISS_UNDECLARED` (strict) and resumes unchecked; a start
+after the deadline is `K_DEADLINE_MISS_START`. A timed job's period restarts from that release.
+**Interim deviation, pending the resource model:** waits on kernel objects (mutexes,
+semaphores, queues, a device's completion) are resource waits and the run continues; only a
+sleep ends it. Ending the run at every such wait cut each pump pass at its first I2C or IADC
+completion and STATE contention (about 430 `K_DEADLINE_MISS_OVERRUN` per 120 s stimulating run).
+The resource model, under which a started job never blocks, removes those waits and with them
+this deviation.
+
+**No shared announcing thread.** Expiries are announced at the clock-event interrupt again;
+each callback is attributed to its job, so the line's cost per expiry is that job's. The
+announcing job of step 1 and its spacing floor are gone.
+
+**Essential threads may suspend themselves.** A deadline-event wait suspends its consumer; the
+main thread (essential) is the product's pump, so `z_thread_halt()` now panics only when an
+essential thread terminates, not when it suspends.
+
+Tests (deadline_jobs, native_sim and the BG22 model): a sleep in a job releases on time; a late
+wake is reported; a wake inside the declared spacing is reported; an undeclared blocking call in
+a job is reported; a timed call outside a job is reported naming the thread; the current job
+follows switches and is not inherited by an interrupt or a preempting thread; a timer started in
+a run expires as its job.
+
+**The product's jobs** (src/feed_job.c, src/lib.rs, src/wdt.rs). Defaults pending user confirmation:
+
+| Owner | Kind | Why |
+|---|---|---|
+| WDT feed (S10) | periodic, non-pausable; its own thread, cooperative above the pump | released by time alone, at its period; legal and safety containment |
+| Pump pass and pulse schedule | pending the pulse option (user) | a kernel-semaphore loop for now; its timed waits are undeclared |
+| sim_inject polling (simulation builds) | periodic | released by time alone |
+| Amateur identification (not in the product build) | periodic, non-pausable | released by time; legal requirement |
+| Amateur frame and release timers | armed | started by the identification event |
+| BT host threads | armed, one per thread (rx, tx processor, work queues, controller receive) | released by controller events, queued packets, work submissions, radio completions; not yet converted |
+
+
+The feed job's declaration: period half the time to the warning (23.4 ms), start-by a quarter
+(11.7 ms), budget 200 us; `owo_core::watchdog::feed_fits_window()` checks that period + jitter +
+start-by + run stays under the warning (46.9 ms) before it is declared and on every change
+(`wdt::change_feed()`). WDOG0's period and warning cannot change: CFG is written only with the
+watchdog disabled (`em_wdog.c` disables it first) and `src/watchdog.c` locks it after
+configuring; disabling it would remove the containment. Only the feed's timing changes, inside
+the fixed window.
 
 ### Dispatch: priority among the satisfying orders
 

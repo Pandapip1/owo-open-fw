@@ -57,7 +57,7 @@ endif()
 
 rust_cargo_application()
 
-target_sources(app PRIVATE src/serial.c)
+target_sources(app PRIVATE src/serial.c src/feed_job.c)
 
 if(CONFIG_PM)
   target_sources(app PRIVATE src/deep_sleep.c)
