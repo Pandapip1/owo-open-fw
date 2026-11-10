@@ -451,9 +451,13 @@ which measures lateness with the clocks that just failed.
 **Where it runs.** Re-anchoring (the BURTC and TIMER0 counts tied together at a BURTC edge) runs
 inline: in the BURTC expiry interrupt and in the power-management entry and exit hooks, as
 before; step 1 moved none of it. The checks run there and in the clock-event interrupt, plus
-one scheduler-clock client of the service's own (a check at least every interval while TIMER0
-runs, delivered by the BURTC so a stopped TIMER0 cannot hide), cancelled while only the BURTC
-runs (EM2). Their cost is part of the TIMER0 and BURTC lines' interrupt cost.
+two scheduler-clock clients of the service's own: while TIMER0 runs, a check at least every
+interval delivered by the BURTC alone and one delivered by TIMER0 alone, so that neither clock
+stopping can hide behind the other; both are cancelled while only the BURTC runs (EM2). Two
+paths that would otherwise wait on TIMER0 alone wait on both: a BURTC compare refused while an
+earlier write synchronizes keeps one armed as far out as the BURTC accepts it (TIMER0 stands in
+for the earlier one), and a wait closer than TIMER0's lead is timed by the BURTC too, a stall
+past it being a drift fault. Their cost is part of the TIMER0 and BURTC lines' interrupt cost.
 
 **The checks, each against the other clock, never against itself:**
 - *Drift.* While TIMER0 runs, over every interval of at least
@@ -480,8 +484,12 @@ in the handler with the output safe. Nothing in the shutdown depends on TIMER0 o
 **Fault tests** (`tests/clock-sync-qemu/run-clock-sync-qemu.sh`, the BG22 model's run-time clock
 faults on vendor/qemu `clock-faults`: `x-hf-ppm`, `x-timer0-stopped`, `x-lf-ppm`,
 `x-lf-stopped`, qtest `/efr32bg22/clock-fault-injection`): no fault, no report; the TIMERs'
-clock +2000 ppm, the BURTC's clock -2000 ppm and a stopped TIMER0 while awake, each a drift
-report; a stopped BURTC while sleeping, a capture report.
+clock +2000 ppm, the BURTC's clock -2000 ppm, a stopped TIMER0 and a stopped BURTC while
+awake, each a drift report; the BURTC stopped at the entry to EM2, a capture report. Each fault
+lands at a point fixed in the guest (with the model stopped, as a phase's start signal; or at a
+breakpoint on the PM entry hook), never by the model's speed. A BURTC stopped while awake also
+leaves its COMP write synchronizing, as on silicon: the next earlier compare is refused, EM2
+stays locked, and the TIMER0-delivered check reports the drift.
 
 ### Dispatch: priority among the satisfying orders
 
