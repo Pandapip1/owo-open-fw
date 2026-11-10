@@ -162,6 +162,14 @@ passes on the result):
   without it, the request fails (`-ETIME`, or a publication reported against its own event and
   not recorded: it neither releases its consumer nor joins a pending run). Admitted work is
   reported only when it is infeasible without the request.
+- G2 (kernel side), 6543e623fd5: interrupt line reservations, counted by admission and checked at
+  the Cortex-M interrupt entry (`CONFIG_SCHED_DEADLINE_IRQ_BUDGETS`, `_IRQ_STRICT`). The
+  product's lines are declared with the radio mapping and the drivers (below).
+- G1, ccdcb999682: `CONFIG_SCHED_DEADLINE_BUDGET_ENFORCE`. A run's own time (wall time less time
+  switched out and, with the interrupt checks, interrupt time) is checked against its budget by
+  one kernel timeout armed for the run being switched in; a run past its budget is reported once
+  as `K_DEADLINE_MISS_BUDGET`. Detection is at kernel tick granularity (30.5 us in the product).
+  The per-run time is also the measurement G4 needs: the ULL worker's own CPU time.
 
 ### G1 and G2 together
 
