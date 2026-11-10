@@ -118,6 +118,37 @@ job kinds: each owner's timeouts become the periodic or one-shot releases of its
 sleep is S10's period), and the host's (ATT, SMP, connection timers) are counted as one line
 declared from the shortest timer the host arms.
 
+**Measured lines of the product [Q]** (vendor/zephyr ea3a23f48c2, `CONFIG_SCHED_DEADLINE_IRQ_PROBE`;
+owo_suit with `sim/product-qemu.conf` against the product Central, 60 s of LE Secure Connections
+pairing and encrypted GATT; nested handlers excluded):
+
+| Line | Arrivals | Longest handler | Shortest gap |
+|---|---|---|---|
+| TIMER0 (scheduler clock events: system timer, radio launch, ticker) | 14826 | 71.6 us | 33.8 us |
+| BURTC (deep clock events) | 9033 | 29.5 us | 134.1 us |
+| FRC (`isr_radio`) | 3897 | 60.0 us | 42.1 us |
+| SW0 (LLL doorbell) | 3496 | 15.4 us | 30.9 us |
+| SW2 (worker doorbell) | 10763 | 16.1 us | 17.7 us |
+
+Why the QEMU profile still runs with radio admission off, by evidence: with it on, the first
+release refused is the completion job's, a 46.0 us window (ADV_IND completion) against 72.4 us of
+demand, which is the single blocking term, `CONFIG_SCHED_DEADLINE_ADMISSION_BLOCKING_NS`. The
+measured lines replace that term, but the TIMER0 line alone has a 71.6 us handler and a 33.8 us
+gap, so any line-based bound still puts one TIMER0 handler in that window: infeasible. The
+handler is long because the clock-event interrupt runs what it delivers: the system timer's
+`sys_clock_announce()` runs every expired kernel timeout's callback there (thread wake-ups,
+`k_timer` handlers, delayed-work submission), with the radio's launch and ticker callbacks.
+Admission-on therefore needs, in order:
+1. the clock-event line to serve only admitted releases: each expiry readies the job it serves
+   (its handler cost in that job's reservation, at a time admission knows), and the system
+   timer's kernel-timeout processing moved out of the interrupt into an admitted job;
+2. the kernel timeouts mapped onto job releases (above), so that job is bounded;
+3. then the radio's completions, staged replies and launches armed (their releases carry no
+   check), the doorbell and FRC costs in those reservations, the blocking term at the longest
+   masked section only, and the window derivations checked against the result. Silicon's
+   longest interrupt is 58.1 us, also above 46.6 us: the derivation of the ADV_IND completion's
+   window has to be re-examined on silicon as well, not only the model.
+
 ### Job kinds of the safeties
 
 The scheduler distinguishes one-shot, armed (sporadic) and periodic jobs
