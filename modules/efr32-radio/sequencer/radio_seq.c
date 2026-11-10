@@ -291,18 +291,29 @@ uint32_t efr32_seq_conn_decide(void)
 {
 	uintptr_t blk = stage_block();
 	uint32_t state;
+	uint32_t wait = EFR32_SEQ_RX2TX_DECISION_WAIT_US;
 
-	for (uint32_t wait = EFR32_SEQ_RX2TX_DECISION_WAIT_US;;) {
-		state = CONN(EFR32_SEQ_CONN_STATE);
-		if ((state & EFR32_SEQ_CONN_STAGED) != 0U) {
-			break;
-		}
-		efr32_seq_delay(1);
-		if (--wait == 0U) {
-			/* Not staged in time: nothing is sent; the M33 finds no outcome. */
-			efr32_seq_trace_count(EFR32_SEQ_TRACE_RX2TX_TIMEOUT_SLOT);
-			return 0;
-		}
+	/* Assembly: each pass's cycles are part of the wait's bound (the reply must start within
+	 * T_IFS), so the loop is radio_seq.S's, instruction for instruction (radio-tables.md 7.97). */
+	__asm__ volatile(".syntax unified\n"
+			 "1:  ldr %[state], [%[blk], #%c[off]]\n"
+			 "    movs r1, #%c[staged]\n"
+			 "    tst %[state], r1\n"
+			 "    bne 2f\n"
+			 "    movs r0, #1\n"
+			 "    bl efr32_seq_delay\n"
+			 "    subs %[wait], #1\n"
+			 "    bne 1b\n"
+			 "2:\n"
+			 ".syntax divided\n"
+			 : [state] "=&l"(state), [wait] "+l"(wait)
+			 : [blk] "l"(blk), [off] "i"(EFR32_SEQ_CONN_STATE),
+			   [staged] "i"(EFR32_SEQ_CONN_STAGED)
+			 : "r0", "r1", "r2", "r3", "lr", "cc", "memory");
+	if (wait == 0U) {
+		/* Not staged in time: nothing is sent; the M33 finds no outcome. */
+		efr32_seq_trace_count(EFR32_SEQ_TRACE_RX2TX_TIMEOUT_SLOT);
+		return 0;
 	}
 	uint32_t out = (state >> EFR32_SEQ_CONN_GENERATION_SHIFT) << EFR32_SEQ_CONN_GENERATION_SHIFT;
 
