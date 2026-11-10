@@ -210,7 +210,9 @@ if ! printf '%s\n' "$console" | grep -Fqx "$expected_callback"; then
     echo "radio-dual-e2e: expected: $expected_callback" >&2
     exit 1
 fi
-if printf '%s\n' "$console" | grep -E '^rx_callback:' | \
+# The run is stopped wherever the guest is, so its last console line may be cut
+# short; it is not judged.
+if printf '%s\n' "$console" | sed '$d' | grep -E '^rx_callback:' | \
     grep -Fvx "$expected_callback"; then
     echo "radio-dual-e2e: observed a callback with an unexpected payload marker" >&2
     exit 1

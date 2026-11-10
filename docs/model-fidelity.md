@@ -349,8 +349,8 @@ Status of each reference-manual chapter in the model after this pass.
 | 18 | LETIMER | yes (gaps) | RM, Si SS7.73 (gating) | DEBUGRUN, EM2/EM3 clocks; LFSYNC delay [I] |
 | 19 | TIMER | yes | Si SS7.71/7.73 | DTI, INSEL = PIN, quadrature, up/down count |
 | 20 | PDM | no | - | - |
-| 21 | USART | partial | RM | I2S, parity errors, TX sequencer delays, AUTOCS, secondary sync mode |
-| 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input |
+| 21 | USART | partial | RM | I2S, parity errors, TX sequencer delays, AUTOCS, secondary sync mode; RX/TX line split [P] (IF.RXFULL latching per RM since model-gaps4) |
+| 22 | EUART | yes (gaps) | RM | parity errors, IrDA, auto-baud, CTS/RTS, PRS RX input, LF-mode TXFL wake-up flag [P] (EM2: HF mode holds, model-gaps4) |
 | 23 | I2C | partial | RM | follower mode |
 | 24 | IADC | yes (gaps) | RM, Si SS7.89 timing | bipolar output, SCALEx calibration, tailgating; SUPPLY inputs from RM Table 24.3 (AVDD/IOVDD from the board's VDDX, DVDD 1.8 V under DCDC regulation, DECOUPLE by VSCALE; qtest iadc-supply-inputs) |
 | 25 | GPIO | yes | RM, DS 3.3 | EM4 wake; ports C/D input latch in EM2 [I] |
@@ -492,6 +492,54 @@ and the quadrature decoder; LETIMER DEBUGRUN; EUART0 parity errors, IrDA,
 auto-baud, flow control; LDMA as a bus manager and its own throughput on
 silicon; USART I2S and parity errors; I2C follower mode; EMU BOD, voltage
 monitors, DCDC beyond REGULATION; EM3/EM4 (EM2: radio-tables.md 7.95).
+
+## Model-gaps4 pass (2026-11-09)
+
+vendor/qemu branch `model4`.  qtests after the pass: `efr32bg22-test` 139,
+`efr32bg22-rf-test` 46, `efr32bg22-board-test` 8, `efr32bg22-dap-test` 13.
+
+1. **Simulator speed** (no guest-visible change; sim/README.md "Simulator
+   speed").  Profiled on the pairing e2e's dual machine: most host time went
+   to per-slice overhead of the 500 ns per-CPU-clock rounds, not to guest
+   code.  Two caches, each exact: `tcg_tb_lookup()` (the TB of a host
+   address, which every mid-TB device access looks up through
+   `cpu_io_recompile()`) caches hits per thread and drops them on any removal
+   from the TB trees; `qemu_clock_deadline_ns_all()` keeps the earliest
+   expiry per thread until any timer of the clock changes (a generation
+   bumped by every insertion, removal, list change and clock enable).  The
+   bus-error check reads the CMU registers only where a block needs them.
+   Result: 10.6 % fewer host instructions, 10-13 % less CPU time for the
+   same guest timeline; the radio trace and both consoles are byte-identical
+   to the previous build's.
+2. **EUART0 in EM2** (RM SS22.3.1): HF mode (EUARTCLK from EM01GRPACLK)
+   runs in EM0/EM1 only, LF mode (EM23GRPACLK) also in EM2.  The SoC reports
+   the EM01 group as stopped in EM2 and tells EUART0 when EM2 starts and
+   ends; a frame on the wire, a TXDELAY wait or an LFSYNC write in flight
+   holds and finishes after the wake-up [I: the RM does not say what an
+   interrupted frame does].  LF mode runs on, and its interrupts wake the
+   part through the NVIC.  qtest `euart-em2-hf-mode-holds`.  [P] The LF mode
+   TXFL wake-up flag (set only after a FIFO read frees TXFIW + 1, SS22.3.7).
+3. **USART IF level flags** (RM SS21.3.2.8-9): TXBL and RXDATAV follow
+   their buffers ("cleared automatically"), but the RXFULL *interrupt* flag
+   "must be cleared by software"; the model had made it a level flag too.
+   It now sets as the buffer becomes full and latches.  qtest
+   `usart-rxfull-if-latches`.  Still [P]: which flags drive the RX and which
+   the TX interrupt line (the RM names only the two vectors), and whether a
+   software clear of TXBL/RXDATAV while the condition holds is undone at
+   once.  USART synchronous main mode and the USART timer (Zephyr's async
+   API) were already modelled; secondary mode, AUTOCS, I2S and TIMING remain
+   unmodelled (no product use).
+4. **Cross-core contention, open.**  Model3 charges the M0+ for the M33's
+   SRAM *data* traffic (the six SS7.74 flash-resident rows within 1-2 %).  Two
+   effects are not modelled and the existing measurements do not separate
+   them: an SRAM-resident M33's instruction fetches (the SS7.74 rows with the
+   M33 code in SRAM are 10-20 % short in the model), and the M0+'s traffic
+   slowing the M33.  Needed on silicon: (a) the SS7.74 M0+ kernels against
+   an M33 spinning on a fetch-only loop in SRAM (no data access), at two
+   loop lengths, to get the per-fetch cost; (b) the cpu-timing-port M33
+   kernels with the M0+ released into a SEQRAM-only and then an SRAM-only
+   loop, against the same kernels with the M0+ held, to get the M33's
+   slow-down per M0+ access.
 
 ## Tables
 
